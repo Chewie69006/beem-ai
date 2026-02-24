@@ -187,15 +187,19 @@ class BeemApiClient:
 
         Returns True when the API accepted the command (or the command
         was deduplicated), False otherwise.
+
+        Note: minSoc/maxSoc are only valid in "advanced" mode — the API
+        returns 400 if they are included with mode="auto".
         """
-        params = {
+        params: dict = {
             "mode": mode,
             "allowChargeFromGrid": allow_grid_charge,
             "preventDischarge": prevent_discharge,
-            "minSoc": min_soc,
-            "maxSoc": max_soc,
             "chargeFromGridMaxPower": charge_power,
         }
+        if mode == "advanced":
+            params["minSoc"] = min_soc
+            params["maxSoc"] = max_soc
 
         # Deduplication — skip if nothing changed.
         if self._last_sent_params == params:

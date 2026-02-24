@@ -198,8 +198,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
             Event.BATTERY_DATA_UPDATED, self._on_battery_update
         )
 
-        # Start MQTT
-        await self._mqtt_client.connect()
+        # Start MQTT (connect() is synchronous — it creates a background task)
+        self._mqtt_client.connect()
 
         # Schedule recurring tasks
         self._schedule_tasks()
@@ -416,18 +416,22 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     async def async_set_enabled(self, enabled: bool) -> None:
         """Toggle the system on/off."""
+        dry_run = self._entry.options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
         self.state_store.enabled = enabled
         if enabled:
             self._event_bus.publish(Event.SYSTEM_ENABLED)
             _LOGGER.info("BeemAI enabled by user")
         else:
             self._event_bus.publish(Event.SYSTEM_DISABLED)
-            _LOGGER.info("BeemAI disabled — setting battery to auto mode")
-            try:
-                if self._api_client:
-                    await self._api_client.set_auto_mode()
-            except Exception:
-                _LOGGER.exception("Failed to set auto mode on disable")
+            if dry_run:
+                _LOGGER.warning("BeemAI disabled [DRY RUN] — would set battery to auto mode")
+            else:
+                _LOGGER.info("BeemAI disabled — setting battery to auto mode")
+                try:
+                    if self._api_client:
+                        await self._api_client.set_auto_mode()
+                except Exception:
+                    _LOGGER.exception("Failed to set auto mode on disable")
 
     # ---- Shutdown ----
 

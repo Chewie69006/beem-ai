@@ -152,8 +152,8 @@ class TestGetMqttToken:
 
 class TestSetControlParams:
     @pytest.mark.asyncio
-    async def test_sends_correct_patch_body(self, api_client):
-        """PATCH includes all expected control fields."""
+    async def test_advanced_mode_includes_soc_fields(self, api_client):
+        """Advanced mode PATCH includes minSoc and maxSoc."""
         api_client._access_token = "tok-abc"
 
         mock_resp = _mock_response()
@@ -178,6 +178,21 @@ class TestSetControlParams:
         assert body["minSoc"] == 30
         assert body["maxSoc"] == 90
         assert body["chargeFromGridMaxPower"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_omits_soc_fields(self, api_client):
+        """Auto mode PATCH must NOT include minSoc/maxSoc (API returns 400 otherwise)."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response()
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        await api_client.set_control_params(mode="auto")
+
+        body = api_client._session.request.call_args[1]["json"]
+        assert body["mode"] == "auto"
+        assert "minSoc" not in body
+        assert "maxSoc" not in body
 
     @pytest.mark.asyncio
     async def test_deduplication_skips_unchanged_params(self, api_client):
