@@ -92,11 +92,11 @@ class BeemAIOptionsFlow(OptionsFlow):
                 vol.Required(
                     OPT_MIN_SOC_SUMMER,
                     default=current.get(OPT_MIN_SOC_SUMMER, DEFAULT_MIN_SOC_SUMMER),
-                ): vol.All(int, vol.Range(min=0, max=100)),
+                ): vol.All(int, vol.Any(0, vol.Range(min=30, max=100))),
                 vol.Required(
                     OPT_MIN_SOC_WINTER,
                     default=current.get(OPT_MIN_SOC_WINTER, DEFAULT_MIN_SOC_WINTER),
-                ): vol.All(int, vol.Range(min=0, max=100)),
+                ): vol.All(int, vol.Any(0, vol.Range(min=30, max=100))),
                 vol.Optional(
                     OPT_WATER_HEATER_SWITCH,
                     default=current.get(OPT_WATER_HEATER_SWITCH, ""),
