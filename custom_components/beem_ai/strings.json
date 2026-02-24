@@ -40,7 +40,8 @@
           "water_heater_switch_entity": "Water heater switch entity",
           "water_heater_power_entity": "Water heater power sensor entity",
           "water_heater_power_w": "Water heater power (W)",
-          "panel_count": "Number of solar panel arrays"
+          "panel_count": "Number of solar panel arrays",
+          "dry_run": "Dry-run mode (log actions, don't execute them)"
         },
         "data_description": {
           "location_lat": "Latitude of your installation.",
@@ -55,7 +56,8 @@
           "water_heater_switch_entity": "Entity ID of the water heater switch (optional).",
           "water_heater_power_entity": "Entity ID of the water heater power sensor (optional).",
           "water_heater_power_w": "Nominal power consumption of the water heater in watts.",
-          "panel_count": "Number of distinct solar panel arrays (orientations)."
+          "panel_count": "Number of distinct solar panel arrays (orientations).",
+          "dry_run": "When enabled, all battery and water heater commands are logged but not sent. Useful for verifying decisions before going live."
         }
       },
       "panels": {

@@ -22,6 +22,7 @@ from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     DEFAULT_API_BASE,
+    DEFAULT_DRY_RUN,
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
     DEFAULT_PANEL_COUNT,
@@ -30,6 +31,7 @@ from .const import (
     DEFAULT_TARIFF_HSC,
     DEFAULT_WATER_HEATER_POWER_W,
     DOMAIN,
+    OPT_DRY_RUN,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
     OPT_MIN_SOC_SUMMER,
@@ -163,6 +165,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._forecast_tracker = ForecastTracker(data_dir=data_dir)
         self._forecast_tracker.load()
 
+        dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
+        if dry_run:
+            _LOGGER.warning("BeemAI dry-run mode is ENABLED — commands will be logged only")
+
         # Optimization engine
         self._optimizer = OptimizationEngine(
             hass=self.hass,
@@ -173,6 +179,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             safety=self._safety,
             data_dir=data_dir,
         )
+        self._optimizer._dry_run = dry_run
 
         # Water heater
         self._water_heater = WaterHeaterController(
@@ -183,6 +190,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             switch_entity=options.get(OPT_WATER_HEATER_SWITCH, ""),
             power_entity=options.get(OPT_WATER_HEATER_POWER_ENTITY, ""),
             heater_power_w=options.get(OPT_WATER_HEATER_POWER_W, DEFAULT_WATER_HEATER_POWER_W),
+            dry_run=dry_run,
         )
 
         # Wire events
@@ -386,6 +394,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         config = dict(options)
         config["panel_arrays"] = self._build_panel_arrays(options)
+
+        dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
+        if dry_run:
+            _LOGGER.warning("BeemAI dry-run mode is ENABLED — commands will be logged only")
 
         if self._tariff:
             self._tariff.reconfigure(config)

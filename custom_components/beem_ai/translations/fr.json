@@ -40,7 +40,8 @@
           "water_heater_switch_entity": "Entite interrupteur du chauffe-eau",
           "water_heater_power_entity": "Entite capteur de puissance du chauffe-eau",
           "water_heater_power_w": "Puissance du chauffe-eau (W)",
-          "panel_count": "Nombre de groupes de panneaux solaires"
+          "panel_count": "Nombre de groupes de panneaux solaires",
+          "dry_run": "Mode simulation (journalise les actions sans les executer)"
         },
         "data_description": {
           "location_lat": "Latitude de votre installation.",
@@ -55,7 +56,8 @@
           "water_heater_switch_entity": "Identifiant de l'entite interrupteur du chauffe-eau (optionnel).",
           "water_heater_power_entity": "Identifiant de l'entite capteur de puissance du chauffe-eau (optionnel).",
           "water_heater_power_w": "Puissance nominale du chauffe-eau en watts.",
-          "panel_count": "Nombre de groupes de panneaux solaires distincts (orientations)."
+          "panel_count": "Nombre de groupes de panneaux solaires distincts (orientations).",
+          "dry_run": "Si active, toutes les commandes batterie et chauffe-eau sont journalisees sans etre envoyees. Utile pour valider les decisions avant la mise en production."
         }
       },
       "panels": {

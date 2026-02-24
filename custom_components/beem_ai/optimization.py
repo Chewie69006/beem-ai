@@ -44,14 +44,18 @@ class OptimizationEngine:
         self._cumulative_solar_actual_wh = 0.0
         self._cumulative_solar_forecast_wh = 0.0
         self._last_intraday_hour = -1
+        self._dry_run: bool = False
 
         # Instance vars for phase callbacks (async_call_later cannot pass kwargs)
         self._hc_charge_needed: bool = False
         self._hc_charge_power: int = 0
 
     def reconfigure(self, config: dict) -> None:
-        """Update configuration from ConfigManager."""
-        log.info("OptimizationEngine reconfigured")
+        """Update configuration from options."""
+        dry_run = config.get("dry_run")
+        if dry_run is not None:
+            self._dry_run = bool(dry_run)
+        log.info("OptimizationEngine reconfigured: dry_run=%s", self._dry_run)
 
     # ---- Evening optimization (21:00) ----
 
@@ -350,6 +354,13 @@ class OptimizationEngine:
         min_soc: int, max_soc: int, charge_power: int
     ):
         """Send control command to battery via REST API client."""
+        if self._dry_run:
+            log.warning(
+                "[DRY RUN] would set battery control: prevent_discharge=%s "
+                "allow_grid_charge=%s min_soc=%d max_soc=%d charge_power=%d W",
+                prevent_discharge, allow_grid_charge, min_soc, max_soc, charge_power,
+            )
+            return
         await self._api_client.set_control_params(
             mode="advanced",
             allow_grid_charge=allow_grid_charge,

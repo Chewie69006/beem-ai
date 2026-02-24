@@ -17,7 +17,9 @@ from .const import (
     DEFAULT_TARIFF_HC,
     DEFAULT_TARIFF_HP,
     DEFAULT_TARIFF_HSC,
+    DEFAULT_DRY_RUN,
     DEFAULT_WATER_HEATER_POWER_W,
+    OPT_DRY_RUN,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
     OPT_MIN_SOC_SUMMER,
@@ -112,6 +114,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_PANEL_COUNT,
                     default=current.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT),
                 ): vol.All(int, vol.Range(min=1, max=6)),
+                vol.Optional(
+                    OPT_DRY_RUN,
+                    default=current.get(OPT_DRY_RUN, DEFAULT_DRY_RUN),
+                ): bool,
             }
         )
 
