@@ -121,7 +121,7 @@ class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
         self, access_token: str, user_id: str
     ) -> tuple[str, str]:
         """Fetch the first battery and return (battery_id, serial_number)."""
-        url = f"{DEFAULT_API_BASE}/users/{user_id}/batteries"
+        url = f"{DEFAULT_API_BASE}/devices"
         headers = {"Authorization": f"Bearer {access_token}"}
 
         try:
@@ -133,10 +133,11 @@ class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.error("Cannot fetch batteries: %s", err)
             raise CannotConnect from err
 
-        if not data:
+        batteries = data.get("batteries") if isinstance(data, dict) else data
+        if not batteries:
             raise NoDevicesFound
 
-        battery = data[0]
+        battery = batteries[0]
         battery_id = battery.get("id")
         battery_serial = battery.get("serialNumber")
 

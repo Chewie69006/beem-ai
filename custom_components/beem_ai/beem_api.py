@@ -149,8 +149,11 @@ class BeemApiClient:
         url = f"{self._api_base}/devices/mqtt/token"
         log.info("REST: requesting MQTT token from %s", url)
 
+        client_id = f"beemai-{str(self._user_id)}"
+        payload = {"clientId": client_id, "clientType": "user"}
+
         try:
-            resp = await self._request("POST", url)
+            resp = await self._request("POST", url, json=payload)
         except _RateLimited:
             log.warning("REST: rate-limited — cannot fetch MQTT token")
             return None
@@ -159,12 +162,12 @@ class BeemApiClient:
             return None
 
         data = await resp.json()
-        token = data.get("token")
+        token = data.get("jwt")
         if not token:
-            log.error("REST: MQTT token response missing 'token' field")
+            log.error("REST: MQTT token response missing 'jwt' field")
             return None
 
-        log.info("REST: MQTT token obtained")
+        log.info("REST: MQTT token obtained (clientId=%s)", client_id)
         return token
 
     # ------------------------------------------------------------------

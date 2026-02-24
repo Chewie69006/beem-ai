@@ -13,7 +13,7 @@ CONF_BATTERY_SERIAL = "battery_serial"
 CONF_USER_ID = "user_id"
 CONF_API_BASE = "api_base"
 
-DEFAULT_API_BASE = "https://api.beem.energy/v1"
+DEFAULT_API_BASE = "https://api-x.beem.energy/beemapp"
 
 # --- Options keys ---
 OPT_LOCATION_LAT = "location_lat"

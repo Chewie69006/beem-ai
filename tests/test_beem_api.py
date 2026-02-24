@@ -118,13 +118,18 @@ class TestGetMqttToken:
     async def test_success_returns_token(self, api_client):
         """Valid response returns the MQTT JWT token."""
         api_client._access_token = "tok-abc"
+        api_client._user_id = "uid-42"
 
-        mock_resp = _mock_response(json_data={"token": "mqtt-jwt-xyz"})
+        mock_resp = _mock_response(json_data={"jwt": "mqtt-jwt-xyz"})
         api_client._session.request = AsyncMock(return_value=mock_resp)
 
         token = await api_client.get_mqtt_token()
 
         assert token == "mqtt-jwt-xyz"
+        # Verify correct body was sent.
+        body = api_client._session.request.call_args[1]["json"]
+        assert body["clientId"] == "beemai-uid-42"
+        assert body["clientType"] == "user"
 
     @pytest.mark.asyncio
     async def test_rate_limited_returns_none(self, api_client):
