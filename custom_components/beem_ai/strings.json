@@ -1,0 +1,87 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Beem Energy",
+        "description": "Enter your Beem Energy account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        },
+        "data_description": {
+          "email": "The email address used for your Beem Energy account.",
+          "password": "Your Beem Energy account password."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Unable to connect to Beem Energy. Please check your network.",
+      "no_devices_found": "No Beem batteries found on this account."
+    },
+    "abort": {
+      "already_configured": "This Beem Energy account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BeemAI Settings",
+        "data": {
+          "location_lat": "Latitude",
+          "location_lon": "Longitude",
+          "solcast_api_key": "Solcast API Key",
+          "solcast_site_id": "Solcast Site ID",
+          "tariff_hp_price": "Peak tariff price (EUR/kWh)",
+          "tariff_hc_price": "Off-peak tariff price (EUR/kWh)",
+          "tariff_hsc_price": "Super off-peak tariff price (EUR/kWh)",
+          "min_soc_summer": "Minimum SoC in summer (%)",
+          "min_soc_winter": "Minimum SoC in winter (%)",
+          "water_heater_switch_entity": "Water heater switch entity",
+          "water_heater_power_entity": "Water heater power sensor entity",
+          "water_heater_power_w": "Water heater power (W)",
+          "panel_count": "Number of solar panel arrays"
+        },
+        "data_description": {
+          "location_lat": "Latitude of your installation.",
+          "location_lon": "Longitude of your installation.",
+          "solcast_api_key": "API key for Solcast solar forecasting (optional).",
+          "solcast_site_id": "Solcast site identifier (optional).",
+          "tariff_hp_price": "Electricity price during peak hours in EUR/kWh.",
+          "tariff_hc_price": "Electricity price during off-peak hours in EUR/kWh.",
+          "tariff_hsc_price": "Electricity price during super off-peak hours in EUR/kWh.",
+          "min_soc_summer": "Minimum battery state of charge to maintain in summer.",
+          "min_soc_winter": "Minimum battery state of charge to maintain in winter.",
+          "water_heater_switch_entity": "Entity ID of the water heater switch (optional).",
+          "water_heater_power_entity": "Entity ID of the water heater power sensor (optional).",
+          "water_heater_power_w": "Nominal power consumption of the water heater in watts.",
+          "panel_count": "Number of distinct solar panel arrays (orientations)."
+        }
+      },
+      "panels": {
+        "title": "Solar Panel Arrays",
+        "description": "Configure tilt, azimuth, and peak power for each panel array.",
+        "data": {
+          "panel_1_tilt": "Panel 1 tilt (degrees)",
+          "panel_1_azimuth": "Panel 1 azimuth (degrees)",
+          "panel_1_kwp": "Panel 1 peak power (kWp)",
+          "panel_2_tilt": "Panel 2 tilt (degrees)",
+          "panel_2_azimuth": "Panel 2 azimuth (degrees)",
+          "panel_2_kwp": "Panel 2 peak power (kWp)",
+          "panel_3_tilt": "Panel 3 tilt (degrees)",
+          "panel_3_azimuth": "Panel 3 azimuth (degrees)",
+          "panel_3_kwp": "Panel 3 peak power (kWp)",
+          "panel_4_tilt": "Panel 4 tilt (degrees)",
+          "panel_4_azimuth": "Panel 4 azimuth (degrees)",
+          "panel_4_kwp": "Panel 4 peak power (kWp)",
+          "panel_5_tilt": "Panel 5 tilt (degrees)",
+          "panel_5_azimuth": "Panel 5 azimuth (degrees)",
+          "panel_5_kwp": "Panel 5 peak power (kWp)",
+          "panel_6_tilt": "Panel 6 tilt (degrees)",
+          "panel_6_azimuth": "Panel 6 azimuth (degrees)",
+          "panel_6_kwp": "Panel 6 peak power (kWp)"
+        }
+      }
+    }
+  }
+}

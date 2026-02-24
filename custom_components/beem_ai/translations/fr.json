@@ -1,0 +1,87 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connexion a Beem Energy",
+        "description": "Entrez vos identifiants de compte Beem Energy.",
+        "data": {
+          "email": "Adresse e-mail",
+          "password": "Mot de passe"
+        },
+        "data_description": {
+          "email": "L'adresse e-mail utilisee pour votre compte Beem Energy.",
+          "password": "Le mot de passe de votre compte Beem Energy."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Adresse e-mail ou mot de passe invalide.",
+      "cannot_connect": "Impossible de se connecter a Beem Energy. Verifiez votre connexion reseau.",
+      "no_devices_found": "Aucune batterie Beem trouvee sur ce compte."
+    },
+    "abort": {
+      "already_configured": "Ce compte Beem Energy est deja configure."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Parametres BeemAI",
+        "data": {
+          "location_lat": "Latitude",
+          "location_lon": "Longitude",
+          "solcast_api_key": "Cle API Solcast",
+          "solcast_site_id": "Identifiant de site Solcast",
+          "tariff_hp_price": "Tarif heures pleines (EUR/kWh)",
+          "tariff_hc_price": "Tarif heures creuses (EUR/kWh)",
+          "tariff_hsc_price": "Tarif super heures creuses (EUR/kWh)",
+          "min_soc_summer": "SoC minimum en ete (%)",
+          "min_soc_winter": "SoC minimum en hiver (%)",
+          "water_heater_switch_entity": "Entite interrupteur du chauffe-eau",
+          "water_heater_power_entity": "Entite capteur de puissance du chauffe-eau",
+          "water_heater_power_w": "Puissance du chauffe-eau (W)",
+          "panel_count": "Nombre de groupes de panneaux solaires"
+        },
+        "data_description": {
+          "location_lat": "Latitude de votre installation.",
+          "location_lon": "Longitude de votre installation.",
+          "solcast_api_key": "Cle API pour les previsions solaires Solcast (optionnel).",
+          "solcast_site_id": "Identifiant de site Solcast (optionnel).",
+          "tariff_hp_price": "Prix de l'electricite en heures pleines en EUR/kWh.",
+          "tariff_hc_price": "Prix de l'electricite en heures creuses en EUR/kWh.",
+          "tariff_hsc_price": "Prix de l'electricite en super heures creuses en EUR/kWh.",
+          "min_soc_summer": "Etat de charge minimum de la batterie a maintenir en ete.",
+          "min_soc_winter": "Etat de charge minimum de la batterie a maintenir en hiver.",
+          "water_heater_switch_entity": "Identifiant de l'entite interrupteur du chauffe-eau (optionnel).",
+          "water_heater_power_entity": "Identifiant de l'entite capteur de puissance du chauffe-eau (optionnel).",
+          "water_heater_power_w": "Puissance nominale du chauffe-eau en watts.",
+          "panel_count": "Nombre de groupes de panneaux solaires distincts (orientations)."
+        }
+      },
+      "panels": {
+        "title": "Groupes de panneaux solaires",
+        "description": "Configurez l'inclinaison, l'azimut et la puissance crete de chaque groupe de panneaux.",
+        "data": {
+          "panel_1_tilt": "Panneau 1 inclinaison (degres)",
+          "panel_1_azimuth": "Panneau 1 azimut (degres)",
+          "panel_1_kwp": "Panneau 1 puissance crete (kWc)",
+          "panel_2_tilt": "Panneau 2 inclinaison (degres)",
+          "panel_2_azimuth": "Panneau 2 azimut (degres)",
+          "panel_2_kwp": "Panneau 2 puissance crete (kWc)",
+          "panel_3_tilt": "Panneau 3 inclinaison (degres)",
+          "panel_3_azimuth": "Panneau 3 azimut (degres)",
+          "panel_3_kwp": "Panneau 3 puissance crete (kWc)",
+          "panel_4_tilt": "Panneau 4 inclinaison (degres)",
+          "panel_4_azimuth": "Panneau 4 azimut (degres)",
+          "panel_4_kwp": "Panneau 4 puissance crete (kWc)",
+          "panel_5_tilt": "Panneau 5 inclinaison (degres)",
+          "panel_5_azimuth": "Panneau 5 azimut (degres)",
+          "panel_5_kwp": "Panneau 5 puissance crete (kWc)",
+          "panel_6_tilt": "Panneau 6 inclinaison (degres)",
+          "panel_6_azimuth": "Panneau 6 azimut (degres)",
+          "panel_6_kwp": "Panneau 6 puissance crete (kWc)"
+        }
+      }
+    }
+  }
+}
