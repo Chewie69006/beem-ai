@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Optional
 
 import aiomqtt
@@ -63,7 +64,7 @@ class BeemMqttClient:
         self._state_store = state_store
         self._event_bus = event_bus
 
-        self._topic = f"battery/{battery_serial}/sys/streaming"
+        self._topic = f"battery/{battery_serial.upper()}/sys/streaming"
 
         # Main loop task.
         self._loop_task: Optional[asyncio.Task] = None
@@ -117,6 +118,7 @@ class BeemMqttClient:
             if self._loop_task is not None and not self._loop_task.done():
                 self._loop_task.cancel()
             self._stop_event.clear()
+            self._topic = f"battery/{new_serial.upper()}/sys/streaming"
             self._loop_task = asyncio.create_task(self._run_loop())
 
     # ------------------------------------------------------------------
@@ -128,10 +130,19 @@ class BeemMqttClient:
         while not self._stop_event.is_set():
             try:
                 user_id = self._api_client.user_id
-                mqtt_token = await self._api_client.get_mqtt_token()
+                if not user_id:
+                    log.error("MQTT: no user_id available, retrying in %ds", self._backoff)
+                    await asyncio.sleep(self._backoff)
+                    self._backoff = min(self._backoff * 2, RECONNECT_MAX_SECONDS)
+                    continue
 
-                if not user_id or not mqtt_token:
-                    log.error("MQTT: missing credentials, retrying in %ds", self._backoff)
+                # clientId must match between the token request and the MQTT
+                # connection — iOS format: beemapp-{userId}-{timestamp_ms}
+                client_id = f"beemapp-{user_id}-{int(time.time() * 1000)}"
+                mqtt_token = await self._api_client.get_mqtt_token(client_id)
+
+                if not mqtt_token:
+                    log.error("MQTT: failed to obtain token, retrying in %ds", self._backoff)
                     await asyncio.sleep(self._backoff)
                     self._backoff = min(self._backoff * 2, RECONNECT_MAX_SECONDS)
                     continue
@@ -141,11 +152,11 @@ class BeemMqttClient:
                     port=MQTT_PORT,
                     transport="websockets",
                     websocket_path=MQTT_PATH,
-                    username=user_id,
+                    username="unused",
                     password=mqtt_token,
                     tls_params=aiomqtt.TLSParameters(),
                     keepalive=60,
-                    identifier=f"beemai-{user_id[:8]}",
+                    identifier=client_id,
                 ) as client:
                     self._state_store.mqtt_connected = True
                     self._backoff = RECONNECT_MIN_SECONDS

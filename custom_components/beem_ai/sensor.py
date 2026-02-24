@@ -170,26 +170,7 @@ async def async_setup_entry(
         ),
     ]
 
-    binary_sensors: list[BinarySensorEntity] = [
-        BeemAIBinarySensor(
-            coordinator, entry,
-            key="mqtt_connected",
-            name="MQTT Connected",
-            icon="mdi:wifi",
-            device_class=BinarySensorDeviceClass.CONNECTIVITY,
-            value_fn=lambda c: c.state_store.mqtt_connected,
-        ),
-        BeemAIBinarySensor(
-            coordinator, entry,
-            key="grid_charging_recommended",
-            name="Grid Charging Recommended",
-            icon="mdi:battery-charging-wireless",
-            device_class=None,
-            value_fn=lambda c: c.state_store.plan.allow_grid_charge,
-        ),
-    ]
-
-    async_add_entities(sensors + binary_sensors)
+    async_add_entities(sensors)
 
 
 class BeemAISensor(CoordinatorEntity, SensorEntity):

@@ -141,15 +141,17 @@ class BeemApiClient:
     # MQTT token
     # ------------------------------------------------------------------
 
-    async def get_mqtt_token(self) -> Optional[str]:
+    async def get_mqtt_token(self, client_id: str) -> Optional[str]:
         """Obtain a JWT token for MQTT broker authentication.
 
-        Returns the token string or None on failure.
+        ``client_id`` must match the identifier used when connecting to the
+        MQTT broker.  The iOS app uses: ``beemapp-{userId}-{timestamp_ms}``.
+
+        Returns the JWT token string or None on failure.
         """
         url = f"{self._api_base}/devices/mqtt/token"
-        log.info("REST: requesting MQTT token from %s", url)
+        log.info("REST: requesting MQTT token (clientId=%s)", client_id)
 
-        client_id = f"beemai-{str(self._user_id)}"
         payload = {"clientId": client_id, "clientType": "user"}
 
         try:
@@ -164,10 +166,10 @@ class BeemApiClient:
         data = await resp.json()
         token = data.get("jwt")
         if not token:
-            log.error("REST: MQTT token response missing 'jwt' field")
+            log.error("REST: MQTT token response missing 'jwt' field: %s", data)
             return None
 
-        log.info("REST: MQTT token obtained (clientId=%s)", client_id)
+        log.info("REST: MQTT token obtained")
         return token
 
     # ------------------------------------------------------------------

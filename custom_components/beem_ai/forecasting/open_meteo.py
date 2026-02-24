@@ -89,7 +89,20 @@ class OpenMeteoSource:
     # ------------------------------------------------------------------
 
     async def _fetch_for_array(self, tilt: float, azimuth: float, kwp: float) -> dict:
-        """Fetch GTI forecast for a single panel array."""
+        """Fetch GTI forecast for a single panel array.
+
+        Open-Meteo azimuth convention: 0=South, 90=West, -90=East (-180..180).
+        User-configured azimuth may be a compass bearing (0=North, 180=South,
+        270=West).  Convert automatically when the value is outside -180..180.
+        """
+        if azimuth > 180 or azimuth < -180:
+            # Compass bearing → Open-Meteo: subtract 180, then wrap to -180..180
+            azimuth = azimuth - 180
+            if azimuth > 180:
+                azimuth -= 360
+            elif azimuth < -180:
+                azimuth += 360
+
         try:
             async with self._session.get(
                 "https://api.open-meteo.com/v1/forecast",
