@@ -58,11 +58,13 @@ class BeemMqttClient:
         battery_serial: str,
         state_store: StateStore,
         event_bus: EventBus,
+        dry_run: bool = False,
     ):
         self._api_client = api_client
         self._battery_serial = battery_serial
         self._state_store = state_store
         self._event_bus = event_bus
+        self._dry_run = dry_run
 
         self._topic = f"battery/{battery_serial.upper()}/sys/streaming"
 
@@ -262,6 +264,10 @@ class BeemMqttClient:
             Event.SAFETY_ALERT,
             {"reason": "mqtt_disconnect_timeout"},
         )
+
+        if self._dry_run:
+            log.warning("MQTT watchdog [DRY RUN] — would set battery to auto mode")
+            return
 
         try:
             await self._api_client.set_auto_mode()

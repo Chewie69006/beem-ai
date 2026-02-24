@@ -99,6 +99,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._optimizer: OptimizationEngine | None = None
         self._water_heater: WaterHeaterController | None = None
 
+        # Dry-run flag (cached so it's accessible in shutdown without options)
+        self._dry_run: bool = False
+
         # Schedule handles
         self._evening_unsub = None
         self._daily_reset_unsub = None
@@ -133,6 +136,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             battery_serial=data[CONF_BATTERY_SERIAL],
             state_store=self.state_store,
             event_bus=self._event_bus,
+            dry_run=self._dry_run,
         )
 
         # Tariff manager
@@ -165,8 +169,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._forecast_tracker = ForecastTracker(data_dir=data_dir)
         self._forecast_tracker.load()
 
-        dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
-        if dry_run:
+        self._dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
+        if self._dry_run:
             _LOGGER.warning("BeemAI dry-run mode is ENABLED — commands will be logged only")
 
         # Optimization engine
@@ -179,7 +183,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             safety=self._safety,
             data_dir=data_dir,
         )
-        self._optimizer._dry_run = dry_run
+        self._optimizer._dry_run = self._dry_run
 
         # Water heater
         self._water_heater = WaterHeaterController(
@@ -190,7 +194,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             switch_entity=options.get(OPT_WATER_HEATER_SWITCH, ""),
             power_entity=options.get(OPT_WATER_HEATER_POWER_ENTITY, ""),
             heater_power_w=options.get(OPT_WATER_HEATER_POWER_W, DEFAULT_WATER_HEATER_POWER_W),
-            dry_run=dry_run,
+            dry_run=self._dry_run,
         )
 
         # Wire events
@@ -395,8 +399,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         config = dict(options)
         config["panel_arrays"] = self._build_panel_arrays(options)
 
-        dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
-        if dry_run:
+        self._dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
+        if self._dry_run:
             _LOGGER.warning("BeemAI dry-run mode is ENABLED — commands will be logged only")
 
         if self._tariff:
@@ -407,6 +411,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._optimizer.reconfigure(config)
         if self._water_heater:
             self._water_heater.reconfigure(config)
+        if self._mqtt_client:
+            self._mqtt_client._dry_run = self._dry_run
 
         # Rebuild forecast sources with new config
         if self._forecast:
@@ -459,12 +465,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._forecast_tracker:
             self._forecast_tracker.save()
 
-        # Set auto mode for safety
+        # Set auto mode for safety (skipped in dry-run mode)
         if self._api_client:
-            try:
-                await self._api_client.set_auto_mode()
-            except Exception:
-                _LOGGER.exception("Failed to set auto mode during shutdown")
+            if self._dry_run:
+                _LOGGER.warning("BeemAI shutdown [DRY RUN] — would set battery to auto mode")
+            else:
+                try:
+                    await self._api_client.set_auto_mode()
+                except Exception:
+                    _LOGGER.exception("Failed to set auto mode during shutdown")
             await self._api_client.shutdown()
 
         # Close HTTP session
