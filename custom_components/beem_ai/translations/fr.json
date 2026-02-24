@@ -24,6 +24,9 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_min_soc": "Doit etre 0 (desactive) ou compris entre 30 et 100."
+    },
     "step": {
       "init": {
         "title": "Parametres BeemAI",

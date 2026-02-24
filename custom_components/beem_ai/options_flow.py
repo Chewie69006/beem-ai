@@ -52,10 +52,19 @@ class BeemAIOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """First step — general settings."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self._panel_count = user_input.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
-            self._options = user_input
-            return await self.async_step_panels()
+            # Validate min SoC: must be 0 (disabled) or in [30, 100]
+            for key in (OPT_MIN_SOC_SUMMER, OPT_MIN_SOC_WINTER):
+                v = user_input.get(key, 0)
+                if v != 0 and not (30 <= v <= 100):
+                    errors[key] = "invalid_min_soc"
+
+            if not errors:
+                self._panel_count = user_input.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
+                self._options = user_input
+                return await self.async_step_panels()
 
         current = self.config_entry.options
 
@@ -92,11 +101,11 @@ class BeemAIOptionsFlow(OptionsFlow):
                 vol.Required(
                     OPT_MIN_SOC_SUMMER,
                     default=current.get(OPT_MIN_SOC_SUMMER, DEFAULT_MIN_SOC_SUMMER),
-                ): vol.All(int, vol.Any(0, vol.Range(min=30, max=100))),
+                ): vol.All(int, vol.Range(min=0, max=100)),
                 vol.Required(
                     OPT_MIN_SOC_WINTER,
                     default=current.get(OPT_MIN_SOC_WINTER, DEFAULT_MIN_SOC_WINTER),
-                ): vol.All(int, vol.Any(0, vol.Range(min=30, max=100))),
+                ): vol.All(int, vol.Range(min=0, max=100)),
                 vol.Optional(
                     OPT_WATER_HEATER_SWITCH,
                     default=current.get(OPT_WATER_HEATER_SWITCH, ""),
@@ -122,7 +131,7 @@ class BeemAIOptionsFlow(OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
     async def async_step_panels(
         self, user_input: dict[str, Any] | None = None

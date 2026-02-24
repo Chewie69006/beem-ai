@@ -24,6 +24,9 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_min_soc": "Must be 0 (disabled) or between 30 and 100."
+    },
     "step": {
       "init": {
         "title": "BeemAI Settings",
