@@ -9,6 +9,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import OptionsFlow, ConfigFlowResult
+from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
 from .const import (
     DEFAULT_MIN_SOC_SUMMER,
@@ -99,11 +100,11 @@ class BeemAIOptionsFlow(OptionsFlow):
                 vol.Optional(
                     OPT_WATER_HEATER_SWITCH,
                     default=current.get(OPT_WATER_HEATER_SWITCH, ""),
-                ): str,
+                ): EntitySelector(EntitySelectorConfig(domain="switch")),
                 vol.Optional(
                     OPT_WATER_HEATER_POWER_ENTITY,
                     default=current.get(OPT_WATER_HEATER_POWER_ENTITY, ""),
-                ): str,
+                ): EntitySelector(EntitySelectorConfig(domain="sensor", device_class="power")),
                 vol.Required(
                     OPT_WATER_HEATER_POWER_W,
                     default=current.get(

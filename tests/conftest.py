@@ -128,6 +128,29 @@ class AbortFlow(Exception):
 _ha_def.AbortFlow = AbortFlow
 _ha_def.FlowResult = dict
 
+# homeassistant.helpers.selector
+_ha_sel = _mod("homeassistant.helpers.selector")
+
+
+class _EntitySelectorConfig:
+    def __init__(self, domain=None, device_class=None, **kwargs):
+        self.domain = domain
+        self.device_class = device_class
+
+
+class _EntitySelector:
+    """Stub that behaves like a voluptuous string validator in tests."""
+
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return str(value) if value else ""
+
+
+_ha_sel.EntitySelector = _EntitySelector
+_ha_sel.EntitySelectorConfig = _EntitySelectorConfig
+
 # homeassistant.helpers.entity_platform
 _ha_ep = _mod("homeassistant.helpers.entity_platform")
 _ha_ep.AddEntitiesCallback = MagicMock
