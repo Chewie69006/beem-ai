@@ -173,7 +173,7 @@ async def async_setup_entry(
             device_type="battery",
         ),
 
-        # Solar forecast sensors are on array 0 (aggregated totals)
+        # --- System device sensors ---
         BeemAISensor(
             coordinator, entry,
             key="solar_forecast_today",
@@ -187,8 +187,7 @@ async def async_setup_entry(
                 "sources": c.state_store.forecast.sources_used,
                 "confidence": c.state_store.forecast.confidence,
             },
-            device_type="solar",
-            solar_index=0,
+            device_type="system",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -199,11 +198,8 @@ async def async_setup_entry(
             state_class=SensorStateClass.TOTAL,
             unit="kWh",
             value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
-            device_type="solar",
-            solar_index=0,
+            device_type="system",
         ),
-
-        # --- System device sensors ---
         BeemAISensor(
             coordinator, entry,
             key="optimization_status",
