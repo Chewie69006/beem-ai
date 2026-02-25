@@ -14,7 +14,6 @@ from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 from .const import (
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
-    DEFAULT_PANEL_COUNT,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
     DEFAULT_DRY_RUN,
@@ -25,8 +24,6 @@ from .const import (
     OPT_LOCATION_LON,
     OPT_MIN_SOC_SUMMER,
     OPT_MIN_SOC_WINTER,
-    OPT_PANEL_ARRAYS_JSON,
-    OPT_PANEL_COUNT,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
     OPT_SMART_CFTG,
@@ -46,7 +43,6 @@ class BeemAIOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry) -> None:
         """Initialise options flow."""
-        self._panel_count: int = DEFAULT_PANEL_COUNT
         self._tariff_period_count: int = DEFAULT_TARIFF_PERIOD_COUNT
         self._options: dict[str, Any] = {}
 
@@ -64,7 +60,6 @@ class BeemAIOptionsFlow(OptionsFlow):
                     errors[key] = "invalid_min_soc"
 
             if not errors:
-                self._panel_count = user_input.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
                 self._tariff_period_count = user_input.get(
                     OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
                 )
@@ -121,10 +116,6 @@ class BeemAIOptionsFlow(OptionsFlow):
                         OPT_WATER_HEATER_POWER_W, DEFAULT_WATER_HEATER_POWER_W
                     ),
                 ): vol.All(int, vol.Range(min=0)),
-                vol.Required(
-                    OPT_PANEL_COUNT,
-                    default=current.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT),
-                ): vol.All(int, vol.Range(min=1, max=6)),
                 vol.Optional(
                     OPT_SMART_CFTG,
                     default=current.get(OPT_SMART_CFTG, DEFAULT_SMART_CFTG),
@@ -154,7 +145,7 @@ class BeemAIOptionsFlow(OptionsFlow):
                     }
                 )
             self._options[OPT_TARIFF_PERIODS_JSON] = json.dumps(periods)
-            return await self.async_step_panels()
+            return self.async_create_entry(title="", data=self._options)
 
         # Load existing tariff period data for defaults
         existing_periods: list[dict] = []
@@ -198,55 +189,3 @@ class BeemAIOptionsFlow(OptionsFlow):
             data_schema=vol.Schema(fields),
         )
 
-    async def async_step_panels(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Third step — per-panel configuration."""
-        if user_input is not None:
-            panels = []
-            for i in range(1, self._panel_count + 1):
-                panels.append(
-                    {
-                        "tilt": user_input.get(f"panel_{i}_tilt", 30),
-                        "azimuth": user_input.get(f"panel_{i}_azimuth", 180),
-                        "kwp": user_input.get(f"panel_{i}_kwp", 5.0),
-                    }
-                )
-            self._options[OPT_PANEL_ARRAYS_JSON] = json.dumps(panels)
-            return self.async_create_entry(title="", data=self._options)
-
-        # Load existing panel data for defaults.
-        existing_panels: list[dict] = []
-        raw = self.config_entry.options.get(OPT_PANEL_ARRAYS_JSON)
-        if raw:
-            try:
-                existing_panels = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                existing_panels = []
-
-        fields: dict[vol.Marker, Any] = {}
-        for i in range(1, self._panel_count + 1):
-            existing = existing_panels[i - 1] if i - 1 < len(existing_panels) else {}
-            fields[
-                vol.Required(
-                    f"panel_{i}_tilt",
-                    default=existing.get("tilt", 30),
-                )
-            ] = vol.All(int, vol.Range(min=0, max=90))
-            fields[
-                vol.Required(
-                    f"panel_{i}_azimuth",
-                    default=existing.get("azimuth", 180),
-                )
-            ] = vol.All(int, vol.Range(min=0, max=360))
-            fields[
-                vol.Required(
-                    f"panel_{i}_kwp",
-                    default=existing.get("kwp", 5.0),
-                )
-            ] = vol.All(vol.Coerce(float), vol.Range(min=0.1, max=50.0))
-
-        return self.async_show_form(
-            step_id="panels",
-            data_schema=vol.Schema(fields),
-        )

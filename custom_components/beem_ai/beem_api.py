@@ -173,6 +173,54 @@ class BeemApiClient:
         return token
 
     # ------------------------------------------------------------------
+    # Device discovery
+    # ------------------------------------------------------------------
+
+    async def get_solar_equipments(self) -> list[dict]:
+        """Fetch solar equipment config from GET /devices.
+
+        Returns the ``solarEquipments`` list for the configured battery,
+        or an empty list on any failure.
+        """
+        url = f"{self._api_base}/devices"
+        log.info("REST: fetching solar equipments from %s", url)
+
+        try:
+            resp = await self._request("GET", url)
+        except _RateLimited:
+            log.warning("REST: rate-limited — cannot fetch solar equipments")
+            return []
+
+        if resp is None:
+            return []
+
+        try:
+            data = await resp.json()
+        except Exception:
+            log.exception("REST: failed to parse /devices response")
+            return []
+
+        batteries = data.get("batteries") if isinstance(data, dict) else data
+        if not batteries:
+            log.warning("REST: no batteries in /devices response")
+            return []
+
+        for battery in batteries:
+            if str(battery.get("id")) == str(self._battery_id):
+                equipments = battery.get("solarEquipments", [])
+                log.info(
+                    "REST: found %d solar equipment(s) for battery %s",
+                    len(equipments),
+                    self._battery_id,
+                )
+                return equipments
+
+        log.warning(
+            "REST: battery %s not found in /devices response", self._battery_id
+        )
+        return []
+
+    # ------------------------------------------------------------------
     # Battery control
     # ------------------------------------------------------------------
 

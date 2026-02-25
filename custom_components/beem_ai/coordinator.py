@@ -25,7 +25,6 @@ from .const import (
     DEFAULT_DRY_RUN,
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
-    DEFAULT_PANEL_COUNT,
     DEFAULT_SMART_CFTG,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_WATER_HEATER_POWER_W,
@@ -35,8 +34,6 @@ from .const import (
     OPT_LOCATION_LON,
     OPT_MIN_SOC_SUMMER,
     OPT_MIN_SOC_WINTER,
-    OPT_PANEL_ARRAYS_JSON,
-    OPT_PANEL_COUNT,
     OPT_SMART_CFTG,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
@@ -99,6 +96,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._optimizer: OptimizationEngine | None = None
         self._water_heater: WaterHeaterController | None = None
 
+        # Solar panel arrays fetched from Beem API
+        self.panel_arrays: list[dict] = []
+
         # Dry-run flag (cached so it's accessible in shutdown without options)
         self._dry_run: bool = False
 
@@ -138,6 +138,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
             event_bus=self._event_bus,
         )
         await self._api_client.login()
+
+        # Fetch solar equipment config from API
+        self.panel_arrays = await self._fetch_panel_arrays()
 
         # MQTT client
         self._mqtt_client = BeemMqttClient(
@@ -237,18 +240,26 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 pass
         return None
 
-    def _build_panel_arrays(self, options: dict) -> list[dict]:
-        """Build panel arrays from options."""
-        arrays_json = options.get(OPT_PANEL_ARRAYS_JSON, "")
-        if arrays_json:
-            try:
-                return json.loads(arrays_json)
-            except (json.JSONDecodeError, TypeError):
-                pass
+    async def _fetch_panel_arrays(self) -> list[dict]:
+        """Fetch solar equipment from Beem API and convert to internal format."""
+        equipments = await self._api_client.get_solar_equipments()
+        if not equipments:
+            _LOGGER.warning("No solar equipments from API, using single default array")
+            return [{"tilt": 30, "azimuth": 180, "kwp": 5.0}]
 
-        # Fallback: generate from panel_count with defaults
-        count = options.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
-        return [{"tilt": 30, "azimuth": 180, "kwp": 5.0} for _ in range(count)]
+        arrays = []
+        for eq in equipments:
+            arrays.append({
+                "tilt": eq.get("tilt", 30),
+                "azimuth": eq.get("orientation", 180),
+                "kwp": eq.get("peakPower", 5000) / 1000.0,
+                "mppt_id": eq.get("mpptId"),
+                "panels_in_series": eq.get("solarPanelsInSeries"),
+                "panels_in_parallel": eq.get("solarPanelsInParallel"),
+            })
+
+        _LOGGER.info("Fetched %d solar array(s) from API: %s", len(arrays), arrays)
+        return arrays
 
     def _build_forecast_sources(self, options: dict) -> list:
         """Instantiate forecast sources from options."""
@@ -257,7 +268,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         ha_lon = getattr(self.hass.config, 'longitude', 0.0)
         lat = float(options.get(OPT_LOCATION_LAT, 0) or ha_lat)
         lon = float(options.get(OPT_LOCATION_LON, 0) or ha_lon)
-        panel_arrays = self._build_panel_arrays(options)
+        panel_arrays = self.panel_arrays
 
         sources = [
             OpenMeteoSource(
@@ -477,7 +488,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         _LOGGER.info("Options changed — reconfiguring modules")
 
         config = dict(options)
-        config["panel_arrays"] = self._build_panel_arrays(options)
+        config["panel_arrays"] = self.panel_arrays
         # Ensure tariff periods JSON is passed through to reconfigure
         tariff_periods = self._parse_tariff_periods(options)
         if tariff_periods is not None:

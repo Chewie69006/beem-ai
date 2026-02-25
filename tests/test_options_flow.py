@@ -9,7 +9,6 @@ from custom_components.beem_ai.options_flow import BeemAIOptionsFlow
 from custom_components.beem_ai.const import (
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
-    DEFAULT_PANEL_COUNT,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
     DEFAULT_SMART_CFTG,
@@ -18,8 +17,6 @@ from custom_components.beem_ai.const import (
     OPT_LOCATION_LON,
     OPT_MIN_SOC_SUMMER,
     OPT_MIN_SOC_WINTER,
-    OPT_PANEL_ARRAYS_JSON,
-    OPT_PANEL_COUNT,
     OPT_SMART_CFTG,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
@@ -61,7 +58,6 @@ VALID_INIT_INPUT = {
     OPT_WATER_HEATER_SWITCH: "",
     OPT_WATER_HEATER_POWER_ENTITY: "",
     OPT_WATER_HEATER_POWER_W: DEFAULT_WATER_HEATER_POWER_W,
-    OPT_PANEL_COUNT: 2,
     OPT_SMART_CFTG: False,
 }
 
@@ -95,7 +91,6 @@ async def test_step_init_proceeds_to_tariffs():
     result = await flow.async_step_init(user_input=VALID_INIT_INPUT)
 
     flow.async_step_tariffs.assert_called_once()
-    assert flow._panel_count == 2
     assert flow._tariff_period_count == DEFAULT_TARIFF_PERIOD_COUNT
     assert flow._options == VALID_INIT_INPUT
 
@@ -110,6 +105,18 @@ async def test_step_init_smart_cftg_toggle():
     await flow.async_step_init(user_input=input_with_cftg)
 
     assert flow._options[OPT_SMART_CFTG] is True
+
+
+@pytest.mark.asyncio
+async def test_step_init_no_panel_count_field():
+    """Init form should not contain panel_count field."""
+    flow = _make_flow()
+
+    await flow.async_step_init(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    field_names = [str(k) for k in schema.schema]
+    assert "panel_count" not in field_names
 
 
 # ------------------------------------------------------------------
@@ -130,12 +137,11 @@ async def test_step_tariffs_shows_form():
 
 
 @pytest.mark.asyncio
-async def test_step_tariffs_proceeds_to_panels():
-    """Tariff input is serialized to JSON and proceeds to panels."""
+async def test_step_tariffs_creates_entry():
+    """Tariff input is serialized to JSON and creates entry directly."""
     flow = _make_flow()
     flow._tariff_period_count = 2
     flow._options = dict(VALID_INIT_INPUT)
-    flow.async_step_panels = AsyncMock(return_value="panels_result")
 
     tariff_input = {
         "tariff_1_label": "HC",
@@ -150,9 +156,9 @@ async def test_step_tariffs_proceeds_to_panels():
 
     await flow.async_step_tariffs(user_input=tariff_input)
 
-    flow.async_step_panels.assert_called_once()
-    # Periods should be stored as JSON
-    periods_json = flow._options[OPT_TARIFF_PERIODS_JSON]
+    flow.async_create_entry.assert_called_once()
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    periods_json = saved_data[OPT_TARIFF_PERIODS_JSON]
     assert isinstance(periods_json, str)
     periods = json.loads(periods_json)
     assert len(periods) == 2
@@ -186,109 +192,6 @@ async def test_step_tariffs_existing_defaults():
             assert key_obj.default() == "22:00"
         elif key_str == "tariff_1_price":
             assert key_obj.default() == 0.10
-
-
-# ------------------------------------------------------------------
-# async_step_panels
-# ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_step_panels_shows_form():
-    """No input shows the panels form."""
-    flow = _make_flow()
-    flow._panel_count = 2
-
-    await flow.async_step_panels(user_input=None)
-
-    flow.async_show_form.assert_called_once()
-    assert flow.async_show_form.call_args.kwargs["step_id"] == "panels"
-
-
-@pytest.mark.asyncio
-async def test_step_panels_creates_entry():
-    """Panel data saved as JSON and creates entry."""
-    flow = _make_flow()
-    flow._panel_count = 2
-    flow._options = dict(VALID_INIT_INPUT)
-
-    panel_input = {
-        "panel_1_tilt": 25,
-        "panel_1_azimuth": 180,
-        "panel_1_kwp": 4.5,
-        "panel_2_tilt": 35,
-        "panel_2_azimuth": 200,
-        "panel_2_kwp": 3.0,
-    }
-
-    await flow.async_step_panels(user_input=panel_input)
-
-    flow.async_create_entry.assert_called_once()
-    call_kwargs = flow.async_create_entry.call_args.kwargs
-    saved_data = call_kwargs["data"]
-
-    assert saved_data[OPT_LOCATION_LAT] == 48.85
-
-    panels = json.loads(saved_data[OPT_PANEL_ARRAYS_JSON])
-    assert len(panels) == 2
-    assert panels[0] == {"tilt": 25, "azimuth": 180, "kwp": 4.5}
-    assert panels[1] == {"tilt": 35, "azimuth": 200, "kwp": 3.0}
-
-
-@pytest.mark.asyncio
-async def test_panel_arrays_stored_as_json():
-    """Verify panel data is JSON-encoded string, not a raw list."""
-    flow = _make_flow()
-    flow._panel_count = 1
-    flow._options = {}
-
-    panel_input = {
-        "panel_1_tilt": 30,
-        "panel_1_azimuth": 180,
-        "panel_1_kwp": 5.0,
-    }
-
-    await flow.async_step_panels(user_input=panel_input)
-
-    saved_data = flow.async_create_entry.call_args.kwargs["data"]
-    raw_json = saved_data[OPT_PANEL_ARRAYS_JSON]
-    assert isinstance(raw_json, str)
-    parsed = json.loads(raw_json)
-    assert parsed == [{"tilt": 30, "azimuth": 180, "kwp": 5.0}]
-
-
-@pytest.mark.asyncio
-async def test_existing_panel_values_shown_as_defaults():
-    """Existing panel options populate form defaults."""
-    existing_panels = [
-        {"tilt": 10, "azimuth": 90, "kwp": 2.5},
-        {"tilt": 45, "azimuth": 270, "kwp": 6.0},
-    ]
-    existing_options = {
-        OPT_PANEL_ARRAYS_JSON: json.dumps(existing_panels),
-    }
-    flow = _make_flow(options=existing_options)
-    flow._panel_count = 2
-
-    await flow.async_step_panels(user_input=None)
-
-    call_kwargs = flow.async_show_form.call_args.kwargs
-    schema = call_kwargs["data_schema"]
-
-    for key_obj in schema.schema:
-        key_str = str(key_obj)
-        if key_str == "panel_1_tilt":
-            assert key_obj.default() == 10
-        elif key_str == "panel_1_azimuth":
-            assert key_obj.default() == 90
-        elif key_str == "panel_1_kwp":
-            assert key_obj.default() == 2.5
-        elif key_str == "panel_2_tilt":
-            assert key_obj.default() == 45
-        elif key_str == "panel_2_azimuth":
-            assert key_obj.default() == 270
-        elif key_str == "panel_2_kwp":
-            assert key_obj.default() == 6.0
 
 
 # ------------------------------------------------------------------
@@ -346,13 +249,13 @@ async def test_min_soc_100_is_valid():
 
 
 # ------------------------------------------------------------------
-# Full flow: init -> tariffs -> panels -> entry
+# Full flow: init -> tariffs -> entry
 # ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_full_flow():
-    """End-to-end: init -> tariffs -> panels -> create_entry."""
+    """End-to-end: init -> tariffs -> create_entry."""
     flow = _make_flow()
 
     # Step 1: init
@@ -361,7 +264,7 @@ async def test_full_flow():
     flow.async_show_form.assert_called_once()
     assert flow.async_show_form.call_args.kwargs["step_id"] == "tariffs"
 
-    # Step 2: tariffs
+    # Step 2: tariffs -> creates entry directly
     flow.async_show_form.reset_mock()
     tariff_input = {
         "tariff_1_label": "HC",
@@ -374,31 +277,14 @@ async def test_full_flow():
         "tariff_2_price": 0.12,
     }
     await flow.async_step_tariffs(user_input=tariff_input)
-    # Should show panels form
-    flow.async_show_form.assert_called_once()
-    assert flow.async_show_form.call_args.kwargs["step_id"] == "panels"
 
-    # Step 3: panels
-    panel_input = {
-        "panel_1_tilt": 30,
-        "panel_1_azimuth": 180,
-        "panel_1_kwp": 5.0,
-        "panel_2_tilt": 30,
-        "panel_2_azimuth": 180,
-        "panel_2_kwp": 5.0,
-    }
-    await flow.async_step_panels(user_input=panel_input)
-
-    # Should create entry
+    # Should create entry (no panels step)
     flow.async_create_entry.assert_called_once()
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
 
     # Verify all data persisted
     assert saved_data[OPT_LOCATION_LAT] == 48.85
     assert OPT_TARIFF_PERIODS_JSON in saved_data
-    assert OPT_PANEL_ARRAYS_JSON in saved_data
 
     periods = json.loads(saved_data[OPT_TARIFF_PERIODS_JSON])
     assert len(periods) == 2
-    panels = json.loads(saved_data[OPT_PANEL_ARRAYS_JSON])
-    assert len(panels) == 2

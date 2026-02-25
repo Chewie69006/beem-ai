@@ -29,8 +29,6 @@ OPT_MIN_SOC_WINTER = "min_soc_winter"
 OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
 OPT_WATER_HEATER_POWER_ENTITY = "water_heater_power_entity"
 OPT_WATER_HEATER_POWER_W = "water_heater_power_w"
-OPT_PANEL_COUNT = "panel_count"
-OPT_PANEL_ARRAYS_JSON = "panel_arrays_json"
 OPT_DRY_RUN = "dry_run"
 
 # --- Options defaults ---
@@ -40,7 +38,6 @@ DEFAULT_SMART_CFTG = False
 DEFAULT_MIN_SOC_SUMMER = 0
 DEFAULT_MIN_SOC_WINTER = 50
 DEFAULT_WATER_HEATER_POWER_W = 2000
-DEFAULT_PANEL_COUNT = 2
 DEFAULT_DRY_RUN = False
 
 # --- Sensor keys ---
