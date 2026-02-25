@@ -106,6 +106,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._evening_unsub = None
         self._daily_reset_unsub = None
 
+        # Persistence directory (set in async_setup)
+        self._data_dir: str | None = None
+
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
         data = self._entry.data
@@ -114,6 +117,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Data directory for persistence
         data_dir = self.hass.config.path("beem_ai_data")
         os.makedirs(data_dir, exist_ok=True)
+        self._data_dir = data_dir
+
+        # Restore persisted state before anything else reads it
+        self.state_store.load_plan(data_dir)
+        self.state_store.load_forecast(data_dir)
 
         # HTTP session
         self._session = aiohttp.ClientSession()
@@ -209,8 +217,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Schedule recurring tasks
         self._schedule_tasks()
 
-        # Initial forecast fetch
+        # Initial forecast fetch + re-optimize if forecasts are available
         await self._refresh_forecasts()
+        await self._run_optimization_if_ready()
 
         _LOGGER.info("BeemAI coordinator setup complete")
 
@@ -356,6 +365,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
             if self._last_evening_run_date != today:
                 self._last_evening_run_date = today
                 await self._optimizer.run_evening_optimization()
+                if self._data_dir:
+                    self.state_store.save_plan(self._data_dir)
 
     async def _intraday_loop(self, _now=None) -> None:
         """5-minute intraday monitoring."""
@@ -363,8 +374,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
             await self._optimizer.run_intraday_check()
 
     async def _forecast_loop(self, _now=None) -> None:
-        """Hourly forecast refresh."""
+        """Hourly forecast refresh + re-optimize with updated data."""
         await self._refresh_forecasts()
+        if self._data_dir:
+            self.state_store.save_forecast(self._data_dir)
+        await self._run_optimization_if_ready()
 
     async def _cftg_loop(self, _now=None) -> None:
         """5-minute smart CFTG check."""
@@ -403,6 +417,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._consumption.save()
         if self._forecast_tracker:
             self._forecast_tracker.save()
+        if self._data_dir:
+            self.state_store.save_plan(self._data_dir)
+            self.state_store.save_forecast(self._data_dir)
         _LOGGER.info("Daily counters reset")
 
     async def _refresh_forecasts(self) -> None:
@@ -420,6 +437,25 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 )
         except Exception:
             _LOGGER.exception("Failed to refresh forecasts")
+
+    async def _run_optimization_if_ready(self) -> None:
+        """Re-run optimizer if forecasts are available. Safe to call multiple times."""
+        if not self._optimizer or not self.state_store.enabled:
+            return
+
+        forecast = self.state_store.forecast
+        has_forecast = forecast.solar_today_kwh > 0 or forecast.solar_tomorrow_kwh > 0
+        if not has_forecast:
+            _LOGGER.debug("Skipping optimization — no forecast data available yet")
+            return
+
+        try:
+            _LOGGER.info("Running optimization with current forecasts")
+            await self._optimizer.run_evening_optimization()
+            if self._data_dir:
+                self.state_store.save_plan(self._data_dir)
+        except Exception:
+            _LOGGER.exception("Failed to run optimization")
 
     # ---- Options update ----
 
@@ -494,11 +530,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._mqtt_client:
             await self._mqtt_client.disconnect()
 
-        # Save analytics
+        # Save analytics and state
         if self._consumption:
             self._consumption.save()
         if self._forecast_tracker:
             self._forecast_tracker.save()
+        if self._data_dir:
+            self.state_store.save_plan(self._data_dir)
+            self.state_store.save_forecast(self._data_dir)
 
         # Set auto mode for safety (skipped in dry-run mode)
         if self._api_client:

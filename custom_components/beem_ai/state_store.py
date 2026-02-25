@@ -1,9 +1,14 @@
 """Thread-safe shared state container for BeemAI."""
 
+import json
+import logging
+import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Optional
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -193,3 +198,109 @@ class StateStore:
         """Replace entire plan atomically."""
         with self._lock:
             self._plan = plan
+
+    # ---- Persistence ----
+
+    def save_plan(self, data_dir: str) -> None:
+        """Serialize CurrentPlan to data_dir/plan_state.json."""
+        path = os.path.join(data_dir, "plan_state.json")
+        with self._lock:
+            data = asdict(self._plan)
+        # Convert datetime fields to isoformat
+        for key in ("created_at", "next_transition"):
+            val = data.get(key)
+            if isinstance(val, datetime):
+                data[key] = val.isoformat()
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            _LOGGER.exception("Failed to save plan state")
+
+    def load_plan(self, data_dir: str) -> bool:
+        """Restore CurrentPlan from data_dir/plan_state.json. Returns True if loaded."""
+        path = os.path.join(data_dir, "plan_state.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            # Convert isoformat strings back to datetime
+            for key in ("created_at", "next_transition"):
+                val = data.get(key)
+                if isinstance(val, str):
+                    try:
+                        data[key] = datetime.fromisoformat(val)
+                    except (ValueError, TypeError):
+                        data[key] = None
+                elif val is None:
+                    data[key] = None
+            with self._lock:
+                self._plan = CurrentPlan(**data)
+            _LOGGER.info("Restored plan from disk: phase=%s, target_soc=%.0f%%",
+                         data.get("phase"), data.get("target_soc", 0))
+            return True
+        except (json.JSONDecodeError, TypeError, OSError) as exc:
+            _LOGGER.warning("Failed to load plan state: %s", exc)
+            return False
+
+    def save_forecast(self, data_dir: str) -> None:
+        """Serialize ForecastData to data_dir/forecast_state.json."""
+        path = os.path.join(data_dir, "forecast_state.json")
+        with self._lock:
+            data = asdict(self._forecast)
+        # Convert datetime
+        val = data.get("last_updated")
+        if isinstance(val, datetime):
+            data["last_updated"] = val.isoformat()
+        # Convert dict keys to strings for JSON (hourly dicts have int keys)
+        for dict_key in (
+            "solar_today", "solar_tomorrow",
+            "solar_today_p10", "solar_today_p90",
+            "solar_tomorrow_p10", "solar_tomorrow_p90",
+            "consumption_hourly",
+        ):
+            d = data.get(dict_key)
+            if isinstance(d, dict):
+                data[dict_key] = {str(k): v for k, v in d.items()}
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            _LOGGER.exception("Failed to save forecast state")
+
+    def load_forecast(self, data_dir: str) -> bool:
+        """Restore ForecastData from data_dir/forecast_state.json. Returns True if loaded."""
+        path = os.path.join(data_dir, "forecast_state.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            # Convert last_updated
+            val = data.get("last_updated")
+            if isinstance(val, str):
+                try:
+                    data["last_updated"] = datetime.fromisoformat(val)
+                except (ValueError, TypeError):
+                    data["last_updated"] = None
+            # Convert dict keys back to int (hourly forecasts)
+            for dict_key in (
+                "solar_today", "solar_tomorrow",
+                "solar_today_p10", "solar_today_p90",
+                "solar_tomorrow_p10", "solar_tomorrow_p90",
+                "consumption_hourly",
+            ):
+                d = data.get(dict_key)
+                if isinstance(d, dict):
+                    data[dict_key] = {int(k): v for k, v in d.items()}
+            with self._lock:
+                self._forecast = ForecastData(**data)
+            _LOGGER.info(
+                "Restored forecast from disk: today=%.1f kWh, tomorrow=%.1f kWh",
+                data.get("solar_today_kwh", 0), data.get("solar_tomorrow_kwh", 0),
+            )
+            return True
+        except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
+            _LOGGER.warning("Failed to load forecast state: %s", exc)
+            return False
