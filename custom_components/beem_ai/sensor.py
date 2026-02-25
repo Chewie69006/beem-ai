@@ -273,6 +273,7 @@ async def async_setup_entry(
         mppt_id = array.get("mppt_id")
         panels_series = array.get("panels_in_series")
         panels_parallel = array.get("panels_in_parallel")
+
         sensors.append(BeemAISensor(
             coordinator, entry,
             key=f"solar_array_{idx + 1}_capacity",
@@ -281,15 +282,67 @@ async def async_setup_entry(
             device_class=None,
             state_class=None,
             unit="kWp",
-            value_fn=lambda c, _kwp=kwp: _kwp,
-            extra_fn=lambda c, _t=tilt, _a=azimuth, _k=kwp, _m=mppt_id, _s=panels_series, _p=panels_parallel: {
-                "tilt": _t,
-                "azimuth": _a,
-                "kwp": _k,
-                "mppt_id": _m,
-                "panels_in_series": _s,
-                "panels_in_parallel": _p,
-            },
+            value_fn=lambda c, _v=kwp: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_tilt",
+            name=f"Array {idx + 1} Tilt",
+            icon="mdi:angle-acute",
+            device_class=None,
+            state_class=None,
+            unit="°",
+            value_fn=lambda c, _v=tilt: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_azimuth",
+            name=f"Array {idx + 1} Azimuth",
+            icon="mdi:compass",
+            device_class=None,
+            state_class=None,
+            unit="°",
+            value_fn=lambda c, _v=azimuth: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_mppt_id",
+            name=f"Array {idx + 1} MPPT ID",
+            icon="mdi:identifier",
+            device_class=None,
+            state_class=None,
+            unit=None,
+            value_fn=lambda c, _v=mppt_id: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_panels_in_series",
+            name=f"Array {idx + 1} Panels in Series",
+            icon="mdi:solar-panel",
+            device_class=None,
+            state_class=None,
+            unit=None,
+            value_fn=lambda c, _v=panels_series: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_panels_in_parallel",
+            name=f"Array {idx + 1} Panels in Parallel",
+            icon="mdi:solar-panel",
+            device_class=None,
+            state_class=None,
+            unit=None,
+            value_fn=lambda c, _v=panels_parallel: _v,
             device_type="solar",
             solar_index=idx,
         ))
