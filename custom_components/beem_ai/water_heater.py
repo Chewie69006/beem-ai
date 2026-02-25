@@ -143,6 +143,13 @@ class WaterHeaterController:
         solar_w = battery.solar_power_w
         soc = battery.soc
 
+        log.debug(
+            "Water heater eval: is_on=%s, soc=%.0f%%, solar=%.0fW, export=%.0fW, "
+            "consumption=%.0fW, tariff=%s, daily_energy=%.2f kWh",
+            self._is_on, soc, solar_w, export_w,
+            battery.consumption_w, tariff, self._daily_energy_kwh,
+        )
+
         # 1. System disabled — clear all mode flags and turn off.
         if not self._state_store.enabled:
             self._solar_on = False

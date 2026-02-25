@@ -120,6 +120,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._data_dir = data_dir
 
         # Restore persisted state before anything else reads it
+        _LOGGER.info("Loading persisted state from %s", data_dir)
         self.state_store.load_plan(data_dir)
         self.state_store.load_forecast(data_dir)
 
@@ -212,9 +213,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
 
         # Start MQTT (connect() is synchronous — it creates a background task)
+        _LOGGER.info("Starting MQTT client")
         self._mqtt_client.connect()
 
         # Schedule recurring tasks
+        _LOGGER.info("Scheduling recurring tasks (forecast, intraday, CFTG, water heater)")
         self._schedule_tasks()
 
         # Initial forecast fetch + re-optimize if forecasts are available
@@ -375,6 +378,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     async def _forecast_loop(self, _now=None) -> None:
         """Hourly forecast refresh + re-optimize with updated data."""
+        _LOGGER.info("Hourly forecast refresh triggered")
         await self._refresh_forecasts()
         if self._data_dir:
             self.state_store.save_forecast(self._data_dir)
@@ -420,6 +424,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._data_dir:
             self.state_store.save_plan(self._data_dir)
             self.state_store.save_forecast(self._data_dir)
+            _LOGGER.info("Persisted plan and forecast state to disk")
         _LOGGER.info("Daily counters reset")
 
     async def _refresh_forecasts(self) -> None:
@@ -435,6 +440,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
                     consumption_tomorrow_kwh=tomorrow_kwh,
                     consumption_hourly=hourly,
                 )
+
+            f = self.state_store.forecast
+            _LOGGER.info(
+                "Forecasts updated: solar_today=%.1f kWh, solar_tomorrow=%.1f kWh, "
+                "consumption_tomorrow=%.1f kWh, confidence=%s, sources=%s",
+                f.solar_today_kwh, f.solar_tomorrow_kwh,
+                f.consumption_tomorrow_kwh, f.confidence, f.sources_used,
+            )
         except Exception:
             _LOGGER.exception("Failed to refresh forecasts")
 

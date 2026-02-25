@@ -86,9 +86,12 @@ class SafetyManager:
         """Check if MQTT data is stale (>5 min without update)."""
         last = self._state.battery.last_updated
         if last is None:
+            log.warning("Battery data stale: no MQTT update received yet")
             return True
         age = (datetime.now() - last).total_seconds()
         if age > self._stale_threshold_s:
+            log.warning("Battery data stale: last update %.0fs ago (threshold=%ds)",
+                        age, self._stale_threshold_s)
             self._event_bus.publish(
                 Event.SAFETY_ALERT,
                 {"type": "stale_data", "age_seconds": age},
@@ -118,16 +121,25 @@ class SafetyManager:
         if battery.soh < 70:
             alerts.append(f"Battery health low: SoH {battery.soh:.0f}%")
 
+        if alerts:
+            log.warning("Safety check alerts: %s", "; ".join(alerts))
         return alerts
 
     def should_emergency_stop(self) -> bool:
         """Critical condition: SoC critically low while discharging."""
         battery = self._state.battery
         emergency_floor = max(10, self.min_soc - 10)
-        return battery.soc <= emergency_floor and battery.is_discharging
+        triggered = battery.soc <= emergency_floor and battery.is_discharging
+        if triggered:
+            log.critical(
+                "EMERGENCY STOP: SoC %.0f%% <= floor %d%% while discharging at %.0fW",
+                battery.soc, emergency_floor, abs(battery.battery_power_w),
+            )
+        return triggered
 
     def get_safe_fallback_plan(self) -> CurrentPlan:
         """Return a conservative fallback plan for error scenarios."""
+        log.warning("Activating safe fallback plan: auto mode, min_soc=%d%%", self.min_soc)
         return CurrentPlan(
             target_soc=float(self.min_soc),
             charge_power_w=0,
