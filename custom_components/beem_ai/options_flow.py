@@ -15,10 +15,10 @@ from .const import (
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
     DEFAULT_PANEL_COUNT,
-    DEFAULT_TARIFF_HC,
-    DEFAULT_TARIFF_HP,
-    DEFAULT_TARIFF_HSC,
+    DEFAULT_TARIFF_DEFAULT_PRICE,
+    DEFAULT_TARIFF_PERIOD_COUNT,
     DEFAULT_DRY_RUN,
+    DEFAULT_SMART_CFTG,
     DEFAULT_WATER_HEATER_POWER_W,
     OPT_DRY_RUN,
     OPT_LOCATION_LAT,
@@ -29,9 +29,10 @@ from .const import (
     OPT_PANEL_COUNT,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
-    OPT_TARIFF_HC_PRICE,
-    OPT_TARIFF_HP_PRICE,
-    OPT_TARIFF_HSC_PRICE,
+    OPT_SMART_CFTG,
+    OPT_TARIFF_DEFAULT_PRICE,
+    OPT_TARIFF_PERIOD_COUNT,
+    OPT_TARIFF_PERIODS_JSON,
     OPT_WATER_HEATER_POWER_ENTITY,
     OPT_WATER_HEATER_POWER_W,
     OPT_WATER_HEATER_SWITCH,
@@ -46,6 +47,7 @@ class BeemAIOptionsFlow(OptionsFlow):
     def __init__(self, config_entry) -> None:
         """Initialise options flow."""
         self._panel_count: int = DEFAULT_PANEL_COUNT
+        self._tariff_period_count: int = DEFAULT_TARIFF_PERIOD_COUNT
         self._options: dict[str, Any] = {}
 
     async def async_step_init(
@@ -63,20 +65,23 @@ class BeemAIOptionsFlow(OptionsFlow):
 
             if not errors:
                 self._panel_count = user_input.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
+                self._tariff_period_count = user_input.get(
+                    OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
+                )
                 self._options = user_input
-                return await self.async_step_panels()
+                return await self.async_step_tariffs()
 
         current = self.config_entry.options
 
         schema = vol.Schema(
             {
-                vol.Required(
+                vol.Optional(
                     OPT_LOCATION_LAT,
-                    default=current.get(OPT_LOCATION_LAT),
+                    default=current.get(OPT_LOCATION_LAT, 0.0),
                 ): vol.Coerce(float),
-                vol.Required(
+                vol.Optional(
                     OPT_LOCATION_LON,
-                    default=current.get(OPT_LOCATION_LON),
+                    default=current.get(OPT_LOCATION_LON, 0.0),
                 ): vol.Coerce(float),
                 vol.Optional(
                     OPT_SOLCAST_API_KEY,
@@ -87,17 +92,13 @@ class BeemAIOptionsFlow(OptionsFlow):
                     default=current.get(OPT_SOLCAST_SITE_ID, ""),
                 ): str,
                 vol.Required(
-                    OPT_TARIFF_HP_PRICE,
-                    default=current.get(OPT_TARIFF_HP_PRICE, DEFAULT_TARIFF_HP),
+                    OPT_TARIFF_DEFAULT_PRICE,
+                    default=current.get(OPT_TARIFF_DEFAULT_PRICE, DEFAULT_TARIFF_DEFAULT_PRICE),
                 ): vol.Coerce(float),
                 vol.Required(
-                    OPT_TARIFF_HC_PRICE,
-                    default=current.get(OPT_TARIFF_HC_PRICE, DEFAULT_TARIFF_HC),
-                ): vol.Coerce(float),
-                vol.Required(
-                    OPT_TARIFF_HSC_PRICE,
-                    default=current.get(OPT_TARIFF_HSC_PRICE, DEFAULT_TARIFF_HSC),
-                ): vol.Coerce(float),
+                    OPT_TARIFF_PERIOD_COUNT,
+                    default=current.get(OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT),
+                ): vol.All(int, vol.Range(min=1, max=6)),
                 vol.Required(
                     OPT_MIN_SOC_SUMMER,
                     default=current.get(OPT_MIN_SOC_SUMMER, DEFAULT_MIN_SOC_SUMMER),
@@ -125,6 +126,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     default=current.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT),
                 ): vol.All(int, vol.Range(min=1, max=6)),
                 vol.Optional(
+                    OPT_SMART_CFTG,
+                    default=current.get(OPT_SMART_CFTG, DEFAULT_SMART_CFTG),
+                ): bool,
+                vol.Optional(
                     OPT_DRY_RUN,
                     default=current.get(OPT_DRY_RUN, DEFAULT_DRY_RUN),
                 ): bool,
@@ -133,10 +138,70 @@ class BeemAIOptionsFlow(OptionsFlow):
 
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
+    async def async_step_tariffs(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Second step — configurable tariff periods."""
+        if user_input is not None:
+            periods = []
+            for i in range(1, self._tariff_period_count + 1):
+                periods.append(
+                    {
+                        "label": user_input.get(f"tariff_{i}_label", f"Period {i}"),
+                        "start": user_input.get(f"tariff_{i}_start", "00:00"),
+                        "end": user_input.get(f"tariff_{i}_end", "00:00"),
+                        "price": user_input.get(f"tariff_{i}_price", 0.20),
+                    }
+                )
+            self._options[OPT_TARIFF_PERIODS_JSON] = json.dumps(periods)
+            return await self.async_step_panels()
+
+        # Load existing tariff period data for defaults
+        existing_periods: list[dict] = []
+        raw = self.config_entry.options.get(OPT_TARIFF_PERIODS_JSON)
+        if raw:
+            try:
+                existing_periods = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                existing_periods = []
+
+        fields: dict[vol.Marker, Any] = {}
+        for i in range(1, self._tariff_period_count + 1):
+            existing = existing_periods[i - 1] if i - 1 < len(existing_periods) else {}
+            fields[
+                vol.Required(
+                    f"tariff_{i}_label",
+                    default=existing.get("label", f"Period {i}"),
+                )
+            ] = str
+            fields[
+                vol.Required(
+                    f"tariff_{i}_start",
+                    default=existing.get("start", "00:00"),
+                )
+            ] = str
+            fields[
+                vol.Required(
+                    f"tariff_{i}_end",
+                    default=existing.get("end", "00:00"),
+                )
+            ] = str
+            fields[
+                vol.Required(
+                    f"tariff_{i}_price",
+                    default=existing.get("price", 0.20),
+                )
+            ] = vol.Coerce(float)
+
+        return self.async_show_form(
+            step_id="tariffs",
+            data_schema=vol.Schema(fields),
+        )
+
     async def async_step_panels(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Second step — per-panel configuration."""
+        """Third step — per-panel configuration."""
         if user_input is not None:
             panels = []
             for i in range(1, self._panel_count + 1):

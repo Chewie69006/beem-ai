@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="logo.png" alt="BeemAI Logo" width="256">
+</p>
+
 # BeemAI — Intelligent Energy Management for Beem Energy Batteries
+
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz)
 
 A HACS custom component for Home Assistant that takes autonomous control of a
 [Beem Energy](https://www.beem.energy/) battery: it plans overnight charging,
 responds to live solar production, and manages a water heater as a solar dump load.
+
+> Inspired by [CharlesP44/Beem_Energy](https://github.com/CharlesP44/Beem_Energy).
 
 ---
 
@@ -33,22 +41,25 @@ and restart.
 
 ### Config Flow (one-time)
 
-| Field    | Description                              |
-|----------|------------------------------------------|
-| Email    | Beem Energy account email                |
-| Password | Beem Energy account password             |
+| Step | Fields | Description |
+|------|--------|-------------|
+| 1. Login | Email, Password | Beem Energy account credentials |
+| 2. Solcast (optional) | API Key, Site ID | Enhanced solar forecasting via Solcast |
 
-The integration automatically discovers your battery ID and serial.
+The integration automatically discovers your battery ID and serial, and uses
+Home Assistant's configured location for solar forecasting.
 
 ### Options (editable at any time)
 
 | Field                      | Default | Description                                               |
 |----------------------------|---------|-----------------------------------------------------------|
-| Latitude / Longitude       | —       | Installation location for solar forecasting               |
+| Latitude / Longitude       | HA config | Installation location (optional override)              |
 | Solcast API Key / Site ID  | —       | Optional premium solar forecast (10 calls/day)            |
-| HP / HC / HSC tariff price | €0.27 / €0.21 / €0.16 | French EJP electricity prices (EUR/kWh)   |
-| Min SoC summer             | 20 %    | Battery floor in summer months                            |
+| Default tariff price       | €0.27   | Peak electricity price in EUR/kWh                         |
+| Tariff periods (1-6)       | French 3-tier | Custom periods with label, time range, and price  |
+| Min SoC summer             | 0 (off) | Battery floor in summer months                            |
 | Min SoC winter             | 50 %    | Battery floor in winter months (Nov–Mar)                  |
+| **Smart CFTG**             | Off     | Dynamic grid charging during off-peak based on SoC        |
 | Water heater switch entity | —       | HA entity ID of the smart plug switch                     |
 | Water heater power entity  | —       | HA entity ID of the power sensor on the plug              |
 | Water heater power (W)     | 2000 W  | Nominal consumption of the water heater                   |
@@ -57,26 +68,37 @@ The integration automatically discovers your battery ID and serial.
 
 ---
 
-## Entities Created
+## Devices & Entities
 
-| Entity                               | Type          | Description                               |
-|--------------------------------------|---------------|-------------------------------------------|
-| `sensor.beem_ai_battery_soc`         | Sensor        | Battery state of charge (%)               |
-| `sensor.beem_ai_solar_power`         | Sensor        | Solar production (W)                      |
-| `sensor.beem_ai_battery_power`       | Sensor        | Battery charge/discharge power (W)        |
-| `sensor.beem_ai_grid_power`          | Sensor        | Grid import/export (W)                    |
-| `sensor.beem_ai_consumption`         | Sensor        | Estimated house consumption (W)           |
-| `sensor.beem_ai_battery_soh`         | Sensor        | Battery health (%)                        |
-| `sensor.beem_ai_optimal_charge_target` | Sensor     | Tonight's target SoC (%)                 |
-| `sensor.beem_ai_optimal_charge_power`  | Sensor     | Planned charge power (W)                  |
-| `sensor.beem_ai_optimization_status`   | Sensor     | Current phase + reasoning text            |
-| `sensor.beem_ai_solar_forecast_today`  | Sensor     | Solar forecast for today (kWh)            |
-| `sensor.beem_ai_solar_forecast_tomorrow` | Sensor   | Solar forecast for tomorrow (kWh)         |
-| `sensor.beem_ai_consumption_forecast_today` | Sensor | Consumption forecast for today (kWh)  |
-| `sensor.beem_ai_cost_savings_today`  | Sensor        | Estimated savings today (EUR)             |
-| `binary_sensor.beem_ai_mqtt_connected` | Binary sensor | MQTT live-data connection status        |
-| `binary_sensor.beem_ai_grid_charging_recommended` | Binary sensor | Whether grid charging is planned |
-| `switch.beem_ai_enabled`            | Switch        | Enable / disable the automation entirely  |
+Entities are organized into three HA devices:
+
+### BeemAI Battery
+| Entity | Type | Description |
+|--------|------|-------------|
+| Battery SoC | Sensor | Battery state of charge (%) |
+| Solar Power | Sensor | Solar production (W) |
+| Battery Power | Sensor | Battery charge/discharge power (W) |
+| Grid Power | Sensor | Grid import/export (W) |
+| Consumption | Sensor | Estimated house consumption (W) |
+| Battery SoH | Sensor | Battery health (%) |
+| Optimal Charge Target | Sensor | Tonight's target SoC (%) |
+| Optimal Charge Power | Sensor | Planned charge power (W) |
+
+### BeemAI Solar Array
+| Entity | Type | Description |
+|--------|------|-------------|
+| Solar Forecast Today | Sensor | Solar forecast for today (kWh) |
+| Solar Forecast Tomorrow | Sensor | Solar forecast for tomorrow (kWh) |
+
+### BeemAI System
+| Entity | Type | Description |
+|--------|------|-------------|
+| Optimization Status | Sensor | Current phase + reasoning text |
+| Consumption Forecast Today | Sensor | Consumption forecast for today (kWh) |
+| Cost Savings Today | Sensor | Estimated savings today (EUR) |
+| MQTT Connected | Binary sensor | MQTT live-data connection status |
+| Grid Charging Recommended | Binary sensor | Whether grid charging is planned |
+| Enabled | Switch | Enable / disable the automation entirely |
 
 ---
 
@@ -109,12 +131,17 @@ Called once at 21:00, plans the entire overnight charge strategy for the next mo
 
 #### Phase Schedule (evening → morning)
 
-| Phase | Time | Action |
+Phase times are dynamically computed from your configured tariff periods:
+
+| Phase | Default Time | Action |
 |---|---|---|
-| `evening_hold` | 21:00–23:00 | Hold: no discharge, no grid charge |
-| `hc_phase` | 23:00–02:00 | Grid charge at calculated power (if needed) |
-| `hsc_phase` | 02:00–06:00 | Grid charge at full power (cheapest rate) |
-| `solar_mode` | 06:00+ | Release to solar priority |
+| `evening_hold` | 21:00 → off-peak start | Hold: no discharge, no grid charge |
+| `offpeak_charge` | Off-peak start → cheapest start | Grid charge at calculated power (if needed) |
+| `cheapest_charge` | Cheapest period | Grid charge at full power (cheapest rate) |
+| `solar_mode` | After off-peak ends | Release to solar priority |
+
+With Smart CFTG enabled, off-peak phases defer grid charging decisions to the
+5-minute CFTG monitor loop, which dynamically toggles based on SoC vs threshold.
 
 #### Intraday Monitoring (every 5 minutes)
 
@@ -161,7 +188,12 @@ Sources that persistently over- or under-predict are down-weighted automatically
 
 ---
 
-### French Tariff Schedule (EJP)
+### Configurable Tariff Periods
+
+Define up to 6 custom tariff periods in Options. Each period has a label, start/end
+time (HH:MM), and price. Periods can cross midnight (e.g. 23:00–02:00).
+
+**Default (French 3-tier, used when no custom periods configured):**
 
 | Tariff | Hours | Default price |
 |---|---|---|
@@ -169,7 +201,7 @@ Sources that persistently over- or under-predict are down-weighted automatically
 | HC (off-peak) | 23:00–02:00, 06:00–07:00 | €0.21/kWh |
 | HP (peak) | 07:00–23:00 | €0.27/kWh |
 
-Prices are configurable in Options.
+Any time outside configured periods uses the default tariff price.
 
 ---
 
@@ -214,4 +246,4 @@ python -m venv .venv && .venv/bin/pip install pytest pytest-asyncio aiohttp aiom
 .venv/bin/python -m pytest tests/ -v
 ```
 
-242 tests covering all modules.
+265 tests covering all modules.

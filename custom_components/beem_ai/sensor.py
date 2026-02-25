@@ -24,6 +24,42 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------------
+# Device info helpers
+# ------------------------------------------------------------------
+
+def _battery_device_info(entry: ConfigEntry) -> dict:
+    """Return DeviceInfo for the Battery device."""
+    return {
+        "identifiers": {(DOMAIN, f"battery_{entry.entry_id}")},
+        "name": "BeemAI Battery",
+        "manufacturer": "Beem Energy",
+        "model": "Battery System",
+    }
+
+
+def _solar_device_info(entry: ConfigEntry, index: int = 0) -> dict:
+    """Return DeviceInfo for a Solar Array device."""
+    return {
+        "identifiers": {(DOMAIN, f"solar_{entry.entry_id}_{index}")},
+        "name": f"BeemAI Solar Array {index + 1}",
+        "manufacturer": "Beem Energy",
+        "model": "Solar Array",
+        "via_device": (DOMAIN, f"battery_{entry.entry_id}"),
+    }
+
+
+def _system_device_info(entry: ConfigEntry) -> dict:
+    """Return DeviceInfo for the System device."""
+    return {
+        "identifiers": {(DOMAIN, f"system_{entry.entry_id}")},
+        "name": "BeemAI System",
+        "manufacturer": "Beem Energy",
+        "model": "Optimization System",
+        "via_device": (DOMAIN, f"battery_{entry.entry_id}"),
+    }
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -33,6 +69,7 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     sensors: list[SensorEntity | BinarySensorEntity] = [
+        # --- Battery device sensors ---
         BeemAISensor(
             coordinator, entry,
             key="battery_soc",
@@ -42,6 +79,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="%",
             value_fn=lambda c: round(c.state_store.battery.soc, 1),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -52,6 +90,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="W",
             value_fn=lambda c: round(c.state_store.battery.solar_power_w),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -62,6 +101,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="W",
             value_fn=lambda c: round(c.state_store.battery.battery_power_w),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -72,6 +112,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="W",
             value_fn=lambda c: round(c.state_store.battery.meter_power_w),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -82,6 +123,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="W",
             value_fn=lambda c: round(c.state_store.battery.consumption_w),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -92,6 +134,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="%",
             value_fn=lambda c: round(c.state_store.battery.soh, 1),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -102,6 +145,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="%",
             value_fn=lambda c: round(c.state_store.plan.target_soc),
+            device_type="battery",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -112,18 +156,10 @@ async def async_setup_entry(
             state_class=SensorStateClass.MEASUREMENT,
             unit="W",
             value_fn=lambda c: c.state_store.plan.charge_power_w,
+            device_type="battery",
         ),
-        BeemAISensor(
-            coordinator, entry,
-            key="optimization_status",
-            name="Optimization Status",
-            icon="mdi:brain",
-            device_class=None,
-            state_class=None,
-            unit=None,
-            value_fn=lambda c: c.state_store.plan.reasoning or c.state_store.plan.phase,
-            extra_fn=lambda c: {"phase": c.state_store.plan.phase},
-        ),
+
+        # --- Solar device sensors (array 0 = total/first array) ---
         BeemAISensor(
             coordinator, entry,
             key="solar_forecast_today",
@@ -137,6 +173,7 @@ async def async_setup_entry(
                 "sources": c.state_store.forecast.sources_used,
                 "confidence": c.state_store.forecast.confidence,
             },
+            device_type="solar",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -147,6 +184,21 @@ async def async_setup_entry(
             state_class=SensorStateClass.TOTAL,
             unit="kWh",
             value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
+            device_type="solar",
+        ),
+
+        # --- System device sensors ---
+        BeemAISensor(
+            coordinator, entry,
+            key="optimization_status",
+            name="Optimization Status",
+            icon="mdi:brain",
+            device_class=None,
+            state_class=None,
+            unit=None,
+            value_fn=lambda c: c.state_store.plan.reasoning or c.state_store.plan.phase,
+            extra_fn=lambda c: {"phase": c.state_store.plan.phase},
+            device_type="system",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -157,6 +209,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.TOTAL,
             unit="kWh",
             value_fn=lambda c: round(c.state_store.forecast.consumption_today_kwh, 1),
+            device_type="system",
         ),
         BeemAISensor(
             coordinator, entry,
@@ -167,6 +220,7 @@ async def async_setup_entry(
             state_class=SensorStateClass.TOTAL_INCREASING,
             unit="EUR",
             value_fn=lambda c: round(c.state_store.daily_savings_eur, 2),
+            device_type="system",
         ),
     ]
 
@@ -191,6 +245,8 @@ class BeemAISensor(CoordinatorEntity, SensorEntity):
         unit: str | None,
         value_fn,
         extra_fn=None,
+        device_type: str = "battery",
+        solar_index: int = 0,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -204,16 +260,17 @@ class BeemAISensor(CoordinatorEntity, SensorEntity):
         self._value_fn = value_fn
         self._extra_fn = extra_fn
         self._entry = entry
+        self._device_type = device_type
+        self._solar_index = solar_index
 
     @property
     def device_info(self):
         """Return device info for grouping entities."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "BeemAI Battery",
-            "manufacturer": "Beem Energy",
-            "model": "Battery System",
-        }
+        if self._device_type == "solar":
+            return _solar_device_info(self._entry, self._solar_index)
+        if self._device_type == "system":
+            return _system_device_info(self._entry)
+        return _battery_device_info(self._entry)
 
     @property
     def native_value(self):
@@ -249,6 +306,7 @@ class BeemAIBinarySensor(CoordinatorEntity, BinarySensorEntity):
         icon: str,
         device_class: BinarySensorDeviceClass | None,
         value_fn,
+        device_type: str = "battery",
     ) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)
@@ -259,16 +317,16 @@ class BeemAIBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_device_class = device_class
         self._value_fn = value_fn
         self._entry = entry
+        self._device_type = device_type
 
     @property
     def device_info(self):
         """Return device info for grouping entities."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "BeemAI Battery",
-            "manufacturer": "Beem Energy",
-            "model": "Battery System",
-        }
+        if self._device_type == "solar":
+            return _solar_device_info(self._entry)
+        if self._device_type == "system":
+            return _system_device_info(self._entry)
+        return _battery_device_info(self._entry)
 
     @property
     def is_on(self) -> bool | None:

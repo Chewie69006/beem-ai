@@ -27,6 +27,7 @@ async def async_setup_entry(
             icon="mdi:wifi",
             device_class=BinarySensorDeviceClass.CONNECTIVITY,
             value_fn=lambda c: c.state_store.mqtt_connected,
+            device_type="system",
         ),
         BeemAIBinarySensor(
             coordinator, entry,
@@ -35,5 +36,6 @@ async def async_setup_entry(
             icon="mdi:battery-charging-wireless",
             device_class=None,
             value_fn=lambda c: c.state_store.plan.allow_grid_charge,
+            device_type="system",
         ),
     ])

@@ -45,17 +45,24 @@ class OptimizationEngine:
         self._cumulative_solar_forecast_wh = 0.0
         self._last_intraday_hour = -1
         self._dry_run: bool = False
+        self._smart_cftg: bool = False
 
         # Instance vars for phase callbacks (async_call_later cannot pass kwargs)
-        self._hc_charge_needed: bool = False
-        self._hc_charge_power: int = 0
+        self._offpeak_charge_needed: bool = False
+        self._offpeak_charge_power: int = 0
 
     def reconfigure(self, config: dict) -> None:
         """Update configuration from options."""
         dry_run = config.get("dry_run")
         if dry_run is not None:
             self._dry_run = bool(dry_run)
-        log.info("OptimizationEngine reconfigured: dry_run=%s", self._dry_run)
+        smart_cftg = config.get("smart_cftg")
+        if smart_cftg is not None:
+            self._smart_cftg = bool(smart_cftg)
+        log.info(
+            "OptimizationEngine reconfigured: dry_run=%s, smart_cftg=%s",
+            self._dry_run, self._smart_cftg,
+        )
 
     # ---- Evening optimization (21:00) ----
 
@@ -87,13 +94,21 @@ class OptimizationEngine:
             net_balance, capacity, current_soc, production_kwh
         )
 
-        # Determine charge power to reach target in 4h HSC window
+        # Determine charge power based on cheapest window duration
+        cheapest_window = self._tariff.next_cheapest_window()
+        if cheapest_window:
+            window_hours = (cheapest_window[1] - cheapest_window[0]).total_seconds() / 3600.0
+        else:
+            window_hours = 4.0  # fallback
+
         charge_power = self._calculate_charge_power(
-            current_soc, target_soc, capacity
+            current_soc, target_soc, capacity, window_hours=window_hours
         )
 
-        # Need HC charging too?
-        need_hc = self._needs_hc_charging(current_soc, target_soc, capacity, charge_power)
+        # Need additional off-peak charging outside cheapest window?
+        need_offpeak = self._needs_offpeak_charging(
+            current_soc, target_soc, capacity, charge_power, window_hours
+        )
 
         # Build plan
         plan = CurrentPlan(
@@ -119,11 +134,11 @@ class OptimizationEngine:
         self._cancel_scheduled()
 
         # Store phase params as instance vars for async_call_later callbacks
-        self._hc_charge_needed = need_hc
-        self._hc_charge_power = charge_power
+        self._offpeak_charge_needed = need_offpeak
+        self._offpeak_charge_power = charge_power
 
-        # Schedule phase transitions
-        self._schedule_phases(plan, charge_power, need_hc)
+        # Schedule phase transitions from tariff periods
+        self._schedule_phases(plan, charge_power, need_offpeak)
 
         # Apply immediate phase (evening hold: prevent discharge)
         await self._apply_evening_hold()
@@ -200,14 +215,15 @@ class OptimizationEngine:
         return total_w / 1000.0  # Convert Wh to kWh
 
     def _calculate_charge_power(
-        self, current_soc: float, target_soc: float, capacity: float
+        self, current_soc: float, target_soc: float, capacity: float,
+        window_hours: float = 4.0
     ) -> int:
-        """Pick minimum charge power step to reach target in 4h HSC window."""
+        """Pick minimum charge power step to reach target in the cheapest window."""
         if target_soc <= current_soc:
             return 0
 
         needed_kwh = (target_soc - current_soc) / 100.0 * capacity
-        needed_w = needed_kwh * 1000.0 / 4.0  # Over 4 hours
+        needed_w = needed_kwh * 1000.0 / max(window_hours, 1.0)
 
         for step in POWER_STEPS:
             if step >= needed_w:
@@ -215,48 +231,66 @@ class OptimizationEngine:
 
         return POWER_STEPS[-1]
 
-    def _needs_hc_charging(
-        self, current_soc: float, target_soc: float, capacity: float, hsc_power: int
+    def _needs_offpeak_charging(
+        self, current_soc: float, target_soc: float, capacity: float,
+        cheapest_power: int, window_hours: float
     ) -> bool:
-        """Check if HC window (23:00-02:00) is needed in addition to HSC."""
-        if hsc_power == 0:
+        """Check if additional off-peak charging is needed beyond cheapest window."""
+        if cheapest_power == 0:
             return False
-        hsc_kwh = hsc_power * 4.0 / 1000.0
+        cheapest_kwh = cheapest_power * window_hours / 1000.0
         needed_kwh = (target_soc - current_soc) / 100.0 * capacity
-        return needed_kwh > hsc_kwh
+        return needed_kwh > cheapest_kwh
 
-    def _schedule_phases(self, plan: CurrentPlan, charge_power: int, need_hc: bool):
-        """Schedule phase transitions via HA async_call_later."""
+    def _schedule_phases(self, plan: CurrentPlan, charge_power: int, need_offpeak: bool):
+        """Schedule phase transitions from tariff periods via HA async_call_later."""
         now = datetime.now()
-        today = now.date()
-        tomorrow = today + timedelta(days=1)
 
-        # Phase 1: 21:00-23:00 — evening hold (already applied)
+        # Get the off-peak and cheapest windows from tariff manager
+        offpeak_window = self._tariff.next_off_peak_window()
+        cheapest_window = self._tariff.next_cheapest_window()
 
-        # Phase 2: 23:00-02:00 — HC charge (if needed)
-        hc_start = datetime.combine(today, datetime.strptime("23:00", "%H:%M").time())
-        if hc_start <= now:
-            hc_start += timedelta(days=1)
-        hc_delay = (hc_start - now).total_seconds()
-        h = async_call_later(self._hass, hc_delay, self._apply_hc_phase)
-        self._scheduled_handles.append(h)
+        if offpeak_window is None:
+            # No periods configured — use legacy fixed times
+            today = now.date()
+            tomorrow = today + timedelta(days=1)
+            offpeak_start = datetime.combine(today, datetime.strptime("23:00", "%H:%M").time())
+            if offpeak_start <= now:
+                offpeak_start += timedelta(days=1)
+            cheapest_start = datetime.combine(tomorrow, datetime.strptime("02:00", "%H:%M").time())
+            solar_start = datetime.combine(tomorrow, datetime.strptime("06:00", "%H:%M").time())
+        else:
+            offpeak_start = offpeak_window[0]
+            solar_start = offpeak_window[1]
+            if cheapest_window:
+                cheapest_start = cheapest_window[0]
+            else:
+                cheapest_start = offpeak_start
 
-        # Phase 3: 02:00-06:00 — HSC charge
-        hsc_start = datetime.combine(tomorrow, datetime.strptime("02:00", "%H:%M").time())
-        hsc_delay = (hsc_start - now).total_seconds()
-        h = async_call_later(self._hass, hsc_delay, self._apply_hsc_phase)
-        self._scheduled_handles.append(h)
+        # Phase 1: now until off-peak start — evening hold (already applied)
 
-        # Phase 4: 06:00+ — solar mode
-        solar_start = datetime.combine(tomorrow, datetime.strptime("06:00", "%H:%M").time())
-        solar_delay = (solar_start - now).total_seconds()
-        h = async_call_later(self._hass, solar_delay, self._apply_solar_mode)
-        self._scheduled_handles.append(h)
+        # Phase 2: off-peak start — charge at secondary rate if needed
+        if offpeak_start > now:
+            offpeak_delay = (offpeak_start - now).total_seconds()
+            h = async_call_later(self._hass, offpeak_delay, self._apply_offpeak_phase)
+            self._scheduled_handles.append(h)
+
+        # Phase 3: cheapest window start — charge at cheapest rate
+        if cheapest_start > now and cheapest_start != offpeak_start:
+            cheapest_delay = (cheapest_start - now).total_seconds()
+            h = async_call_later(self._hass, cheapest_delay, self._apply_cheapest_phase)
+            self._scheduled_handles.append(h)
+
+        # Phase 4: after off-peak ends — solar mode
+        if solar_start > now:
+            solar_delay = (solar_start - now).total_seconds()
+            h = async_call_later(self._hass, solar_delay, self._apply_solar_mode)
+            self._scheduled_handles.append(h)
 
         log.info(
-            "Scheduled phases: HC@%s (charge=%s), HSC@%s, solar@%s",
-            hc_start.strftime("%H:%M"), need_hc,
-            hsc_start.strftime("%H:%M"), solar_start.strftime("%H:%M"),
+            "Scheduled phases: offpeak@%s (charge=%s), cheapest@%s, solar@%s",
+            offpeak_start.strftime("%H:%M"), need_offpeak,
+            cheapest_start.strftime("%H:%M"), solar_start.strftime("%H:%M"),
         )
 
     def _cancel_scheduled(self):
@@ -282,44 +316,53 @@ class OptimizationEngine:
         self._state.update_plan(phase="evening_hold")
         log.info("Phase: evening_hold — preventing discharge")
 
-    async def _apply_hc_phase(self, _now=None):
-        """Phase 2: HC charging if needed (23:00-02:00)."""
-        charge = self._hc_charge_needed
-        power = self._hc_charge_power
+    async def _apply_offpeak_phase(self, _now=None):
+        """Phase 2: Off-peak charging if needed (secondary rate)."""
+        charge = self._offpeak_charge_needed
+        power = self._offpeak_charge_power
 
         if charge and power > 0:
-            await self._set_battery_control(
-                prevent_discharge=True,
-                allow_grid_charge=True,
-                min_soc=self._safety.min_soc,
-                max_soc=int(self._state.plan.target_soc),
-                charge_power=power,
-            )
-            self._state.update_plan(phase="hc_charge")
-            log.info("Phase: hc_charge — charging at %dW", power)
+            if self._smart_cftg:
+                # Defer to smart CFTG monitor — just set phase name
+                self._state.update_plan(phase="offpeak_charge")
+                log.info("Phase: offpeak_charge — smart CFTG will manage charging")
+            else:
+                await self._set_battery_control(
+                    prevent_discharge=True,
+                    allow_grid_charge=True,
+                    min_soc=self._safety.min_soc,
+                    max_soc=int(self._state.plan.target_soc),
+                    charge_power=power,
+                )
+                self._state.update_plan(phase="offpeak_charge")
+                log.info("Phase: offpeak_charge — charging at %dW", power)
         else:
-            self._state.update_plan(phase="hc_hold")
-            log.info("Phase: hc_hold — no HC charging needed")
+            self._state.update_plan(phase="offpeak_hold")
+            log.info("Phase: offpeak_hold — no off-peak charging needed")
 
-    async def _apply_hsc_phase(self, _now=None):
-        """Phase 3: HSC charging (02:00-06:00)."""
-        power = self._hc_charge_power
+    async def _apply_cheapest_phase(self, _now=None):
+        """Phase 3: Cheapest-rate charging."""
+        power = self._offpeak_charge_power
 
         if power > 0:
-            await self._set_battery_control(
-                prevent_discharge=True,
-                allow_grid_charge=True,
-                min_soc=self._safety.min_soc,
-                max_soc=int(self._state.plan.target_soc),
-                charge_power=power,
-            )
-            self._state.update_plan(phase="hsc_charge")
-            log.info("Phase: hsc_charge — charging at %dW (cheapest rate)", power)
+            if self._smart_cftg:
+                self._state.update_plan(phase="cheapest_charge")
+                log.info("Phase: cheapest_charge — smart CFTG will manage charging")
+            else:
+                await self._set_battery_control(
+                    prevent_discharge=True,
+                    allow_grid_charge=True,
+                    min_soc=self._safety.min_soc,
+                    max_soc=int(self._state.plan.target_soc),
+                    charge_power=power,
+                )
+                self._state.update_plan(phase="cheapest_charge")
+                log.info("Phase: cheapest_charge — charging at %dW (cheapest rate)", power)
         else:
-            log.info("Phase: hsc — no charging needed")
+            log.info("Phase: cheapest — no charging needed")
 
     async def _apply_solar_mode(self, _now=None):
-        """Phase 4: Release to solar mode (06:00+)."""
+        """Phase 4: Release to solar mode."""
         await self._set_battery_control(
             prevent_discharge=False,
             allow_grid_charge=False,
@@ -369,6 +412,77 @@ class OptimizationEngine:
             max_soc=max_soc,
             charge_power=charge_power,
         )
+
+    # ---- Smart CFTG (Charge From The Grid) ----
+
+    async def check_smart_cftg(self):
+        """Smart CFTG: dynamically toggle grid charging based on SoC vs threshold.
+
+        Called every 5 minutes by the coordinator. Only acts during off-peak
+        phases when smart_cftg is enabled.
+        """
+        if not self._smart_cftg:
+            return
+
+        if not self._state.enabled:
+            return
+
+        now = datetime.now()
+        plan = self._state.plan
+
+        # Only act during off-peak charge phases
+        if plan.phase not in ("offpeak_charge", "cheapest_charge"):
+            return
+
+        # Must be in a cheapest-tariff period
+        if not self._tariff.is_in_cheapest_period(now):
+            # In off-peak but not cheapest — check if in any period
+            if not self._tariff.is_in_any_period(now):
+                return
+
+        current_soc = self._state.battery.soc
+        threshold = self._safety.min_soc
+
+        if threshold == 0:
+            # Min SoC disabled — always allow discharge (no CFTG)
+            await self._set_battery_control(
+                prevent_discharge=False,
+                allow_grid_charge=False,
+                min_soc=0,
+                max_soc=100,
+                charge_power=0,
+            )
+            log.debug("Smart CFTG: threshold=0, disabling CFTG, allowing discharge")
+            return
+
+        if current_soc > threshold:
+            # SoC above threshold — disable CFTG, allow discharge
+            await self._set_battery_control(
+                prevent_discharge=False,
+                allow_grid_charge=False,
+                min_soc=threshold,
+                max_soc=100,
+                charge_power=0,
+            )
+            log.info(
+                "Smart CFTG: SoC %.0f%% > threshold %d%% — disabling CFTG, allowing discharge",
+                current_soc, threshold,
+            )
+        else:
+            # SoC at or below threshold — enable CFTG at plan's charge power
+            charge_power = self._offpeak_charge_power
+            target_soc = int(plan.target_soc)
+            await self._set_battery_control(
+                prevent_discharge=True,
+                allow_grid_charge=True,
+                min_soc=threshold,
+                max_soc=target_soc,
+                charge_power=charge_power,
+            )
+            log.info(
+                "Smart CFTG: SoC %.0f%% <= threshold %d%% — enabling CFTG at %dW",
+                current_soc, threshold, charge_power,
+            )
 
     # ---- Intraday loop (every 5 min) ----
 
@@ -449,8 +563,8 @@ class OptimizationEngine:
             f"Target: {target:.0f}%",
         ]
         if power > 0:
-            tariff = "HSC" if power > 0 else "none"
-            parts.append(f"Charge: {power}W @ {tariff}")
+            cheapest_label, _ = self._tariff.get_cheapest_tariff()
+            parts.append(f"Charge: {power}W @ {cheapest_label}")
         else:
             parts.append("No grid charging needed")
         return " | ".join(parts)

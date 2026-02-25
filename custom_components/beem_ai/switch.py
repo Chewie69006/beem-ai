@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .sensor import _system_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,12 +43,7 @@ class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def device_info(self):
         """Return device info for grouping entities."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "BeemAI Battery",
-            "manufacturer": "Beem Energy",
-            "model": "Battery System",
-        }
+        return _system_device_info(self._entry)
 
     @property
     def is_on(self) -> bool:

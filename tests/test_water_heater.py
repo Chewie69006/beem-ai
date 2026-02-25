@@ -5,12 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.beem_ai.tariff_manager import (
-    TARIFF_HC,
-    TARIFF_HP,
-    TARIFF_HSC,
-    TariffManager,
-)
+from custom_components.beem_ai.tariff_manager import TariffManager
 from custom_components.beem_ai.water_heater import (
     WaterHeaterController,
     _BATTERY_FULL_SOC,
@@ -27,7 +22,11 @@ _HEATER_POWER_W = 2000.0  # matches fixture below
 
 @pytest.fixture
 def tariff_manager():
-    return TariffManager(hp_price=0.27, hc_price=0.20, hsc_price=0.15)
+    return TariffManager(default_price=0.27, periods=[
+        {"label": "HC", "start": "23:00", "end": "02:00", "price": 0.20},
+        {"label": "HSC", "start": "02:00", "end": "06:00", "price": 0.15},
+        {"label": "HC", "start": "06:00", "end": "07:00", "price": 0.20},
+    ])
 
 
 @pytest.fixture
@@ -48,20 +47,33 @@ def heater(mock_hass, state_store, event_bus, tariff_manager):
     )
 
 
+def _patch_peak(heater):
+    """Patch tariff manager to simulate peak (HP) tariff — not in any period."""
+    return patch.object(heater._tariff_manager, "is_in_any_period", return_value=False)
+
+
+def _patch_offpeak(heater, cheapest=False):
+    """Patch tariff manager to simulate off-peak tariff (in a period)."""
+    return (
+        patch.object(heater._tariff_manager, "is_in_any_period", return_value=True),
+        patch.object(heater._tariff_manager, "is_in_cheapest_period", return_value=cheapest),
+    )
+
+
 # ------------------------------------------------------------------
-# Solar surplus → ON (rule 2)
+# Solar surplus -> ON (rule 2)
 # ------------------------------------------------------------------
 
 
 class TestSolarSurplus:
     @pytest.mark.asyncio
     async def test_surplus_turns_on(self, heater, state_store, mock_hass):
-        """Grid export >= heater_power_w → heater ON."""
+        """Grid export >= heater_power_w -> heater ON."""
         # Export must be >= 2000W to cover heater draw
         state_store.update_battery(meter_power_w=-2100)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
-            decision = await heater.evaluate()
+        # Rule 2 fires and returns before any tariff check
+        decision = await heater.evaluate()
 
         assert decision.startswith("solar surplus:")
         assert heater.is_on is True
@@ -72,7 +84,7 @@ class TestSolarSurplus:
         """Export below heater_power_w (e.g. 300W) should NOT trigger solar surplus."""
         state_store.update_battery(meter_power_w=-300)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        with _patch_peak(heater):
             decision = await heater.evaluate()
 
         assert not decision.startswith("solar surplus:")
@@ -83,8 +95,8 @@ class TestSolarSurplus:
         """Solar surplus sets _solar_on flag."""
         state_store.update_battery(meter_power_w=-2500)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
-            await heater.evaluate()
+        # Rule 2 fires and returns before any tariff check
+        await heater.evaluate()
 
         assert heater._solar_on is True
 
@@ -97,16 +109,14 @@ class TestSolarSurplus:
 class TestSolarSurplusEnded:
     @pytest.mark.asyncio
     async def test_surplus_ended_turns_off(self, heater, state_store):
-        """Export drops below 50% of heater_power + was solar-ON → heater turns OFF."""
+        """Export drops below 50% of heater_power + was solar-ON -> heater turns OFF."""
         # Export is well below the hysteresis threshold (50% of 2000W = 1000W)
-        # Use HSC tariff so no further rules interfere with the final state.
         state_store.update_battery(meter_power_w=0, solar_power_w=50.0)
         heater._is_on = True
         heater._solar_on = True
         heater._daily_energy_kwh = 5.0  # enough energy, so off-peak fallback won't fire
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HSC):
-            await heater.evaluate()
+        await heater.evaluate()
 
         # Key assertions: flag cleared and heater turned off
         assert heater.is_on is False
@@ -114,13 +124,13 @@ class TestSolarSurplusEnded:
 
     @pytest.mark.asyncio
     async def test_hysteresis_keeps_on_in_middle_zone(self, heater, state_store):
-        """Export between 50%–100% of heater_power + solar-ON → stays ON (hysteresis)."""
+        """Export between 50%-100% of heater_power + solar-ON -> stays ON (hysteresis)."""
         # 50% of 2000W = 1000W; set export to 1200W (between 1000 and 2000)
         state_store.update_battery(meter_power_w=-1200)
         heater._is_on = True
         heater._solar_on = True
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        with _patch_peak(heater):
             await heater.evaluate()
 
         # Should stay on due to hysteresis (neither retrigger condition met)
@@ -128,22 +138,22 @@ class TestSolarSurplusEnded:
 
 
 # ------------------------------------------------------------------
-# Battery near full → ON (rule 4)
+# Battery near full -> ON (rule 5)
 # ------------------------------------------------------------------
 
 
 class TestBatteryFull:
     @pytest.mark.asyncio
     async def test_battery_full_with_solar_turns_on(self, heater, state_store):
-        """SoC >= 90% + solar producing → heater ON."""
+        """SoC >= 90% + solar producing -> heater ON."""
         state_store.update_battery(
             soc=92.0,
             solar_power_w=1500.0,
             meter_power_w=0,  # no export (battery absorbing)
         )
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
-            decision = await heater.evaluate()
+        # Rule 5 fires and returns before tariff checks
+        decision = await heater.evaluate()
 
         assert "battery full" in decision
         assert heater.is_on is True
@@ -151,10 +161,11 @@ class TestBatteryFull:
 
     @pytest.mark.asyncio
     async def test_battery_full_no_solar_does_not_trigger(self, heater, state_store):
-        """SoC >= 90% but no solar production → should NOT trigger."""
+        """SoC >= 90% but no solar production -> should NOT trigger."""
         state_store.update_battery(soc=95.0, solar_power_w=50.0, meter_power_w=0)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        # Falls through to rule 7/8, need peak tariff so rule 7 doesn't fire
+        with _patch_peak(heater):
             decision = await heater.evaluate()
 
         assert "battery full" not in decision
@@ -162,10 +173,10 @@ class TestBatteryFull:
 
     @pytest.mark.asyncio
     async def test_battery_below_threshold_does_not_trigger(self, heater, state_store):
-        """SoC < 90% even with solar → should NOT trigger battery-full rule."""
+        """SoC < 90% even with solar -> should NOT trigger battery-full rule."""
         state_store.update_battery(soc=88.0, solar_power_w=2000.0, meter_power_w=0)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        with _patch_peak(heater):
             decision = await heater.evaluate()
 
         assert "battery full" not in decision
@@ -178,7 +189,7 @@ class TestBatteryFull:
         heater._is_on = True
         heater._battery_on = True
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        with _patch_peak(heater):
             await heater.evaluate()
 
         assert heater.is_on is True
@@ -190,8 +201,8 @@ class TestBatteryFull:
         heater._is_on = True
         heater._battery_on = True
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
-            decision = await heater.evaluate()
+        # Rule 6 fires and returns before tariff checks
+        decision = await heater.evaluate()
 
         assert "battery-full mode ended" in decision
         assert heater.is_on is False
@@ -199,18 +210,19 @@ class TestBatteryFull:
 
 
 # ------------------------------------------------------------------
-# Off-peak fallback (rule 6)
+# Off-peak fallback (rule 7)
 # ------------------------------------------------------------------
 
 
 class TestOffPeakFallback:
     @pytest.mark.asyncio
     async def test_hsc_tariff_low_energy_turns_on(self, heater, state_store):
-        """HSC tariff + low daily energy → heater ON."""
+        """Cheapest tariff + low daily energy -> heater ON."""
         state_store.update_battery(meter_power_w=100)
         heater._daily_energy_kwh = 1.0
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HSC):
+        p_any, p_cheap = _patch_offpeak(heater, cheapest=True)
+        with p_any, p_cheap:
             decision = await heater.evaluate()
 
         assert decision.startswith("off-peak fallback:")
@@ -218,7 +230,7 @@ class TestOffPeakFallback:
 
     @pytest.mark.asyncio
     async def test_hc_tariff_after_deadline_turns_on(self, heater, state_store):
-        """HC tariff after 22:00 + low energy → heater ON."""
+        """Off-peak (non-cheapest) tariff after 22:00 + low energy -> heater ON."""
         state_store.update_battery(meter_power_w=100)
         heater._daily_energy_kwh = 1.0
 
@@ -229,9 +241,11 @@ class TestOffPeakFallback:
             def now(cls, tz=None):
                 return fake_now
 
+        p_any, p_cheap = _patch_offpeak(heater, cheapest=False)
         with (
             patch("custom_components.beem_ai.water_heater.datetime", FakeDatetime),
-            patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HC),
+            p_any,
+            p_cheap,
         ):
             decision = await heater.evaluate()
 
@@ -239,7 +253,7 @@ class TestOffPeakFallback:
 
     @pytest.mark.asyncio
     async def test_hc_tariff_before_deadline_no_turn_on(self, heater, state_store):
-        """HC tariff before 22:00 → should NOT trigger fallback."""
+        """Off-peak (non-cheapest) tariff before 22:00 -> should NOT trigger fallback."""
         state_store.update_battery(meter_power_w=100)
         heater._daily_energy_kwh = 1.0
 
@@ -250,9 +264,11 @@ class TestOffPeakFallback:
             def now(cls, tz=None):
                 return fake_now
 
+        p_any, p_cheap = _patch_offpeak(heater, cheapest=False)
         with (
             patch("custom_components.beem_ai.water_heater.datetime", FakeDatetime),
-            patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HC),
+            p_any,
+            p_cheap,
         ):
             decision = await heater.evaluate()
 
@@ -260,29 +276,30 @@ class TestOffPeakFallback:
 
     @pytest.mark.asyncio
     async def test_enough_energy_no_fallback(self, heater, state_store):
-        """Already heated enough → off-peak fallback skipped."""
+        """Already heated enough -> off-peak fallback skipped."""
         state_store.update_battery(meter_power_w=100)
         heater._daily_energy_kwh = 5.0
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HSC):
+        p_any, p_cheap = _patch_offpeak(heater, cheapest=True)
+        with p_any, p_cheap:
             decision = await heater.evaluate()
 
         assert decision == "maintaining current state"
 
 
 # ------------------------------------------------------------------
-# HP + grid import → OFF (rule 7)
+# HP + grid import -> OFF (rule 8)
 # ------------------------------------------------------------------
 
 
 class TestGridImportHP:
     @pytest.mark.asyncio
     async def test_importing_during_hp_turns_off(self, heater, state_store):
-        """Grid import during HP tariff → heater OFF."""
+        """Grid import during HP tariff -> heater OFF."""
         state_store.update_battery(meter_power_w=800)
         heater._is_on = True
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
+        with _patch_peak(heater):
             decision = await heater.evaluate()
 
         assert "HP tariff" in decision
@@ -290,7 +307,7 @@ class TestGridImportHP:
 
 
 # ------------------------------------------------------------------
-# System disabled → OFF (rule 1)
+# System disabled -> OFF (rule 1)
 # ------------------------------------------------------------------
 
 
@@ -323,8 +340,8 @@ class TestDryRun:
         heater._dry_run = True
         state_store.update_battery(meter_power_w=-2500)
 
-        with patch.object(heater._tariff_manager, "get_current_tariff", return_value=TARIFF_HP):
-            decision = await heater.evaluate()
+        # Rule 2 fires (solar surplus) before tariff checks
+        decision = await heater.evaluate()
 
         assert "[DRY RUN]" in decision
         mock_hass.services.async_call.assert_not_called()

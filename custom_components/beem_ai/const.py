@@ -20,9 +20,10 @@ OPT_LOCATION_LAT = "location_lat"
 OPT_LOCATION_LON = "location_lon"
 OPT_SOLCAST_API_KEY = "solcast_api_key"
 OPT_SOLCAST_SITE_ID = "solcast_site_id"
-OPT_TARIFF_HP_PRICE = "tariff_hp_price"
-OPT_TARIFF_HC_PRICE = "tariff_hc_price"
-OPT_TARIFF_HSC_PRICE = "tariff_hsc_price"
+OPT_TARIFF_DEFAULT_PRICE = "tariff_default_price"
+OPT_TARIFF_PERIODS_JSON = "tariff_periods_json"
+OPT_TARIFF_PERIOD_COUNT = "tariff_period_count"
+OPT_SMART_CFTG = "smart_cftg"
 OPT_MIN_SOC_SUMMER = "min_soc_summer"
 OPT_MIN_SOC_WINTER = "min_soc_winter"
 OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
@@ -33,9 +34,9 @@ OPT_PANEL_ARRAYS_JSON = "panel_arrays_json"
 OPT_DRY_RUN = "dry_run"
 
 # --- Options defaults ---
-DEFAULT_TARIFF_HP = 0.27
-DEFAULT_TARIFF_HC = 0.21
-DEFAULT_TARIFF_HSC = 0.16
+DEFAULT_TARIFF_DEFAULT_PRICE = 0.27
+DEFAULT_TARIFF_PERIOD_COUNT = 2
+DEFAULT_SMART_CFTG = False
 DEFAULT_MIN_SOC_SUMMER = 0
 DEFAULT_MIN_SOC_WINTER = 50
 DEFAULT_WATER_HEATER_POWER_W = 2000

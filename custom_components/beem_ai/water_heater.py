@@ -224,21 +224,23 @@ class WaterHeaterController:
 
         # 7. Off-peak fallback: ensure the tank gets its minimum daily energy
         #    during cheap tariff hours.
-        is_off_peak = tariff in (TARIFF_HSC, TARIFF_HC)
+        is_off_peak = self._tariff_manager.is_in_any_period()
         if is_off_peak and self._daily_energy_kwh < _DAILY_HEATING_MIN_KWH:
             now = datetime.now()
-            # During HSC (02:00–06:00): always allow.
-            # During HC (23:00–02:00 + 06:00–07:00): only after 22:00
-            # to avoid heating at the start of HC when it's still daytime.
-            if tariff == TARIFF_HSC or now.time() >= _HC_FALLBACK_DEADLINE:
+            # During cheapest period: always allow.
+            # During other off-peak: only after 22:00
+            # to avoid heating at the start of off-peak when it's still daytime.
+            is_cheapest = self._tariff_manager.is_in_cheapest_period()
+            if is_cheapest or now.time() >= _HC_FALLBACK_DEADLINE:
                 await self._turn_on(
                     f"off-peak fallback: {tariff} tariff, "
                     f"only {self._daily_energy_kwh:.2f} kWh heated today"
                 )
                 return self._last_decision
 
-        # 8. Cost protection: don't import expensive HP electricity to heat water.
-        if tariff == TARIFF_HP and battery.is_importing:
+        # 8. Cost protection: don't import expensive peak electricity to heat water.
+        is_peak = not self._tariff_manager.is_in_any_period()
+        if is_peak and battery.is_importing:
             await self._turn_off(
                 f"HP tariff + grid import {battery.import_power_w:.0f} W: avoiding cost"
             )

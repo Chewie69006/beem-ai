@@ -12,6 +12,18 @@
           "email": "The email address used for your Beem Energy account.",
           "password": "Your Beem Energy account password."
         }
+      },
+      "solcast": {
+        "title": "Solar Forecasting (Optional)",
+        "description": "Optionally configure Solcast for improved solar forecasting.",
+        "data": {
+          "solcast_api_key": "Solcast API Key",
+          "solcast_site_id": "Solcast Site ID"
+        },
+        "data_description": {
+          "solcast_api_key": "API key for Solcast solar forecasting. Leave blank to skip.",
+          "solcast_site_id": "Solcast site identifier. Leave blank to skip."
+        }
       }
     },
     "error": {
@@ -31,36 +43,66 @@
       "init": {
         "title": "BeemAI Settings",
         "data": {
-          "location_lat": "Latitude",
-          "location_lon": "Longitude",
+          "location_lat": "Latitude (optional)",
+          "location_lon": "Longitude (optional)",
           "solcast_api_key": "Solcast API Key",
           "solcast_site_id": "Solcast Site ID",
-          "tariff_hp_price": "Peak tariff price (EUR/kWh)",
-          "tariff_hc_price": "Off-peak tariff price (EUR/kWh)",
-          "tariff_hsc_price": "Super off-peak tariff price (EUR/kWh)",
+          "tariff_default_price": "Default tariff price (EUR/kWh)",
+          "tariff_period_count": "Number of tariff periods",
           "min_soc_summer": "Minimum SoC in summer (%)",
           "min_soc_winter": "Minimum SoC in winter (%)",
           "water_heater_switch_entity": "Water heater switch entity",
           "water_heater_power_entity": "Water heater power sensor entity",
           "water_heater_power_w": "Water heater power (W)",
           "panel_count": "Number of solar panel arrays",
+          "smart_cftg": "Smart charge from grid",
           "dry_run": "Dry-run mode (log actions, don't execute them)"
         },
         "data_description": {
-          "location_lat": "Latitude of your installation.",
-          "location_lon": "Longitude of your installation.",
+          "location_lat": "Latitude of your installation. Leave blank to use Home Assistant's configured location.",
+          "location_lon": "Longitude of your installation. Leave blank to use Home Assistant's configured location.",
           "solcast_api_key": "API key for Solcast solar forecasting (optional).",
           "solcast_site_id": "Solcast site identifier (optional).",
-          "tariff_hp_price": "Electricity price during peak hours in EUR/kWh.",
-          "tariff_hc_price": "Electricity price during off-peak hours in EUR/kWh.",
-          "tariff_hsc_price": "Electricity price during super off-peak hours in EUR/kWh.",
+          "tariff_default_price": "Default electricity price in EUR/kWh (used when not in any configured tariff period).",
+          "tariff_period_count": "Number of tariff periods to configure (1-6). Each period has a time range and price.",
           "min_soc_summer": "Minimum battery state of charge in summer. Use 0 to disable, or a value between 30 and 100.",
           "min_soc_winter": "Minimum battery state of charge in winter. Use 0 to disable, or a value between 30 and 100.",
           "water_heater_switch_entity": "Entity ID of the water heater switch (optional).",
           "water_heater_power_entity": "Entity ID of the water heater power sensor (optional).",
           "water_heater_power_w": "Nominal power consumption of the water heater in watts.",
           "panel_count": "Number of distinct solar panel arrays (orientations).",
+          "smart_cftg": "When enabled, dynamically toggles grid charging during off-peak hours based on battery SoC vs threshold. Allows discharge when SoC is adequate.",
           "dry_run": "When enabled, all battery and water heater commands are logged but not sent. Useful for verifying decisions before going live."
+        }
+      },
+      "tariffs": {
+        "title": "Tariff Periods",
+        "description": "Configure your electricity tariff periods. Each period has a label, time range, and price.",
+        "data": {
+          "tariff_1_label": "Period 1 label",
+          "tariff_1_start": "Period 1 start (HH:MM)",
+          "tariff_1_end": "Period 1 end (HH:MM)",
+          "tariff_1_price": "Period 1 price (EUR/kWh)",
+          "tariff_2_label": "Period 2 label",
+          "tariff_2_start": "Period 2 start (HH:MM)",
+          "tariff_2_end": "Period 2 end (HH:MM)",
+          "tariff_2_price": "Period 2 price (EUR/kWh)",
+          "tariff_3_label": "Period 3 label",
+          "tariff_3_start": "Period 3 start (HH:MM)",
+          "tariff_3_end": "Period 3 end (HH:MM)",
+          "tariff_3_price": "Period 3 price (EUR/kWh)",
+          "tariff_4_label": "Period 4 label",
+          "tariff_4_start": "Period 4 start (HH:MM)",
+          "tariff_4_end": "Period 4 end (HH:MM)",
+          "tariff_4_price": "Period 4 price (EUR/kWh)",
+          "tariff_5_label": "Period 5 label",
+          "tariff_5_start": "Period 5 start (HH:MM)",
+          "tariff_5_end": "Period 5 end (HH:MM)",
+          "tariff_5_price": "Period 5 price (EUR/kWh)",
+          "tariff_6_label": "Period 6 label",
+          "tariff_6_start": "Period 6 start (HH:MM)",
+          "tariff_6_end": "Period 6 end (HH:MM)",
+          "tariff_6_price": "Period 6 price (EUR/kWh)"
         }
       },
       "panels": {

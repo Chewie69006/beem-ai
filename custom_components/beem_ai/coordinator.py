@@ -26,9 +26,8 @@ from .const import (
     DEFAULT_MIN_SOC_SUMMER,
     DEFAULT_MIN_SOC_WINTER,
     DEFAULT_PANEL_COUNT,
-    DEFAULT_TARIFF_HC,
-    DEFAULT_TARIFF_HP,
-    DEFAULT_TARIFF_HSC,
+    DEFAULT_SMART_CFTG,
+    DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_WATER_HEATER_POWER_W,
     DOMAIN,
     OPT_DRY_RUN,
@@ -38,11 +37,11 @@ from .const import (
     OPT_MIN_SOC_WINTER,
     OPT_PANEL_ARRAYS_JSON,
     OPT_PANEL_COUNT,
+    OPT_SMART_CFTG,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
-    OPT_TARIFF_HC_PRICE,
-    OPT_TARIFF_HP_PRICE,
-    OPT_TARIFF_HSC_PRICE,
+    OPT_TARIFF_DEFAULT_PRICE,
+    OPT_TARIFF_PERIODS_JSON,
     OPT_WATER_HEATER_POWER_ENTITY,
     OPT_WATER_HEATER_POWER_W,
     OPT_WATER_HEATER_SWITCH,
@@ -67,6 +66,7 @@ UPDATE_INTERVAL = timedelta(minutes=2)
 FORECAST_INTERVAL = timedelta(hours=1)
 INTRADAY_INTERVAL = timedelta(minutes=5)
 WATER_HEATER_INTERVAL = timedelta(minutes=5)
+CFTG_INTERVAL = timedelta(minutes=5)
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -140,10 +140,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
 
         # Tariff manager
+        tariff_periods = self._parse_tariff_periods(options)
         self._tariff = TariffManager(
-            hp_price=options.get(OPT_TARIFF_HP_PRICE, DEFAULT_TARIFF_HP),
-            hc_price=options.get(OPT_TARIFF_HC_PRICE, DEFAULT_TARIFF_HC),
-            hsc_price=options.get(OPT_TARIFF_HSC_PRICE, DEFAULT_TARIFF_HSC),
+            default_price=options.get(OPT_TARIFF_DEFAULT_PRICE, DEFAULT_TARIFF_DEFAULT_PRICE),
+            periods=tariff_periods,
         )
 
         # Safety manager
@@ -184,6 +184,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             data_dir=data_dir,
         )
         self._optimizer._dry_run = self._dry_run
+        self._optimizer._smart_cftg = options.get(OPT_SMART_CFTG, DEFAULT_SMART_CFTG)
 
         # Water heater
         self._water_heater = WaterHeaterController(
@@ -213,6 +214,17 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         _LOGGER.info("BeemAI coordinator setup complete")
 
+    @staticmethod
+    def _parse_tariff_periods(options: dict) -> list[dict] | None:
+        """Parse tariff periods from options JSON."""
+        raw = options.get(OPT_TARIFF_PERIODS_JSON, "")
+        if raw:
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return None
+
     def _build_panel_arrays(self, options: dict) -> list[dict]:
         """Build panel arrays from options."""
         arrays_json = options.get(OPT_PANEL_ARRAYS_JSON, "")
@@ -228,8 +240,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     def _build_forecast_sources(self, options: dict) -> list:
         """Instantiate forecast sources from options."""
-        lat = float(options.get(OPT_LOCATION_LAT, 0))
-        lon = float(options.get(OPT_LOCATION_LON, 0))
+        # Use HA's configured location as fallback
+        ha_lat = getattr(self.hass.config, 'latitude', 0.0)
+        ha_lon = getattr(self.hass.config, 'longitude', 0.0)
+        lat = float(options.get(OPT_LOCATION_LAT, 0) or ha_lat)
+        lon = float(options.get(OPT_LOCATION_LON, 0) or ha_lon)
         panel_arrays = self._build_panel_arrays(options)
 
         sources = [
@@ -284,6 +299,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self.hass,
             self._water_heater_loop,
             WATER_HEATER_INTERVAL,
+        )
+        self._unsub_listeners.append(unsub)
+
+        # Smart CFTG check every 5 minutes
+        unsub = async_track_time_interval(
+            self.hass,
+            self._cftg_loop,
+            CFTG_INTERVAL,
         )
         self._unsub_listeners.append(unsub)
 
@@ -343,6 +366,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
         """Hourly forecast refresh."""
         await self._refresh_forecasts()
 
+    async def _cftg_loop(self, _now=None) -> None:
+        """5-minute smart CFTG check."""
+        if self._optimizer:
+            try:
+                await self._optimizer.check_smart_cftg()
+            except Exception:
+                _LOGGER.exception("Error in smart CFTG check")
+
     async def _water_heater_loop(self, _now=None) -> None:
         """5-minute water heater evaluation."""
         if self._water_heater:
@@ -398,6 +429,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         config = dict(options)
         config["panel_arrays"] = self._build_panel_arrays(options)
+        # Ensure tariff periods JSON is passed through to reconfigure
+        tariff_periods = self._parse_tariff_periods(options)
+        if tariff_periods is not None:
+            config["tariff_periods_json"] = options.get(OPT_TARIFF_PERIODS_JSON, "")
 
         self._dry_run = options.get(OPT_DRY_RUN, DEFAULT_DRY_RUN)
         if self._dry_run:

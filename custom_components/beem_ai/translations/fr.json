@@ -12,6 +12,18 @@
           "email": "L'adresse e-mail utilisee pour votre compte Beem Energy.",
           "password": "Le mot de passe de votre compte Beem Energy."
         }
+      },
+      "solcast": {
+        "title": "Previsions solaires (Optionnel)",
+        "description": "Configurez optionnellement Solcast pour de meilleures previsions solaires.",
+        "data": {
+          "solcast_api_key": "Cle API Solcast",
+          "solcast_site_id": "Identifiant de site Solcast"
+        },
+        "data_description": {
+          "solcast_api_key": "Cle API pour les previsions solaires Solcast. Laissez vide pour ignorer.",
+          "solcast_site_id": "Identifiant de site Solcast. Laissez vide pour ignorer."
+        }
       }
     },
     "error": {
@@ -31,36 +43,66 @@
       "init": {
         "title": "Parametres BeemAI",
         "data": {
-          "location_lat": "Latitude",
-          "location_lon": "Longitude",
+          "location_lat": "Latitude (optionnel)",
+          "location_lon": "Longitude (optionnel)",
           "solcast_api_key": "Cle API Solcast",
           "solcast_site_id": "Identifiant de site Solcast",
-          "tariff_hp_price": "Tarif heures pleines (EUR/kWh)",
-          "tariff_hc_price": "Tarif heures creuses (EUR/kWh)",
-          "tariff_hsc_price": "Tarif super heures creuses (EUR/kWh)",
+          "tariff_default_price": "Tarif par defaut (EUR/kWh)",
+          "tariff_period_count": "Nombre de periodes tarifaires",
           "min_soc_summer": "SoC minimum en ete (%)",
           "min_soc_winter": "SoC minimum en hiver (%)",
           "water_heater_switch_entity": "Entite interrupteur du chauffe-eau",
           "water_heater_power_entity": "Entite capteur de puissance du chauffe-eau",
           "water_heater_power_w": "Puissance du chauffe-eau (W)",
           "panel_count": "Nombre de groupes de panneaux solaires",
+          "smart_cftg": "Charge intelligente depuis le reseau",
           "dry_run": "Mode simulation (journalise les actions sans les executer)"
         },
         "data_description": {
-          "location_lat": "Latitude de votre installation.",
-          "location_lon": "Longitude de votre installation.",
+          "location_lat": "Latitude de votre installation. Laissez vide pour utiliser la position configuree dans Home Assistant.",
+          "location_lon": "Longitude de votre installation. Laissez vide pour utiliser la position configuree dans Home Assistant.",
           "solcast_api_key": "Cle API pour les previsions solaires Solcast (optionnel).",
           "solcast_site_id": "Identifiant de site Solcast (optionnel).",
-          "tariff_hp_price": "Prix de l'electricite en heures pleines en EUR/kWh.",
-          "tariff_hc_price": "Prix de l'electricite en heures creuses en EUR/kWh.",
-          "tariff_hsc_price": "Prix de l'electricite en super heures creuses en EUR/kWh.",
+          "tariff_default_price": "Prix par defaut de l'electricite en EUR/kWh (utilise hors periodes tarifaires configurees).",
+          "tariff_period_count": "Nombre de periodes tarifaires a configurer (1-6). Chaque periode a une plage horaire et un prix.",
           "min_soc_summer": "Etat de charge minimum de la batterie en ete. Saisir 0 pour desactiver, ou une valeur entre 30 et 100.",
           "min_soc_winter": "Etat de charge minimum de la batterie en hiver. Saisir 0 pour desactiver, ou une valeur entre 30 et 100.",
           "water_heater_switch_entity": "Identifiant de l'entite interrupteur du chauffe-eau (optionnel).",
           "water_heater_power_entity": "Identifiant de l'entite capteur de puissance du chauffe-eau (optionnel).",
           "water_heater_power_w": "Puissance nominale du chauffe-eau en watts.",
           "panel_count": "Nombre de groupes de panneaux solaires distincts (orientations).",
+          "smart_cftg": "Si active, ajuste dynamiquement la charge depuis le reseau pendant les heures creuses en fonction du SoC de la batterie. Autorise la decharge lorsque le SoC est suffisant.",
           "dry_run": "Si active, toutes les commandes batterie et chauffe-eau sont journalisees sans etre envoyees. Utile pour valider les decisions avant la mise en production."
+        }
+      },
+      "tariffs": {
+        "title": "Periodes tarifaires",
+        "description": "Configurez vos periodes tarifaires d'electricite. Chaque periode a un libelle, une plage horaire et un prix.",
+        "data": {
+          "tariff_1_label": "Periode 1 libelle",
+          "tariff_1_start": "Periode 1 debut (HH:MM)",
+          "tariff_1_end": "Periode 1 fin (HH:MM)",
+          "tariff_1_price": "Periode 1 prix (EUR/kWh)",
+          "tariff_2_label": "Periode 2 libelle",
+          "tariff_2_start": "Periode 2 debut (HH:MM)",
+          "tariff_2_end": "Periode 2 fin (HH:MM)",
+          "tariff_2_price": "Periode 2 prix (EUR/kWh)",
+          "tariff_3_label": "Periode 3 libelle",
+          "tariff_3_start": "Periode 3 debut (HH:MM)",
+          "tariff_3_end": "Periode 3 fin (HH:MM)",
+          "tariff_3_price": "Periode 3 prix (EUR/kWh)",
+          "tariff_4_label": "Periode 4 libelle",
+          "tariff_4_start": "Periode 4 debut (HH:MM)",
+          "tariff_4_end": "Periode 4 fin (HH:MM)",
+          "tariff_4_price": "Periode 4 prix (EUR/kWh)",
+          "tariff_5_label": "Periode 5 libelle",
+          "tariff_5_start": "Periode 5 debut (HH:MM)",
+          "tariff_5_end": "Periode 5 fin (HH:MM)",
+          "tariff_5_price": "Periode 5 prix (EUR/kWh)",
+          "tariff_6_label": "Periode 6 libelle",
+          "tariff_6_start": "Periode 6 debut (HH:MM)",
+          "tariff_6_end": "Periode 6 fin (HH:MM)",
+          "tariff_6_price": "Periode 6 prix (EUR/kWh)"
         }
       },
       "panels": {
