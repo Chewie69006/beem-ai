@@ -19,7 +19,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+import json
+
+from .const import DOMAIN, OPT_PANEL_ARRAYS_JSON, OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +60,18 @@ def _system_device_info(entry: ConfigEntry) -> dict:
         "model": "Optimization System",
         "via_device": (DOMAIN, f"battery_{entry.entry_id}"),
     }
+
+
+def _get_panel_arrays(entry: ConfigEntry) -> list[dict]:
+    """Read panel arrays from config entry options."""
+    arrays_json = entry.options.get(OPT_PANEL_ARRAYS_JSON, "")
+    if arrays_json:
+        try:
+            return json.loads(arrays_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    count = entry.options.get(OPT_PANEL_COUNT, DEFAULT_PANEL_COUNT)
+    return [{"tilt": 30, "azimuth": 180, "kwp": 5.0} for _ in range(count)]
 
 
 async def async_setup_entry(
@@ -159,7 +173,7 @@ async def async_setup_entry(
             device_type="battery",
         ),
 
-        # --- Solar device sensors (array 0 = total/first array) ---
+        # Solar forecast sensors are on array 0 (aggregated totals)
         BeemAISensor(
             coordinator, entry,
             key="solar_forecast_today",
@@ -174,6 +188,7 @@ async def async_setup_entry(
                 "confidence": c.state_store.forecast.confidence,
             },
             device_type="solar",
+            solar_index=0,
         ),
         BeemAISensor(
             coordinator, entry,
@@ -185,6 +200,7 @@ async def async_setup_entry(
             unit="kWh",
             value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
             device_type="solar",
+            solar_index=0,
         ),
 
         # --- System device sensors ---
@@ -223,6 +239,30 @@ async def async_setup_entry(
             device_type="system",
         ),
     ]
+
+    # --- Per-array solar sensors (creates a device per panel array) ---
+    panel_arrays = _get_panel_arrays(entry)
+    for idx, array in enumerate(panel_arrays):
+        tilt = array.get("tilt", 30)
+        azimuth = array.get("azimuth", 180)
+        kwp = array.get("kwp", 5.0)
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_capacity",
+            name=f"Array {idx + 1} Capacity",
+            icon="mdi:solar-panel-large",
+            device_class=None,
+            state_class=None,
+            unit="kWp",
+            value_fn=lambda c, _kwp=kwp: _kwp,
+            extra_fn=lambda c, _t=tilt, _a=azimuth, _k=kwp: {
+                "tilt": _t,
+                "azimuth": _a,
+                "kwp": _k,
+            },
+            device_type="solar",
+            solar_index=idx,
+        ))
 
     async_add_entities(sensors)
 
