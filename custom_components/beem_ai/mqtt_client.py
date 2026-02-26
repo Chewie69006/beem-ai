@@ -4,11 +4,10 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import aiomqtt
 
-from .event_bus import Event, EventBus
 from .state_store import StateStore
 
 log = logging.getLogger(__name__)
@@ -24,9 +23,6 @@ TOKEN_REFRESH_SECONDS = 50 * 60
 # Reconnection backoff parameters.
 RECONNECT_MIN_SECONDS = 1
 RECONNECT_MAX_SECONDS = 60
-
-# Safety: if disconnected for this long, force auto mode.
-DISCONNECT_SAFETY_SECONDS = 15 * 60
 
 # Field mapping from Beem MQTT JSON to StateStore BatteryState attributes.
 _FIELD_MAP = {
@@ -54,17 +50,15 @@ class BeemMqttClient:
 
     def __init__(
         self,
-        api_client,  # BeemApiClient — used for get_mqtt_token(), set_auto_mode()
+        api_client,  # BeemApiClient — used for get_mqtt_token()
         battery_serial: str,
         state_store: StateStore,
-        event_bus: EventBus,
-        dry_run: bool = False,
+        on_update: Callable[[], None] | None = None,
     ):
         self._api_client = api_client
         self._battery_serial = battery_serial
         self._state_store = state_store
-        self._event_bus = event_bus
-        self._dry_run = dry_run
+        self._on_update = on_update
 
         self._topic = f"battery/{battery_serial.upper()}/sys/streaming"
 
@@ -74,9 +68,6 @@ class BeemMqttClient:
 
         # Reconnection backoff.
         self._backoff = RECONNECT_MIN_SECONDS
-
-        # Disconnect watchdog task.
-        self._watchdog_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,7 +86,6 @@ class BeemMqttClient:
     async def disconnect(self) -> None:
         """Stop the MQTT connection loop and clean up."""
         self._stop_event.set()
-        self._cancel_watchdog()
 
         if self._loop_task is not None:
             self._loop_task.cancel()
@@ -162,8 +152,6 @@ class BeemMqttClient:
                 ) as client:
                     self._state_store.mqtt_connected = True
                     self._backoff = RECONNECT_MIN_SECONDS
-                    self._event_bus.publish(Event.MQTT_CONNECTED)
-                    self._cancel_watchdog()
 
                     await client.subscribe(self._topic)
                     log.info("MQTT: connected — subscribed to %s", self._topic)
@@ -190,8 +178,6 @@ class BeemMqttClient:
 
             # We are now disconnected.
             self._state_store.mqtt_connected = False
-            self._event_bus.publish(Event.MQTT_DISCONNECTED)
-            self._start_watchdog()
 
             if not self._stop_event.is_set():
                 log.info("MQTT: reconnecting in %ds", self._backoff)
@@ -220,7 +206,8 @@ class BeemMqttClient:
             return
 
         self._state_store.update_battery(**updates)
-        self._event_bus.publish(Event.BATTERY_DATA_UPDATED)
+        if self._on_update:
+            self._on_update()
 
     # ------------------------------------------------------------------
     # Token refresh
@@ -230,46 +217,3 @@ class BeemMqttClient:
         """Sleep then raise _TokenExpired to force reconnection with a new token."""
         await asyncio.sleep(TOKEN_REFRESH_SECONDS)
         raise _TokenExpired
-
-    # ------------------------------------------------------------------
-    # Disconnect safety watchdog
-    # ------------------------------------------------------------------
-
-    def _start_watchdog(self) -> None:
-        """Start a task that forces auto-mode if disconnected too long."""
-        self._cancel_watchdog()
-        self._watchdog_task = asyncio.create_task(self._watchdog_worker())
-        log.debug(
-            "MQTT: disconnect watchdog set for %d minutes",
-            DISCONNECT_SAFETY_SECONDS // 60,
-        )
-
-    def _cancel_watchdog(self) -> None:
-        if self._watchdog_task is not None:
-            self._watchdog_task.cancel()
-            self._watchdog_task = None
-
-    async def _watchdog_worker(self) -> None:
-        """After DISCONNECT_SAFETY_SECONDS, force the battery to auto mode."""
-        await asyncio.sleep(DISCONNECT_SAFETY_SECONDS)
-
-        if self._state_store.mqtt_connected:
-            return
-
-        log.warning(
-            "MQTT: disconnected for >%d min — forcing battery to auto mode",
-            DISCONNECT_SAFETY_SECONDS // 60,
-        )
-        self._event_bus.publish(
-            Event.SAFETY_ALERT,
-            {"reason": "mqtt_disconnect_timeout"},
-        )
-
-        if self._dry_run:
-            log.warning("MQTT watchdog [DRY RUN] — would set battery to auto mode")
-            return
-
-        try:
-            await self._api_client.set_auto_mode()
-        except Exception:
-            log.exception("MQTT: failed to set auto mode via API")

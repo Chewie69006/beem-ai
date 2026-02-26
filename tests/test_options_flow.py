@@ -7,25 +7,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.beem_ai.options_flow import BeemAIOptionsFlow
 from custom_components.beem_ai.const import (
-    DEFAULT_MIN_SOC_SUMMER,
-    DEFAULT_MIN_SOC_WINTER,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
-    DEFAULT_SMART_CFTG,
-    DEFAULT_WATER_HEATER_POWER_W,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
-    OPT_MIN_SOC_SUMMER,
-    OPT_MIN_SOC_WINTER,
-    OPT_SMART_CFTG,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
-    OPT_WATER_HEATER_POWER_ENTITY,
-    OPT_WATER_HEATER_POWER_W,
-    OPT_WATER_HEATER_SWITCH,
 )
 
 
@@ -53,12 +43,6 @@ VALID_INIT_INPUT = {
     OPT_SOLCAST_SITE_ID: "site-456",
     OPT_TARIFF_DEFAULT_PRICE: DEFAULT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT: DEFAULT_TARIFF_PERIOD_COUNT,
-    OPT_MIN_SOC_SUMMER: DEFAULT_MIN_SOC_SUMMER,
-    OPT_MIN_SOC_WINTER: DEFAULT_MIN_SOC_WINTER,
-    OPT_WATER_HEATER_SWITCH: "",
-    OPT_WATER_HEATER_POWER_ENTITY: "",
-    OPT_WATER_HEATER_POWER_W: DEFAULT_WATER_HEATER_POWER_W,
-    OPT_SMART_CFTG: False,
 }
 
 
@@ -96,18 +80,6 @@ async def test_step_init_proceeds_to_tariffs():
 
 
 @pytest.mark.asyncio
-async def test_step_init_smart_cftg_toggle():
-    """Smart CFTG toggle is stored in options."""
-    flow = _make_flow()
-    flow.async_step_tariffs = AsyncMock(return_value="tariffs_result")
-
-    input_with_cftg = {**VALID_INIT_INPUT, OPT_SMART_CFTG: True}
-    await flow.async_step_init(user_input=input_with_cftg)
-
-    assert flow._options[OPT_SMART_CFTG] is True
-
-
-@pytest.mark.asyncio
 async def test_step_init_no_panel_count_field():
     """Init form should not contain panel_count field."""
     flow = _make_flow()
@@ -117,6 +89,21 @@ async def test_step_init_no_panel_count_field():
     schema = flow.async_show_form.call_args.kwargs["data_schema"]
     field_names = [str(k) for k in schema.schema]
     assert "panel_count" not in field_names
+
+
+@pytest.mark.asyncio
+async def test_step_init_no_removed_fields():
+    """Init form should not contain removed fields (min_soc, water_heater, etc.)."""
+    flow = _make_flow()
+
+    await flow.async_step_init(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    field_names = [str(k) for k in schema.schema]
+    for removed in ["min_soc_summer", "min_soc_winter", "water_heater_switch_entity",
+                     "water_heater_power_entity", "water_heater_power_w",
+                     "smart_cftg", "dry_run"]:
+        assert removed not in field_names
 
 
 # ------------------------------------------------------------------
@@ -192,60 +179,6 @@ async def test_step_tariffs_existing_defaults():
             assert key_obj.default() == "22:00"
         elif key_str == "tariff_1_price":
             assert key_obj.default() == 0.10
-
-
-# ------------------------------------------------------------------
-# Min SoC validation
-# ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_min_soc_zero_is_valid():
-    """Min SoC = 0 (disabled) should pass validation."""
-    flow = _make_flow()
-    flow.async_step_tariffs = AsyncMock(return_value="tariffs_result")
-
-    input_data = {**VALID_INIT_INPUT, OPT_MIN_SOC_SUMMER: 0, OPT_MIN_SOC_WINTER: 0}
-    await flow.async_step_init(user_input=input_data)
-
-    flow.async_step_tariffs.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_min_soc_29_is_invalid():
-    """Min SoC = 29 should fail validation."""
-    flow = _make_flow()
-
-    input_data = {**VALID_INIT_INPUT, OPT_MIN_SOC_SUMMER: 29}
-    await flow.async_step_init(user_input=input_data)
-
-    flow.async_show_form.assert_called_once()
-    errors = flow.async_show_form.call_args.kwargs.get("errors", {})
-    assert OPT_MIN_SOC_SUMMER in errors
-
-
-@pytest.mark.asyncio
-async def test_min_soc_30_is_valid():
-    """Min SoC = 30 should pass validation."""
-    flow = _make_flow()
-    flow.async_step_tariffs = AsyncMock(return_value="tariffs_result")
-
-    input_data = {**VALID_INIT_INPUT, OPT_MIN_SOC_SUMMER: 30}
-    await flow.async_step_init(user_input=input_data)
-
-    flow.async_step_tariffs.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_min_soc_100_is_valid():
-    """Min SoC = 100 should pass validation."""
-    flow = _make_flow()
-    flow.async_step_tariffs = AsyncMock(return_value="tariffs_result")
-
-    input_data = {**VALID_INIT_INPUT, OPT_MIN_SOC_SUMMER: 100}
-    await flow.async_step_init(user_input=input_data)
-
-    flow.async_step_tariffs.assert_called_once()
 
 
 # ------------------------------------------------------------------

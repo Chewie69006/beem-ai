@@ -23,22 +23,10 @@ OPT_SOLCAST_SITE_ID = "solcast_site_id"
 OPT_TARIFF_DEFAULT_PRICE = "tariff_default_price"
 OPT_TARIFF_PERIODS_JSON = "tariff_periods_json"
 OPT_TARIFF_PERIOD_COUNT = "tariff_period_count"
-OPT_SMART_CFTG = "smart_cftg"
-OPT_MIN_SOC_SUMMER = "min_soc_summer"
-OPT_MIN_SOC_WINTER = "min_soc_winter"
-OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
-OPT_WATER_HEATER_POWER_ENTITY = "water_heater_power_entity"
-OPT_WATER_HEATER_POWER_W = "water_heater_power_w"
-OPT_DRY_RUN = "dry_run"
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27
 DEFAULT_TARIFF_PERIOD_COUNT = 2
-DEFAULT_SMART_CFTG = False
-DEFAULT_MIN_SOC_SUMMER = 0
-DEFAULT_MIN_SOC_WINTER = 50
-DEFAULT_WATER_HEATER_POWER_W = 2000
-DEFAULT_DRY_RUN = False
 
 # --- Sensor keys ---
 SENSOR_BATTERY_SOC = "battery_soc"
@@ -47,17 +35,12 @@ SENSOR_BATTERY_POWER = "battery_power"
 SENSOR_GRID_POWER = "grid_power"
 SENSOR_CONSUMPTION = "consumption"
 SENSOR_BATTERY_SOH = "battery_soh"
-SENSOR_OPTIMAL_CHARGE_TARGET = "optimal_charge_target"
-SENSOR_OPTIMAL_CHARGE_POWER = "optimal_charge_power"
-SENSOR_OPTIMIZATION_STATUS = "optimization_status"
 SENSOR_SOLAR_FORECAST_TODAY = "solar_forecast_today"
 SENSOR_SOLAR_FORECAST_TOMORROW = "solar_forecast_tomorrow"
 SENSOR_CONSUMPTION_FORECAST_TODAY = "consumption_forecast_today"
-SENSOR_COST_SAVINGS_TODAY = "cost_savings_today"
 
 # Binary sensor keys
 BINARY_SENSOR_MQTT_CONNECTED = "mqtt_connected"
-BINARY_SENSOR_GRID_CHARGING = "grid_charging_recommended"
 
 # Switch keys
 SWITCH_ENABLED = "enabled"

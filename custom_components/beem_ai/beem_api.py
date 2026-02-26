@@ -1,4 +1,4 @@
-"""Async REST API client for Beem Energy battery control."""
+"""Async REST API client for Beem Energy — authentication and data retrieval."""
 
 import asyncio
 import logging
@@ -7,7 +7,6 @@ from typing import Optional
 
 import aiohttp
 
-from .event_bus import EventBus
 from .state_store import StateStore
 
 log = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ REQUEST_TIMEOUT = 15
 
 
 class BeemApiClient:
-    """Handles authentication and battery control via the Beem Energy REST API."""
+    """Handles authentication and data retrieval via the Beem Energy REST API."""
 
     def __init__(
         self,
@@ -37,7 +36,6 @@ class BeemApiClient:
         password: str,
         battery_id: str,
         state_store: StateStore,
-        event_bus: EventBus,
     ):
         self._session = session
         self._api_base = api_base.rstrip("/")
@@ -45,7 +43,6 @@ class BeemApiClient:
         self._password = password
         self._battery_id = battery_id
         self._state_store = state_store
-        self._event_bus = event_bus
 
         # Auth state.
         self._access_token: Optional[str] = None
@@ -56,9 +53,6 @@ class BeemApiClient:
         # Rate limiting.
         self._call_timestamps: list[datetime] = []
         self._cooldown_until: Optional[datetime] = None
-
-        # Command deduplication — last params sent successfully.
-        self._last_sent_params: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Authentication
@@ -100,11 +94,7 @@ class BeemApiClient:
         return True
 
     async def refresh_token(self) -> bool:
-        """Proactively refresh the auth token by re-authenticating.
-
-        The Beem API does not expose a dedicated refresh endpoint, so a
-        fresh login is performed instead.
-        """
+        """Proactively refresh the auth token by re-authenticating."""
         log.info("REST: refreshing auth token")
         return await self.login()
 
@@ -115,27 +105,6 @@ class BeemApiClient:
     @property
     def access_token(self) -> Optional[str]:
         return self._access_token
-
-    async def reconfigure(self, config: dict) -> None:
-        """Update credentials from ConfigManager. Triggers re-login if changed."""
-        changed = False
-        if config.get("beem_api_base") and config["beem_api_base"] != self._api_base:
-            self._api_base = config["beem_api_base"].rstrip("/")
-            changed = True
-        if config.get("beem_username") and config["beem_username"] != self._username:
-            self._username = config["beem_username"]
-            changed = True
-        if config.get("beem_password") and config["beem_password"] != self._password:
-            self._password = config["beem_password"]
-            changed = True
-        if config.get("beem_battery_id") and config["beem_battery_id"] != self._battery_id:
-            self._battery_id = config["beem_battery_id"]
-            changed = True
-
-        if changed:
-            log.info("REST: credentials changed, re-authenticating")
-            self._last_sent_params = None  # Reset dedup cache
-            await self.login()
 
     # ------------------------------------------------------------------
     # MQTT token
@@ -219,70 +188,6 @@ class BeemApiClient:
             "REST: battery %s not found in /devices response", self._battery_id
         )
         return []
-
-    # ------------------------------------------------------------------
-    # Battery control
-    # ------------------------------------------------------------------
-
-    async def set_control_params(
-        self,
-        mode: str = "advanced",
-        allow_grid_charge: bool = False,
-        prevent_discharge: bool = False,
-        min_soc: int = 20,
-        max_soc: int = 100,
-        charge_power: int = 0,
-    ) -> bool:
-        """Send battery control parameters via PATCH.
-
-        Returns True when the API accepted the command (or the command
-        was deduplicated), False otherwise.
-
-        Note: minSoc/maxSoc are only valid in "advanced" mode — the API
-        returns 400 if they are included with mode="auto".
-        """
-        params: dict = {
-            "mode": mode,
-            "allowChargeFromGrid": allow_grid_charge,
-            "preventDischarge": prevent_discharge,
-            "chargeFromGridMaxPower": charge_power,
-        }
-        if mode == "advanced":
-            params["minSoc"] = min_soc
-            params["maxSoc"] = max_soc
-
-        # Deduplication — skip if nothing changed.
-        if self._last_sent_params == params:
-            log.debug("REST: control params unchanged, skipping")
-            return True
-
-        url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
-        log.info("REST: PATCH %s → %s", url, params)
-
-        try:
-            resp = await self._request("PATCH", url, json=params)
-        except _RateLimited:
-            log.warning("REST: rate-limited — control params queued for later")
-            return False
-
-        if resp is None:
-            return False
-
-        self._last_sent_params = params
-        log.info("REST: control params applied successfully")
-        return True
-
-    async def set_auto_mode(self) -> bool:
-        """Reset the battery to safe automatic mode."""
-        log.info("REST: setting battery to auto mode (safety fallback)")
-        return await self.set_control_params(
-            mode="auto",
-            allow_grid_charge=False,
-            prevent_discharge=False,
-            min_soc=20,
-            max_soc=100,
-            charge_power=0,
-        )
 
     # ------------------------------------------------------------------
     # Internal helpers

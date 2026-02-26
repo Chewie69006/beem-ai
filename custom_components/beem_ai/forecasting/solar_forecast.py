@@ -1,13 +1,11 @@
 """Ensemble solar forecast aggregator (async).
 
 Combines multiple forecast sources (Open-Meteo, Forecast.Solar, Solcast)
-into a single weighted-average forecast and publishes the result to the
-shared StateStore via the internal EventBus.
+into a single weighted-average forecast and stores the result in the
+shared StateStore.
 """
 
 import logging
-
-from ..event_bus import Event
 
 log = logging.getLogger(__name__)
 
@@ -19,9 +17,8 @@ P90_SCALE = 1.3
 class SolarForecast:
     """Aggregate forecasts from multiple sources into a single view."""
 
-    def __init__(self, state_store, event_bus, sources: list):
+    def __init__(self, state_store, sources: list):
         self._state_store = state_store
-        self._event_bus = event_bus
         self._sources = sources
 
         # Equal initial weights keyed by source name
@@ -52,7 +49,7 @@ class SolarForecast:
         self._weights.update(weights)
 
     async def refresh(self):
-        """Fetch from every source, merge, and publish the result."""
+        """Fetch from every source, merge, and store the result."""
         results: list[tuple[str, dict]] = []
 
         for source in self._sources:
@@ -70,7 +67,6 @@ class SolarForecast:
 
         if not results:
             log.warning("All forecast sources failed -- no update")
-            self._publish(confidence="low")
             return
 
         # Merge hourly values via weighted average
@@ -110,8 +106,6 @@ class SolarForecast:
             confidence=confidence,
         )
 
-        self._publish(confidence)
-
         log.info(
             "Forecast updated -- sources=%s, confidence=%s, "
             "today=%.2f kWh, tomorrow=%.2f kWh",
@@ -124,12 +118,6 @@ class SolarForecast:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _publish(self, confidence: str):
-        self._event_bus.publish(
-            Event.FORECAST_UPDATED,
-            {"sources_used": self.sources_used, "confidence": confidence},
-        )
 
     @staticmethod
     def _determine_confidence(source_count: int) -> str:

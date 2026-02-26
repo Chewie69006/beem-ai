@@ -203,7 +203,6 @@ _repo_root = Path(__file__).parent.parent
 if str(_repo_root) not in _sys.path:
     _sys.path.insert(0, str(_repo_root))
 
-from custom_components.beem_ai.event_bus import EventBus
 from custom_components.beem_ai.state_store import StateStore
 
 
@@ -214,11 +213,6 @@ from custom_components.beem_ai.state_store import StateStore
 @pytest.fixture
 def state_store():
     return StateStore()
-
-
-@pytest.fixture
-def event_bus():
-    return EventBus()
 
 
 @pytest.fixture

@@ -9,30 +9,17 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import OptionsFlow, ConfigFlowResult
-from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
 from .const import (
-    DEFAULT_MIN_SOC_SUMMER,
-    DEFAULT_MIN_SOC_WINTER,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
-    DEFAULT_DRY_RUN,
-    DEFAULT_SMART_CFTG,
-    DEFAULT_WATER_HEATER_POWER_W,
-    OPT_DRY_RUN,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
-    OPT_MIN_SOC_SUMMER,
-    OPT_MIN_SOC_WINTER,
     OPT_SOLCAST_API_KEY,
     OPT_SOLCAST_SITE_ID,
-    OPT_SMART_CFTG,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
-    OPT_WATER_HEATER_POWER_ENTITY,
-    OPT_WATER_HEATER_POWER_W,
-    OPT_WATER_HEATER_SWITCH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,21 +37,12 @@ class BeemAIOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """First step — general settings."""
-        errors: dict[str, str] = {}
-
         if user_input is not None:
-            # Validate min SoC: must be 0 (disabled) or in [30, 100]
-            for key in (OPT_MIN_SOC_SUMMER, OPT_MIN_SOC_WINTER):
-                v = user_input.get(key, 0)
-                if v != 0 and not (30 <= v <= 100):
-                    errors[key] = "invalid_min_soc"
-
-            if not errors:
-                self._tariff_period_count = user_input.get(
-                    OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
-                )
-                self._options = user_input
-                return await self.async_step_tariffs()
+            self._tariff_period_count = user_input.get(
+                OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
+            )
+            self._options = user_input
+            return await self.async_step_tariffs()
 
         current = self.config_entry.options
 
@@ -94,40 +72,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_TARIFF_PERIOD_COUNT,
                     default=current.get(OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT),
                 ): vol.All(int, vol.Range(min=1, max=6)),
-                vol.Required(
-                    OPT_MIN_SOC_SUMMER,
-                    default=current.get(OPT_MIN_SOC_SUMMER, DEFAULT_MIN_SOC_SUMMER),
-                ): vol.All(int, vol.Range(min=0, max=100)),
-                vol.Required(
-                    OPT_MIN_SOC_WINTER,
-                    default=current.get(OPT_MIN_SOC_WINTER, DEFAULT_MIN_SOC_WINTER),
-                ): vol.All(int, vol.Range(min=0, max=100)),
-                vol.Optional(
-                    OPT_WATER_HEATER_SWITCH,
-                    default=current.get(OPT_WATER_HEATER_SWITCH, ""),
-                ): EntitySelector(EntitySelectorConfig(domain="switch")),
-                vol.Optional(
-                    OPT_WATER_HEATER_POWER_ENTITY,
-                    default=current.get(OPT_WATER_HEATER_POWER_ENTITY, ""),
-                ): EntitySelector(EntitySelectorConfig(domain="sensor", device_class="power")),
-                vol.Required(
-                    OPT_WATER_HEATER_POWER_W,
-                    default=current.get(
-                        OPT_WATER_HEATER_POWER_W, DEFAULT_WATER_HEATER_POWER_W
-                    ),
-                ): vol.All(int, vol.Range(min=0)),
-                vol.Optional(
-                    OPT_SMART_CFTG,
-                    default=current.get(OPT_SMART_CFTG, DEFAULT_SMART_CFTG),
-                ): bool,
-                vol.Optional(
-                    OPT_DRY_RUN,
-                    default=current.get(OPT_DRY_RUN, DEFAULT_DRY_RUN),
-                ): bool,
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="init", data_schema=schema)
 
     async def async_step_tariffs(
         self, user_input: dict[str, Any] | None = None
@@ -188,4 +136,3 @@ class BeemAIOptionsFlow(OptionsFlow):
             step_id="tariffs",
             data_schema=vol.Schema(fields),
         )
-

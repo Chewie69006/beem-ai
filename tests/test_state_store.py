@@ -3,7 +3,7 @@
 import threading
 from datetime import datetime
 
-from custom_components.beem_ai.state_store import BatteryState, CurrentPlan, StateStore
+from custom_components.beem_ai.state_store import BatteryState, StateStore
 
 
 # ── BatteryState property tests ─────────────────────────────────────
@@ -116,37 +116,6 @@ class TestUpdateBattery:
         assert b.working_mode == "charging"
 
 
-# ── StateStore update_plan / set_plan ────────────────────────────────
-
-
-class TestUpdatePlan:
-    def test_update_plan_sets_fields(self, state_store):
-        state_store.update_plan(target_soc=80.0, phase="hsc_charge")
-        assert state_store.plan.target_soc == 80.0
-        assert state_store.plan.phase == "hsc_charge"
-
-    def test_update_plan_ignores_unknown_fields(self, state_store):
-        state_store.update_plan(bogus=99, charge_power_w=3000)
-        assert state_store.plan.charge_power_w == 3000
-
-    def test_set_plan_replaces_entirely(self, state_store):
-        new_plan = CurrentPlan(
-            target_soc=95.0,
-            charge_power_w=4000,
-            phase="solar_mode",
-            reasoning="test plan",
-        )
-        state_store.set_plan(new_plan)
-        assert state_store.plan is new_plan
-        assert state_store.plan.target_soc == 95.0
-        assert state_store.plan.phase == "solar_mode"
-
-    def test_set_plan_does_not_keep_old_plan(self, state_store):
-        state_store.update_plan(reasoning="old reasoning")
-        state_store.set_plan(CurrentPlan(reasoning="new reasoning"))
-        assert state_store.plan.reasoning == "new reasoning"
-
-
 # ── StateStore update_forecast ───────────────────────────────────────
 
 
@@ -193,32 +162,6 @@ class TestThreadSafety:
         # soc should be a valid value set by one of the threads
         assert 0.0 <= state_store.battery.soc <= 99.0
 
-    def test_concurrent_plan_and_battery_updates(self, state_store):
-        errors = []
-
-        def battery_updater():
-            try:
-                for i in range(100):
-                    state_store.update_battery(soc=float(i))
-            except Exception as e:
-                errors.append(e)
-
-        def plan_updater():
-            try:
-                for i in range(100):
-                    state_store.update_plan(target_soc=float(i))
-            except Exception as e:
-                errors.append(e)
-
-        t1 = threading.Thread(target=battery_updater)
-        t2 = threading.Thread(target=plan_updater)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        assert errors == []
-
 
 # ── StateStore properties ────────────────────────────────────────────
 
@@ -244,10 +187,3 @@ class TestStateStoreProperties:
     def test_rest_available_setter(self, state_store):
         state_store.rest_available = False
         assert state_store.rest_available is False
-
-    def test_daily_savings_eur_default_zero(self, state_store):
-        assert state_store.daily_savings_eur == 0.0
-
-    def test_daily_savings_eur_setter(self, state_store):
-        state_store.daily_savings_eur = 1.23
-        assert state_store.daily_savings_eur == 1.23

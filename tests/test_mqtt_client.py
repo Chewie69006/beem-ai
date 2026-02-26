@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.beem_ai.mqtt_client import BeemMqttClient, _FIELD_MAP
-from custom_components.beem_ai.event_bus import Event
 
 
 @pytest.fixture
@@ -20,16 +19,17 @@ def mock_api_client():
 
 
 @pytest.fixture
-def mqtt_client(mock_api_client, state_store, event_bus):
+def mqtt_client(mock_api_client, state_store):
     """Create a BeemMqttClient with a mocked API client."""
+    on_update = MagicMock()
     client = BeemMqttClient(
         api_client=mock_api_client,
         battery_serial="SN-001",
         state_store=state_store,
-        event_bus=event_bus,
+        on_update=on_update,
     )
+    client._on_update_mock = on_update
     yield client
-    client._cancel_watchdog()
 
 
 # ------------------------------------------------------------------
@@ -63,15 +63,12 @@ class TestHandleMessage:
         # Should not raise.
         mqtt_client._handle_message(msg)
 
-    def test_publishes_battery_data_updated_event(self, mqtt_client, event_bus):
-        """A valid message fires the BATTERY_DATA_UPDATED event."""
-        received = []
-        event_bus.subscribe(Event.BATTERY_DATA_UPDATED, lambda d: received.append(d))
-
+    def test_calls_on_update_callback(self, mqtt_client):
+        """A valid message calls the on_update callback."""
         msg = self._make_msg({"soc": 55.0})
         mqtt_client._handle_message(msg)
 
-        assert len(received) == 1
+        mqtt_client._on_update_mock.assert_called_once()
 
     def test_field_mapping_all_fields(self, mqtt_client, state_store):
         """Every key in _FIELD_MAP is translated correctly."""
@@ -115,15 +112,12 @@ class TestHandleMessage:
 
         assert state_store.battery.soc == 60
 
-    def test_empty_known_fields_no_event(self, mqtt_client, event_bus):
-        """Message with no recognised fields does not fire an event."""
-        received = []
-        event_bus.subscribe(Event.BATTERY_DATA_UPDATED, lambda d: received.append(d))
-
+    def test_empty_known_fields_no_callback(self, mqtt_client):
+        """Message with no recognised fields does not call callback."""
         msg = self._make_msg({"randomKey": 42})
         mqtt_client._handle_message(msg)
 
-        assert len(received) == 0
+        mqtt_client._on_update_mock.assert_not_called()
 
 
 # ------------------------------------------------------------------

@@ -1,10 +1,9 @@
 """Tests for the SolarForecast ensemble aggregator (async)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from custom_components.beem_ai.event_bus import Event
 from custom_components.beem_ai.forecasting.solar_forecast import (
     P10_SCALE,
     P90_SCALE,
@@ -127,8 +126,8 @@ class TestWeightedAverage:
     """Verify the ensemble weighted-average merge logic."""
 
     @pytest.mark.asyncio
-    async def test_equal_weights_two_sources(self, state_store, event_bus, source_a, source_b):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b])
+    async def test_equal_weights_two_sources(self, state_store, source_a, source_b):
+        sf = SolarForecast(state_store, [source_a, source_b])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -142,9 +141,9 @@ class TestWeightedAverage:
 
     @pytest.mark.asyncio
     async def test_equal_weights_three_sources(
-        self, state_store, event_bus, source_a, source_b, source_c
+        self, state_store, source_a, source_b, source_c
     ):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b, source_c])
+        sf = SolarForecast(state_store, [source_a, source_b, source_c])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -152,8 +151,8 @@ class TestWeightedAverage:
         assert forecast.solar_today[11] == pytest.approx(766.7, abs=0.1)
 
     @pytest.mark.asyncio
-    async def test_set_weights_changes_output(self, state_store, event_bus, source_a, source_b):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b])
+    async def test_set_weights_changes_output(self, state_store, source_a, source_b):
+        sf = SolarForecast(state_store, [source_a, source_b])
 
         sf.set_weights({"source_a": 0.75, "source_b": 0.25})
         await sf.refresh()
@@ -170,9 +169,9 @@ class TestGracefulDegradation:
     """Ensure the aggregator handles failing and empty sources."""
 
     @pytest.mark.asyncio
-    async def test_source_exception_is_skipped(self, state_store, event_bus, source_a):
+    async def test_source_exception_is_skipped(self, state_store, source_a):
         failing = FailingSource("bad_source")
-        sf = SolarForecast(state_store, event_bus, [source_a, failing])
+        sf = SolarForecast(state_store, [source_a, failing])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -181,9 +180,9 @@ class TestGracefulDegradation:
         assert "source_a" in sf.sources_used
 
     @pytest.mark.asyncio
-    async def test_source_empty_dict_is_skipped(self, state_store, event_bus, source_a):
+    async def test_source_empty_dict_is_skipped(self, state_store, source_a):
         empty = EmptySource("empty_source")
-        sf = SolarForecast(state_store, event_bus, [source_a, empty])
+        sf = SolarForecast(state_store, [source_a, empty])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -191,10 +190,10 @@ class TestGracefulDegradation:
         assert "empty_source" not in sf.sources_used
 
     @pytest.mark.asyncio
-    async def test_all_sources_fail(self, state_store, event_bus):
+    async def test_all_sources_fail(self, state_store):
         failing = FailingSource("f1")
         empty = EmptySource("f2")
-        sf = SolarForecast(state_store, event_bus, [failing, empty])
+        sf = SolarForecast(state_store, [failing, empty])
         await sf.refresh()
 
         assert sf.sources_used == []
@@ -209,27 +208,27 @@ class TestConfidence:
 
     @pytest.mark.asyncio
     async def test_three_sources_high(
-        self, state_store, event_bus, source_a, source_b, source_c
+        self, state_store, source_a, source_b, source_c
     ):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b, source_c])
+        sf = SolarForecast(state_store, [source_a, source_b, source_c])
         await sf.refresh()
         assert state_store.forecast.confidence == "high"
 
     @pytest.mark.asyncio
-    async def test_two_sources_medium(self, state_store, event_bus, source_a, source_b):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b])
+    async def test_two_sources_medium(self, state_store, source_a, source_b):
+        sf = SolarForecast(state_store, [source_a, source_b])
         await sf.refresh()
         assert state_store.forecast.confidence == "medium"
 
     @pytest.mark.asyncio
-    async def test_one_source_low(self, state_store, event_bus, source_a):
-        sf = SolarForecast(state_store, event_bus, [source_a])
+    async def test_one_source_low(self, state_store, source_a):
+        sf = SolarForecast(state_store, [source_a])
         await sf.refresh()
         assert state_store.forecast.confidence == "low"
 
     @pytest.mark.asyncio
-    async def test_zero_sources_low(self, state_store, event_bus):
-        sf = SolarForecast(state_store, event_bus, [FailingSource()])
+    async def test_zero_sources_low(self, state_store):
+        sf = SolarForecast(state_store, [FailingSource()])
         await sf.refresh()
         assert state_store.forecast.confidence == "low"
 
@@ -242,8 +241,8 @@ class TestConfidenceIntervals:
     """Verify P10/P90 estimation with and without Solcast."""
 
     @pytest.mark.asyncio
-    async def test_p10_p90_from_solcast(self, state_store, event_bus, source_a, solcast_source):
-        sf = SolarForecast(state_store, event_bus, [source_a, solcast_source])
+    async def test_p10_p90_from_solcast(self, state_store, source_a, solcast_source):
+        sf = SolarForecast(state_store, [source_a, solcast_source])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -253,8 +252,8 @@ class TestConfidenceIntervals:
         assert forecast.solar_tomorrow_p90 == {10: 780.0, 11: 1170.0}
 
     @pytest.mark.asyncio
-    async def test_p10_p90_scaled_without_solcast(self, state_store, event_bus, source_a, source_b):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b])
+    async def test_p10_p90_scaled_without_solcast(self, state_store, source_a, source_b):
+        sf = SolarForecast(state_store, [source_a, source_b])
         await sf.refresh()
 
         forecast = state_store.forecast
@@ -273,56 +272,24 @@ class TestSourcesUsed:
     """Verify the sources_used list is correctly populated."""
 
     @pytest.mark.asyncio
-    async def test_all_sources_succeed(self, state_store, event_bus, source_a, source_b):
-        sf = SolarForecast(state_store, event_bus, [source_a, source_b])
+    async def test_all_sources_succeed(self, state_store, source_a, source_b):
+        sf = SolarForecast(state_store, [source_a, source_b])
         await sf.refresh()
         assert sorted(sf.sources_used) == ["source_a", "source_b"]
         assert sorted(state_store.forecast.sources_used) == ["source_a", "source_b"]
 
     @pytest.mark.asyncio
-    async def test_partial_sources(self, state_store, event_bus, source_a):
+    async def test_partial_sources(self, state_store, source_a):
         failing = FailingSource("dead")
-        sf = SolarForecast(state_store, event_bus, [source_a, failing])
+        sf = SolarForecast(state_store, [source_a, failing])
         await sf.refresh()
         assert sf.sources_used == ["source_a"]
 
     @pytest.mark.asyncio
-    async def test_no_sources(self, state_store, event_bus):
-        sf = SolarForecast(state_store, event_bus, [])
+    async def test_no_sources(self, state_store):
+        sf = SolarForecast(state_store, [])
         await sf.refresh()
         assert sf.sources_used == []
-
-
-# ---------------------------------------------------------------------------
-# Tests -- Event publishing
-# ---------------------------------------------------------------------------
-
-class TestEventPublishing:
-    """Verify FORECAST_UPDATED events are published."""
-
-    @pytest.mark.asyncio
-    async def test_event_published_on_refresh(self, state_store, event_bus, source_a):
-        received = []
-        event_bus.subscribe(Event.FORECAST_UPDATED, lambda data: received.append(data))
-
-        sf = SolarForecast(state_store, event_bus, [source_a])
-        await sf.refresh()
-
-        assert len(received) == 1
-        assert received[0]["confidence"] == "low"  # 1 source
-        assert received[0]["sources_used"] == ["source_a"]
-
-    @pytest.mark.asyncio
-    async def test_event_published_when_all_fail(self, state_store, event_bus):
-        received = []
-        event_bus.subscribe(Event.FORECAST_UPDATED, lambda data: received.append(data))
-
-        sf = SolarForecast(state_store, event_bus, [FailingSource()])
-        await sf.refresh()
-
-        assert len(received) == 1
-        assert received[0]["confidence"] == "low"
-        assert received[0]["sources_used"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -332,19 +299,19 @@ class TestEventPublishing:
 class TestReconfigure:
     """Verify reconfigure() propagates to sources."""
 
-    def test_reconfigure_calls_sources(self, state_store, event_bus):
+    def test_reconfigure_calls_sources(self, state_store):
         """reconfigure() should call reconfigure on each source that supports it."""
         source = MockSource("src", _make_source_data({10: 500}, {10: 600}, 5.0, 6.0))
         source.reconfigure = MagicMock()
 
-        sf = SolarForecast(state_store, event_bus, [source])
+        sf = SolarForecast(state_store, [source])
         config = {"location_lat": 49.0, "panel_arrays": [{"tilt": 30, "azimuth": 180, "kwp": 5.0}]}
         sf.reconfigure(config)
 
         source.reconfigure.assert_called_once_with(config)
 
-    def test_reconfigure_skips_sources_without_method(self, state_store, event_bus):
+    def test_reconfigure_skips_sources_without_method(self, state_store):
         """reconfigure() should not crash if a source lacks reconfigure()."""
         source = MockSource("src", _make_source_data({10: 500}, {10: 600}, 5.0, 6.0))
-        sf = SolarForecast(state_store, event_bus, [source])
+        sf = SolarForecast(state_store, [source])
         sf.reconfigure({"location_lat": 49.0})  # Should not raise

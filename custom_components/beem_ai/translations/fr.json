@@ -36,9 +36,6 @@
     }
   },
   "options": {
-    "error": {
-      "invalid_min_soc": "Doit etre 0 (desactive) ou compris entre 30 et 100."
-    },
     "step": {
       "init": {
         "title": "Parametres BeemAI",
@@ -48,15 +45,7 @@
           "solcast_api_key": "Cle API Solcast",
           "solcast_site_id": "Identifiant de site Solcast",
           "tariff_default_price": "Tarif par defaut (EUR/kWh)",
-          "tariff_period_count": "Nombre de periodes tarifaires",
-          "min_soc_summer": "SoC minimum en ete (%)",
-          "min_soc_winter": "SoC minimum en hiver (%)",
-          "water_heater_switch_entity": "Entite interrupteur du chauffe-eau",
-          "water_heater_power_entity": "Entite capteur de puissance du chauffe-eau",
-          "water_heater_power_w": "Puissance du chauffe-eau (W)",
-          "panel_count": "Nombre de groupes de panneaux solaires",
-          "smart_cftg": "Charge intelligente depuis le reseau",
-          "dry_run": "Mode simulation (journalise les actions sans les executer)"
+          "tariff_period_count": "Nombre de periodes tarifaires"
         },
         "data_description": {
           "location_lat": "Latitude de votre installation. Laissez vide pour utiliser la position configuree dans Home Assistant.",
@@ -64,15 +53,7 @@
           "solcast_api_key": "Cle API pour les previsions solaires Solcast (optionnel).",
           "solcast_site_id": "Identifiant de site Solcast (optionnel).",
           "tariff_default_price": "Prix par defaut de l'electricite en EUR/kWh (utilise hors periodes tarifaires configurees).",
-          "tariff_period_count": "Nombre de periodes tarifaires a configurer (1-6). Chaque periode a une plage horaire et un prix.",
-          "min_soc_summer": "Etat de charge minimum de la batterie en ete. Saisir 0 pour desactiver, ou une valeur entre 30 et 100.",
-          "min_soc_winter": "Etat de charge minimum de la batterie en hiver. Saisir 0 pour desactiver, ou une valeur entre 30 et 100.",
-          "water_heater_switch_entity": "Identifiant de l'entite interrupteur du chauffe-eau (optionnel).",
-          "water_heater_power_entity": "Identifiant de l'entite capteur de puissance du chauffe-eau (optionnel).",
-          "water_heater_power_w": "Puissance nominale du chauffe-eau en watts.",
-          "panel_count": "Nombre de groupes de panneaux solaires distincts (orientations).",
-          "smart_cftg": "Si active, ajuste dynamiquement la charge depuis le reseau pendant les heures creuses en fonction du SoC de la batterie. Autorise la decharge lorsque le SoC est suffisant.",
-          "dry_run": "Si active, toutes les commandes batterie et chauffe-eau sont journalisees sans etre envoyees. Utile pour valider les decisions avant la mise en production."
+          "tariff_period_count": "Nombre de periodes tarifaires a configurer (1-6). Chaque periode a une plage horaire et un prix."
         }
       },
       "tariffs": {
@@ -103,30 +84,6 @@
           "tariff_6_start": "Periode 6 debut (HH:MM)",
           "tariff_6_end": "Periode 6 fin (HH:MM)",
           "tariff_6_price": "Periode 6 prix (EUR/kWh)"
-        }
-      },
-      "panels": {
-        "title": "Groupes de panneaux solaires",
-        "description": "Configurez l'inclinaison, l'azimut et la puissance crete de chaque groupe de panneaux.",
-        "data": {
-          "panel_1_tilt": "Panneau 1 inclinaison (degres)",
-          "panel_1_azimuth": "Panneau 1 azimut (degres)",
-          "panel_1_kwp": "Panneau 1 puissance crete (kWc)",
-          "panel_2_tilt": "Panneau 2 inclinaison (degres)",
-          "panel_2_azimuth": "Panneau 2 azimut (degres)",
-          "panel_2_kwp": "Panneau 2 puissance crete (kWc)",
-          "panel_3_tilt": "Panneau 3 inclinaison (degres)",
-          "panel_3_azimuth": "Panneau 3 azimut (degres)",
-          "panel_3_kwp": "Panneau 3 puissance crete (kWc)",
-          "panel_4_tilt": "Panneau 4 inclinaison (degres)",
-          "panel_4_azimuth": "Panneau 4 azimut (degres)",
-          "panel_4_kwp": "Panneau 4 puissance crete (kWc)",
-          "panel_5_tilt": "Panneau 5 inclinaison (degres)",
-          "panel_5_azimuth": "Panneau 5 azimut (degres)",
-          "panel_5_kwp": "Panneau 5 puissance crete (kWc)",
-          "panel_6_tilt": "Panneau 6 inclinaison (degres)",
-          "panel_6_azimuth": "Panneau 6 azimut (degres)",
-          "panel_6_kwp": "Panneau 6 puissance crete (kWc)"
         }
       }
     }

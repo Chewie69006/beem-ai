@@ -1,4 +1,4 @@
-"""Tests for StateStore plan and forecast persistence (save/load roundtrip)."""
+"""Tests for StateStore forecast persistence (save/load roundtrip)."""
 
 import json
 import os
@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from custom_components.beem_ai.state_store import CurrentPlan, ForecastData, StateStore
+from custom_components.beem_ai.state_store import ForecastData, StateStore
 
 
 @pytest.fixture
@@ -18,72 +18,6 @@ def data_dir(tmp_path):
 @pytest.fixture
 def store():
     return StateStore()
-
-
-# ── Plan persistence ────────────────────────────────────────────────
-
-
-class TestSavePlan:
-    def test_roundtrip_basic(self, store, data_dir):
-        plan = CurrentPlan(
-            target_soc=85.0,
-            charge_power_w=2500,
-            allow_grid_charge=True,
-            prevent_discharge=True,
-            min_soc=30,
-            max_soc=90,
-            phase="cheapest_charge",
-            reasoning="Test plan",
-            created_at=datetime(2026, 2, 25, 21, 0, 0),
-            next_transition=datetime(2026, 2, 26, 2, 0, 0),
-        )
-        store.set_plan(plan)
-        store.save_plan(data_dir)
-
-        store2 = StateStore()
-        assert store2.load_plan(data_dir) is True
-
-        p = store2.plan
-        assert p.target_soc == 85.0
-        assert p.charge_power_w == 2500
-        assert p.allow_grid_charge is True
-        assert p.prevent_discharge is True
-        assert p.min_soc == 30
-        assert p.max_soc == 90
-        assert p.phase == "cheapest_charge"
-        assert p.reasoning == "Test plan"
-        assert p.created_at == datetime(2026, 2, 25, 21, 0, 0)
-        assert p.next_transition == datetime(2026, 2, 26, 2, 0, 0)
-
-    def test_roundtrip_none_datetimes(self, store, data_dir):
-        plan = CurrentPlan(target_soc=50.0, created_at=None, next_transition=None)
-        store.set_plan(plan)
-        store.save_plan(data_dir)
-
-        store2 = StateStore()
-        store2.load_plan(data_dir)
-        assert store2.plan.created_at is None
-        assert store2.plan.next_transition is None
-
-    def test_load_missing_file_returns_false(self, store, data_dir):
-        assert store.load_plan(data_dir) is False
-        # Plan should remain default
-        assert store.plan.phase == "idle"
-
-    def test_load_corrupt_file_returns_false(self, store, data_dir):
-        path = os.path.join(data_dir, "plan_state.json")
-        with open(path, "w") as f:
-            f.write("not valid json{{{")
-        assert store.load_plan(data_dir) is False
-
-    def test_creates_json_file(self, store, data_dir):
-        store.save_plan(data_dir)
-        path = os.path.join(data_dir, "plan_state.json")
-        assert os.path.exists(path)
-        with open(path) as f:
-            data = json.load(f)
-        assert "target_soc" in data
-        assert "phase" in data
 
 
 # ── Forecast persistence ────────────────────────────────────────────

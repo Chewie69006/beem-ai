@@ -29,13 +29,4 @@ async def async_setup_entry(
             value_fn=lambda c: c.state_store.mqtt_connected,
             device_type="system",
         ),
-        BeemAIBinarySensor(
-            coordinator, entry,
-            key="grid_charging_recommended",
-            name="Grid Charging Recommended",
-            icon="mdi:battery-charging-wireless",
-            device_class=None,
-            value_fn=lambda c: c.state_store.plan.allow_grid_charge,
-            device_type="system",
-        ),
     ])

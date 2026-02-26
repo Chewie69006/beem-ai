@@ -36,9 +36,6 @@
     }
   },
   "options": {
-    "error": {
-      "invalid_min_soc": "Must be 0 (disabled) or between 30 and 100."
-    },
     "step": {
       "init": {
         "title": "BeemAI Settings",
@@ -48,15 +45,7 @@
           "solcast_api_key": "Solcast API Key",
           "solcast_site_id": "Solcast Site ID",
           "tariff_default_price": "Default tariff price (EUR/kWh)",
-          "tariff_period_count": "Number of tariff periods",
-          "min_soc_summer": "Minimum SoC in summer (%)",
-          "min_soc_winter": "Minimum SoC in winter (%)",
-          "water_heater_switch_entity": "Water heater switch entity",
-          "water_heater_power_entity": "Water heater power sensor entity",
-          "water_heater_power_w": "Water heater power (W)",
-          "panel_count": "Number of solar panel arrays",
-          "smart_cftg": "Smart charge from grid",
-          "dry_run": "Dry-run mode (log actions, don't execute them)"
+          "tariff_period_count": "Number of tariff periods"
         },
         "data_description": {
           "location_lat": "Latitude of your installation. Leave blank to use Home Assistant's configured location.",
@@ -64,15 +53,7 @@
           "solcast_api_key": "API key for Solcast solar forecasting (optional).",
           "solcast_site_id": "Solcast site identifier (optional).",
           "tariff_default_price": "Default electricity price in EUR/kWh (used when not in any configured tariff period).",
-          "tariff_period_count": "Number of tariff periods to configure (1-6). Each period has a time range and price.",
-          "min_soc_summer": "Minimum battery state of charge in summer. Use 0 to disable, or a value between 30 and 100.",
-          "min_soc_winter": "Minimum battery state of charge in winter. Use 0 to disable, or a value between 30 and 100.",
-          "water_heater_switch_entity": "Entity ID of the water heater switch (optional).",
-          "water_heater_power_entity": "Entity ID of the water heater power sensor (optional).",
-          "water_heater_power_w": "Nominal power consumption of the water heater in watts.",
-          "panel_count": "Number of distinct solar panel arrays (orientations).",
-          "smart_cftg": "When enabled, dynamically toggles grid charging during off-peak hours based on battery SoC vs threshold. Allows discharge when SoC is adequate.",
-          "dry_run": "When enabled, all battery and water heater commands are logged but not sent. Useful for verifying decisions before going live."
+          "tariff_period_count": "Number of tariff periods to configure (1-6). Each period has a time range and price."
         }
       },
       "tariffs": {
@@ -103,30 +84,6 @@
           "tariff_6_start": "Period 6 start (HH:MM)",
           "tariff_6_end": "Period 6 end (HH:MM)",
           "tariff_6_price": "Period 6 price (EUR/kWh)"
-        }
-      },
-      "panels": {
-        "title": "Solar Panel Arrays",
-        "description": "Configure tilt, azimuth, and peak power for each panel array.",
-        "data": {
-          "panel_1_tilt": "Panel 1 tilt (degrees)",
-          "panel_1_azimuth": "Panel 1 azimuth (degrees)",
-          "panel_1_kwp": "Panel 1 peak power (kWp)",
-          "panel_2_tilt": "Panel 2 tilt (degrees)",
-          "panel_2_azimuth": "Panel 2 azimuth (degrees)",
-          "panel_2_kwp": "Panel 2 peak power (kWp)",
-          "panel_3_tilt": "Panel 3 tilt (degrees)",
-          "panel_3_azimuth": "Panel 3 azimuth (degrees)",
-          "panel_3_kwp": "Panel 3 peak power (kWp)",
-          "panel_4_tilt": "Panel 4 tilt (degrees)",
-          "panel_4_azimuth": "Panel 4 azimuth (degrees)",
-          "panel_4_kwp": "Panel 4 peak power (kWp)",
-          "panel_5_tilt": "Panel 5 tilt (degrees)",
-          "panel_5_azimuth": "Panel 5 azimuth (degrees)",
-          "panel_5_kwp": "Panel 5 peak power (kWp)",
-          "panel_6_tilt": "Panel 6 tilt (degrees)",
-          "panel_6_azimuth": "Panel 6 azimuth (degrees)",
-          "panel_6_kwp": "Panel 6 peak power (kWp)"
         }
       }
     }
