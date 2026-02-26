@@ -190,6 +190,112 @@ class BeemApiClient:
         return []
 
     # ------------------------------------------------------------------
+    # Consumption history (bootstrap)
+    # ------------------------------------------------------------------
+
+    async def get_consumption_history(
+        self, days: int = 30
+    ) -> list[tuple[datetime, float]]:
+        """Fetch intraday consumption history from the Beem API.
+
+        Retrieves hourly consumption data in 7-day chunks to avoid
+        overloading the API. Each value is Wh per hour interval, which
+        equals average watts for that hour.
+
+        This bypasses the normal rate limiter since it's a one-time
+        bootstrap operation.
+
+        Returns a list of (timestamp, watts) pairs.
+        """
+        results: list[tuple[datetime, float]] = []
+        now = datetime.now()
+        chunk_days = 7
+        chunks = (days + chunk_days - 1) // chunk_days  # ceiling division
+
+        for i in range(chunks):
+            chunk_end = now - timedelta(days=i * chunk_days)
+            chunk_start = now - timedelta(days=min((i + 1) * chunk_days, days))
+
+            url = (
+                f"{self._api_base}/consumption/houses/"
+                f"active-energy/intraday"
+            )
+            params = {
+                "from": chunk_start.strftime("%Y-%m-%dT00:00:00.000Z"),
+                "to": chunk_end.strftime("%Y-%m-%dT23:59:59.999Z"),
+                "scale": "PT60M",
+            }
+
+            log.info(
+                "REST: fetching consumption history chunk %d/%d (%s to %s)",
+                i + 1,
+                chunks,
+                params["from"][:10],
+                params["to"][:10],
+            )
+
+            try:
+                kwargs = {
+                    "timeout": aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                    "headers": self._auth_headers(),
+                    "params": params,
+                }
+                resp = await self._session.request("GET", url, **kwargs)
+
+                if resp.status == 429:
+                    log.warning(
+                        "REST: 429 during consumption history fetch, stopping"
+                    )
+                    break
+
+                if not resp.ok:
+                    body = await resp.text()
+                    log.warning(
+                        "REST: consumption history chunk %d returned %d: %s",
+                        i + 1,
+                        resp.status,
+                        body[:200],
+                    )
+                    continue
+
+                data = await resp.json()
+                houses = data.get("houses", [])
+                if not houses:
+                    log.debug("REST: no houses in consumption response")
+                    continue
+
+                measures = houses[0].get("measures", [])
+                for m in measures:
+                    start_date = m.get("startDate")
+                    value = m.get("value")
+                    if start_date is None or value is None:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(
+                            start_date.replace("Z", "+00:00")
+                        )
+                        results.append((ts, float(value)))
+                    except (ValueError, TypeError):
+                        continue
+
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                log.exception(
+                    "REST: consumption history chunk %d failed", i + 1
+                )
+                continue
+
+            # 1s delay between chunks to be gentle on the API
+            if i < chunks - 1:
+                await asyncio.sleep(1)
+
+        log.info(
+            "REST: fetched %d consumption history data points over %d days",
+            len(results),
+            days,
+        )
+        return results
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

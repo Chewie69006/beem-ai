@@ -42,6 +42,44 @@ class ConsumptionAnalyzer:
             self._mean[day] = {h: _DEFAULT_CONSUMPTION_W for h in range(24)}
             self._m2[day] = {h: 0.0 for h in range(24)}
 
+    def has_learned_data(self) -> bool:
+        """Return True if any bucket has received at least one real observation."""
+        return any(v > 0 for dc in self._count.values() for v in dc.values())
+
+    def seed_from_history(
+        self, history: dict[tuple[int, int], list[float]]
+    ) -> int:
+        """Seed EMA buckets from historical data.
+
+        Args:
+            history: mapping of (day_of_week, hour) -> [watts, ...] readings.
+
+        Returns:
+            Total number of data points ingested.
+        """
+        total = 0
+        for (day, hour), values in history.items():
+            if day not in self._ema or hour not in self._ema.get(day, {}):
+                continue
+            for watts in values:
+                # EMA update
+                old_ema = self._ema[day][hour]
+                self._ema[day][hour] = (
+                    _EMA_ALPHA * watts + (1 - _EMA_ALPHA) * old_ema
+                )
+
+                # Welford update
+                self._count[day][hour] += 1
+                n = self._count[day][hour]
+                old_mean = self._mean[day][hour]
+                delta = watts - old_mean
+                self._mean[day][hour] = old_mean + delta / n
+                delta2 = watts - self._mean[day][hour]
+                self._m2[day][hour] += delta * delta2
+
+                total += 1
+        return total
+
     def record_consumption(self, consumption_w: float) -> None:
         """Record a consumption reading for the current time slot.
 
@@ -74,6 +112,13 @@ class ConsumptionAnalyzer:
         tomorrow = (datetime.now() + timedelta(days=1)).weekday()
         hourly = self._ema.get(tomorrow, {})
         total_wh = sum(hourly.values())  # Each bucket is 1 hour of watts
+        return total_wh / 1000.0
+
+    def get_forecast_kwh_today(self) -> float:
+        """Sum hourly EMA for today's day-of-week, converted to kWh."""
+        day = datetime.now().weekday()
+        hourly = self._ema.get(day, {})
+        total_wh = sum(hourly.get(h, _DEFAULT_CONSUMPTION_W) for h in range(24))
         return total_wh / 1000.0
 
     def get_forecast_kwh_today_remaining(self) -> float:

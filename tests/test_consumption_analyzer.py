@@ -196,3 +196,64 @@ class TestPersistence:
         analyzer = ConsumptionAnalyzer(data_dir=tmp_path)
         analyzer.load()  # No file exists — should not crash
         assert analyzer.get_hourly_forecast(0)[0] == pytest.approx(_DEFAULT_CONSUMPTION_W)
+
+
+# ---------------------------------------------------------------------------
+# Tests — has_learned_data
+# ---------------------------------------------------------------------------
+
+class TestHasLearnedData:
+    def test_false_on_fresh_instance(self, analyzer):
+        assert analyzer.has_learned_data() is False
+
+    def test_true_after_recording(self, analyzer):
+        now = _fixed_datetime(0, 14)
+        with patch("custom_components.beem_ai.consumption_analyzer.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            analyzer.record_consumption(1000.0)
+        assert analyzer.has_learned_data() is True
+
+
+# ---------------------------------------------------------------------------
+# Tests — seed_from_history
+# ---------------------------------------------------------------------------
+
+class TestSeedFromHistory:
+    def test_populates_ema_and_stats(self, analyzer):
+        """Seeding with known values should update EMA and Welford stats."""
+        history = {
+            (0, 10): [600.0, 700.0, 800.0],  # Monday 10:00
+            (3, 18): [1000.0, 1200.0],         # Thursday 18:00
+        }
+        count = analyzer.seed_from_history(history)
+
+        assert count == 5
+        assert analyzer.has_learned_data() is True
+
+        # Monday 10:00 EMA should have moved from default (500) toward the values
+        mon_10 = analyzer.get_hourly_forecast(0)[10]
+        assert mon_10 != pytest.approx(_DEFAULT_CONSUMPTION_W)
+        assert mon_10 > _DEFAULT_CONSUMPTION_W  # values are above default
+
+        # Welford count should match
+        assert analyzer._count[0][10] == 3
+        assert analyzer._count[3][18] == 2
+
+    def test_ema_converges_with_many_values(self, analyzer):
+        """Many identical values should make EMA converge to that value."""
+        history = {(2, 12): [900.0] * 200}
+        analyzer.seed_from_history(history)
+
+        wed_12 = analyzer.get_hourly_forecast(2)[12]
+        assert wed_12 == pytest.approx(900.0, abs=1.0)
+
+    def test_empty_history_returns_zero(self, analyzer):
+        count = analyzer.seed_from_history({})
+        assert count == 0
+        assert analyzer.has_learned_data() is False
+
+    def test_invalid_bucket_ignored(self, analyzer):
+        """Out-of-range day/hour pairs should be silently skipped."""
+        history = {(99, 99): [500.0]}
+        count = analyzer.seed_from_history(history)
+        assert count == 0

@@ -194,6 +194,94 @@ class TestAuthHeaders:
 # ------------------------------------------------------------------
 
 
+# ------------------------------------------------------------------
+# get_consumption_history()
+# ------------------------------------------------------------------
+
+
+class TestGetConsumptionHistory:
+    @pytest.mark.asyncio
+    async def test_parses_valid_response(self, api_client):
+        """Valid intraday response returns (datetime, watts) pairs."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(json_data={
+            "houses": [{
+                "measures": [
+                    {"startDate": "2026-02-01T10:00:00.000Z", "value": 450.5},
+                    {"startDate": "2026-02-01T11:00:00.000Z", "value": 620.0},
+                ]
+            }]
+        })
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        results = await api_client.get_consumption_history(days=7)
+
+        assert len(results) == 2
+        assert results[0][1] == 450.5
+        assert results[1][1] == 620.0
+        # Timestamps should be datetime objects
+        assert isinstance(results[0][0], datetime)
+
+    @pytest.mark.asyncio
+    async def test_empty_houses_returns_empty(self, api_client):
+        """Response with no houses returns empty list."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(json_data={"houses": []})
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        results = await api_client.get_consumption_history(days=7)
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_network_error_returns_partial(self, api_client):
+        """Network error on a chunk doesn't crash, returns what was collected."""
+        api_client._access_token = "tok-abc"
+
+        call_count = 0
+
+        async def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _mock_response(json_data={
+                    "houses": [{
+                        "measures": [
+                            {"startDate": "2026-02-01T10:00:00.000Z", "value": 500.0},
+                        ]
+                    }]
+                })
+            raise aiohttp.ClientError("network down")
+
+        api_client._session.request = AsyncMock(side_effect=side_effect)
+
+        results = await api_client.get_consumption_history(days=14)
+
+        # Should have at least the data from the first successful chunk
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_429_stops_fetching(self, api_client):
+        """HTTP 429 halts further chunk fetching."""
+        api_client._access_token = "tok-abc"
+
+        mock_429 = _mock_response(status=429, ok=False)
+        api_client._session.request = AsyncMock(return_value=mock_429)
+
+        results = await api_client.get_consumption_history(days=30)
+
+        assert results == []
+        # Should have only made 1 request (stopped after 429)
+        assert api_client._session.request.call_count == 1
+
+
+# ------------------------------------------------------------------
+# shutdown()
+# ------------------------------------------------------------------
+
+
 class TestShutdown:
     @pytest.mark.asyncio
     async def test_cancels_refresh_task(self, api_client):

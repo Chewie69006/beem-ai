@@ -139,6 +139,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._consumption = ConsumptionAnalyzer(data_dir=data_dir)
         self._consumption.load()
 
+        # Bootstrap consumption if no learned data yet
+        if not self._consumption.has_learned_data():
+            await self._bootstrap_consumption()
+
         self._forecast_tracker = ForecastTracker(data_dir=data_dir)
         self._forecast_tracker.load()
 
@@ -186,6 +190,30 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         _LOGGER.info("Fetched %d solar array(s) from API: %s", len(arrays), arrays)
         return arrays
+
+    async def _bootstrap_consumption(self) -> None:
+        """Seed consumption analyzer from Beem API history on fresh install."""
+        _LOGGER.info("No learned consumption data — bootstrapping from API history")
+        try:
+            raw = await self._api_client.get_consumption_history(days=30)
+            if not raw:
+                _LOGGER.warning("No consumption history returned from API")
+                return
+
+            # Group by (weekday, hour)
+            history: dict[tuple[int, int], list[float]] = {}
+            for ts, watts in raw:
+                key = (ts.weekday(), ts.hour)
+                history.setdefault(key, []).append(watts)
+
+            count = self._consumption.seed_from_history(history)
+            self._consumption.save()
+            _LOGGER.info(
+                "Bootstrapped consumption from %d data points over 30 days",
+                count,
+            )
+        except Exception:
+            _LOGGER.exception("Failed to bootstrap consumption from API history")
 
     def _build_forecast_sources(self, options: dict) -> list:
         """Instantiate forecast sources from options."""
@@ -300,9 +328,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 await self._forecast.refresh()
 
             if self._consumption:
+                today_kwh = self._consumption.get_forecast_kwh_today()
                 tomorrow_kwh = self._consumption.get_forecast_kwh_tomorrow()
                 hourly = self._consumption.get_hourly_consumption_forecast_tomorrow()
                 self.state_store.update_forecast(
+                    consumption_today_kwh=today_kwh,
                     consumption_tomorrow_kwh=tomorrow_kwh,
                     consumption_hourly=hourly,
                 )
