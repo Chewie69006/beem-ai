@@ -221,8 +221,12 @@ class BeemApiClient:
                 f"active-energy/intraday"
             )
             params = {
-                "from": chunk_start.strftime("%Y-%m-%dT00:00:00.000Z"),
-                "to": chunk_end.strftime("%Y-%m-%dT23:59:59.999Z"),
+                "from": chunk_start.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                ).isoformat(),
+                "to": chunk_end.replace(
+                    hour=23, minute=59, second=59, microsecond=0
+                ).isoformat(),
                 "scale": "PT60M",
             }
 
@@ -235,9 +239,11 @@ class BeemApiClient:
             )
 
             try:
+                headers = self._auth_headers()
+                headers["Accept"] = "application/json"
                 kwargs = {
                     "timeout": aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                    "headers": self._auth_headers(),
+                    "headers": headers,
                     "params": params,
                 }
                 resp = await self._session.request("GET", url, **kwargs)

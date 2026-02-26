@@ -352,10 +352,13 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
     start = end - timedelta(days=7)
 
     url = f"{BEEM_API_BASE}/consumption/houses/active-energy/intraday"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
     params = {
-        "from": start.strftime("%Y-%m-%dT00:00:00.000Z"),
-        "to": end.strftime("%Y-%m-%dT23:59:59.999Z"),
+        "from": start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+        "to": end.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
         "scale": "PT60M",
     }
 
