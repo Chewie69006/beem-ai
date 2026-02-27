@@ -177,6 +177,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         ))
         # Attach to the package-level logger so all beem_ai modules log to file
         pkg_logger = logging.getLogger("custom_components.beem_ai")
+        # Allow DEBUG through to our handler (HA's handlers filter independently)
+        pkg_logger.setLevel(logging.DEBUG)
         # Avoid adding duplicate handlers on config entry reload
         if not any(
             isinstance(h, logging.handlers.RotatingFileHandler)
