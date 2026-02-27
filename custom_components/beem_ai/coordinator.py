@@ -77,6 +77,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
 
+        # Consumption forecast override (user-set value, cleared at midnight)
+        self._consumption_override: float | None = None
+
         # Schedule handles
         self._daily_reset_unsub = None
 
@@ -170,7 +173,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         handler = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
         )
-        handler.setLevel(logging.DEBUG)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -313,11 +316,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._consumption.record_consumption(
                 self.state_store.battery.consumption_w
             )
-        # Trigger entity updates
-        self.async_set_updated_data({
-            "battery_soc": self.state_store.battery.soc,
-            "mqtt_connected": self.state_store.mqtt_connected,
-        })
+        # Trigger entity updates (without logging noise)
+        self.async_update_listeners()
 
     # ---- Scheduled callbacks ----
 
@@ -342,6 +342,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     async def _daily_reset(self) -> None:
         """Midnight reset of daily counters."""
+        self._consumption_override = None
         if self._consumption:
             self._consumption.save()
         if self._forecast_tracker:
@@ -361,11 +362,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 today_kwh = self._consumption.get_forecast_kwh_today()
                 tomorrow_kwh = self._consumption.get_forecast_kwh_tomorrow()
                 hourly = self._consumption.get_hourly_consumption_forecast_tomorrow()
-                self.state_store.update_forecast(
-                    consumption_today_kwh=today_kwh,
-                    consumption_tomorrow_kwh=tomorrow_kwh,
-                    consumption_hourly=hourly,
-                )
+                update = {
+                    "consumption_tomorrow_kwh": tomorrow_kwh,
+                    "consumption_hourly": hourly,
+                }
+                # Preserve user override for today's consumption
+                if self._consumption_override is None:
+                    update["consumption_today_kwh"] = today_kwh
+                self.state_store.update_forecast(**update)
 
             f = self.state_store.forecast
             _LOGGER.info(
@@ -406,6 +410,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
             _LOGGER.info("BeemAI enabled by user")
         else:
             _LOGGER.info("BeemAI disabled by user")
+
+    # ---- Consumption forecast override ----
+
+    async def async_set_consumption_forecast(self, value: float) -> None:
+        """Set a manual override for today's consumption forecast."""
+        self._consumption_override = value
+        self.state_store.update_forecast(consumption_today_kwh=value)
+        _LOGGER.info("Consumption forecast overridden to %.1f kWh by user", value)
+        self.async_update_listeners()
 
     # ---- Shutdown ----
 

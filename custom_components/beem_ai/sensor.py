@@ -163,17 +163,6 @@ async def async_setup_entry(
             value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
             device_type="system",
         ),
-        BeemAISensor(
-            coordinator, entry,
-            key="consumption_forecast_today",
-            name="Consumption Forecast Today",
-            icon="mdi:home-lightning-bolt",
-            device_class=SensorDeviceClass.ENERGY,
-            state_class=SensorStateClass.TOTAL,
-            unit="kWh",
-            value_fn=lambda c: round(c.state_store.forecast.consumption_today_kwh, 1),
-            device_type="system",
-        ),
     ]
 
     # --- Per-array solar sensors (creates a device per panel array) ---
