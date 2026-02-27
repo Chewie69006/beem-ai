@@ -51,6 +51,12 @@ class ConsumptionAnalyzer:
     ) -> int:
         """Seed EMA buckets from historical data.
 
+        Unlike record_consumption() which uses EMA blending (alpha=0.1),
+        seeding computes the arithmetic mean of all historical values and
+        sets that directly as the EMA starting point. This avoids the slow
+        convergence problem where only ~4 data points per bucket can't
+        overcome the 500W default.
+
         Args:
             history: mapping of (day_of_week, hour) -> [watts, ...] readings.
 
@@ -61,23 +67,20 @@ class ConsumptionAnalyzer:
         for (day, hour), values in history.items():
             if day not in self._ema or hour not in self._ema.get(day, {}):
                 continue
-            for watts in values:
-                # EMA update
-                old_ema = self._ema[day][hour]
-                self._ema[day][hour] = (
-                    _EMA_ALPHA * watts + (1 - _EMA_ALPHA) * old_ema
-                )
+            if not values:
+                continue
 
-                # Welford update
-                self._count[day][hour] += 1
-                n = self._count[day][hour]
-                old_mean = self._mean[day][hour]
-                delta = watts - old_mean
-                self._mean[day][hour] = old_mean + delta / n
-                delta2 = watts - self._mean[day][hour]
-                self._m2[day][hour] += delta * delta2
+            # Compute arithmetic mean and set directly as EMA
+            mean = sum(values) / len(values)
+            self._ema[day][hour] = mean
 
-                total += 1
+            # Welford stats from scratch
+            self._count[day][hour] = len(values)
+            self._mean[day][hour] = mean
+            m2 = sum((v - mean) ** 2 for v in values)
+            self._m2[day][hour] = m2
+
+            total += len(values)
         return total
 
     def record_consumption(self, consumption_w: float) -> None:
