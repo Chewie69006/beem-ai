@@ -198,14 +198,13 @@ class BeemApiClient:
     ) -> list[tuple[datetime, float]]:
         """Fetch intraday consumption history from the Beem API.
 
-        True house consumption = production + grid_import - grid_export.
-        The single 'active-energy' endpoint only gives grid import, which
-        misses solar self-consumption and battery discharge entirely.
+        True house consumption from energy balance:
+          consumption = production + grid_import
+                      - grid_export - battery_charged + battery_discharged
 
-        We fetch three streams and combine them:
-          - production/energy/intraday          (solar production Wh)
-          - consumption/houses/active-energy     (grid import Wh)
-          - consumption/houses/active-returned   (grid export Wh)
+        Production alone overcounts (includes solar→battery). Subtracting
+        battery_charged and adding battery_discharged isolates what the
+        house actually used.
 
         Returns a list of (timestamp, watts) pairs representing real
         household consumption (Wh per hour ≈ average watts).
@@ -230,9 +229,17 @@ class BeemApiClient:
                 f"{self._api_base}/consumption/houses/"
                 f"active-returned-energy/intraday"
             ),
+            "battery_charged": (
+                f"{self._api_base}/batteries/{self._battery_id}/"
+                f"energy-charged/intraday"
+            ),
+            "battery_discharged": (
+                f"{self._api_base}/batteries/{self._battery_id}/"
+                f"energy-discharged/intraday"
+            ),
         }
 
-        # Fetch all three streams: {stream: {iso_str: wh_value}}
+        # Fetch all five streams: {stream: {iso_str: wh_value}}
         streams: dict[str, dict[str, float]] = {}
         for stream_name, base_url in endpoints.items():
             stream_data = await self._fetch_intraday_stream(
@@ -240,13 +247,16 @@ class BeemApiClient:
             )
             streams[stream_name] = stream_data
 
-        # Combine: consumption = production + grid_import - grid_export
+        # Combine: consumption = prod + import - export - charged + discharged
         production = streams.get("production", {})
         grid_import = streams.get("grid_import", {})
         grid_export = streams.get("grid_export", {})
+        bat_charged = streams.get("battery_charged", {})
+        bat_discharged = streams.get("battery_discharged", {})
 
         all_timestamps = sorted(
             set(production) | set(grid_import) | set(grid_export)
+            | set(bat_charged) | set(bat_discharged)
         )
 
         results: list[tuple[datetime, float]] = []
@@ -254,7 +264,9 @@ class BeemApiClient:
             prod = production.get(ts_str, 0.0)
             imp = grid_import.get(ts_str, 0.0)
             exp = grid_export.get(ts_str, 0.0)
-            consumption = prod + imp - exp
+            charged = bat_charged.get(ts_str, 0.0)
+            discharged = bat_discharged.get(ts_str, 0.0)
+            consumption = prod + imp - exp - charged + discharged
             # Clamp to zero — rounding errors can produce small negatives
             consumption = max(0.0, consumption)
             try:
@@ -264,12 +276,14 @@ class BeemApiClient:
                 continue
 
         log.info(
-            "REST: computed %d consumption history points from "
-            "%d production + %d grid_import + %d grid_export over %d days",
+            "REST: computed %d consumption points from %d prod + %d import "
+            "- %d export - %d charged + %d discharged over %d days",
             len(results),
             len(production),
             len(grid_import),
             len(grid_export),
+            len(bat_charged),
+            len(bat_discharged),
             days,
         )
         return results

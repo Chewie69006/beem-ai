@@ -382,8 +382,11 @@ async def beem_fetch_intraday(
     return data
 
 
-async def beem_all_intraday(session: aiohttp.ClientSession, token: str):
-    """Fetch all three intraday streams needed for consumption bootstrap."""
+async def beem_all_intraday(session: aiohttp.ClientSession, token: str, battery_id: int | str):
+    """Fetch all five intraday streams needed for consumption bootstrap.
+
+    consumption = production + grid_import - grid_export - battery_charged + battery_discharged
+    """
     streams = {
         "production": (
             "/production/energy/intraday",
@@ -399,6 +402,16 @@ async def beem_all_intraday(session: aiohttp.ClientSession, token: str):
             "/consumption/houses/active-returned-energy/intraday",
             f"{BEEM_API_BASE}/consumption/houses/active-returned-energy/intraday",
             "consumption/houses/active-returned-energy/intraday",
+        ),
+        "battery_charged": (
+            f"/batteries/{battery_id}/energy-charged/intraday",
+            f"{BEEM_API_BASE}/batteries/{battery_id}/energy-charged/intraday",
+            f"batteries/energy-charged/intraday",
+        ),
+        "battery_discharged": (
+            f"/batteries/{battery_id}/energy-discharged/intraday",
+            f"{BEEM_API_BASE}/batteries/{battery_id}/energy-discharged/intraday",
+            f"batteries/energy-discharged/intraday",
         ),
     }
     for name, (label, url, save_key) in streams.items():
@@ -711,6 +724,8 @@ async def main():
                 "production/energy/intraday",
                 "consumption/houses/active-energy/intraday",
                 "consumption/houses/active-returned-energy/intraday",
+                "batteries/energy-charged/intraday",
+                "batteries/energy-discharged/intraday",
                 "mqtt-streaming",
             ]
             if not has_response("beem", ep)
@@ -753,7 +768,7 @@ async def main():
             else:
                 print("  -- Skipping batteries/control-parameters (already exists)")
 
-            await beem_all_intraday(session, token)
+            await beem_all_intraday(session, token, battery_id)
 
             if not has_response("beem", "mqtt-streaming"):
                 save_mqtt_reference(battery_serial)
