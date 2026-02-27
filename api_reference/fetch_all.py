@@ -317,35 +317,34 @@ async def beem_set_control_params(session: aiohttp.ClientSession, token: str, ba
 
 
 # =====================================================================
-# 5. BEEM — GET /consumption/houses/active-energy/intraday
+# 5. BEEM — Intraday energy streams (consumption bootstrap)
 # =====================================================================
 
-async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) -> dict:
+async def beem_fetch_intraday(
+    session: aiohttp.ClientSession, token: str, label: str, url: str, save_key: str,
+) -> dict:
     """
-    Fetch hourly consumption data for a date range.
+    Generic fetcher for Beem intraday energy endpoints.
 
-    Request:
-        GET {BEEM_API_BASE}/consumption/houses/active-energy/intraday
+    All share the same request/response shape:
+        GET {url}?from=...&to=...&scale=PT60M
         Authorization: Bearer {token}
-        Params: from (ISO with tz offset), to (ISO with tz offset), scale=PT60M
+        Accept: application/json
 
-    Response shape:
-        {
-            "houses": [{
-                "measures": [
-                    {"startDate": "2026-02-01T00:00:00.000Z", "value": 450.5},
-                    {"startDate": "2026-02-01T01:00:00.000Z", "value": 320.0},
-                    ...
-                ]
-            }]
-        }
+    Response:
+        { "houses"|top-level: [{ "measures": [{"startDate": "...", "value": N}, ...] }] }
 
-    Notes:
-        - value = Wh per hour interval (equivalent to average watts for that hour)
-        - from/to MUST include timezone offset (e.g. +01:00) — naive datetimes get 400
-        - 'to' should be midnight of the day after the last desired day
-        - Used at bootstrap to seed the ConsumptionAnalyzer EMA buckets
-        - Integration fetches ~30 days in 7-day chunks with 1s delay between
+    value = Wh per hour interval.
+    from/to MUST include timezone offset (e.g. +01:00).
+    'to' should be midnight of the day after the last desired day.
+
+    Three streams are combined for true house consumption:
+        consumption = production + grid_import - grid_export
+
+    Endpoints:
+        - /production/energy/intraday                       (solar production)
+        - /consumption/houses/active-energy/intraday        (grid import)
+        - /consumption/houses/active-returned-energy/intraday (grid export)
 
     Used by: beem_api.py -> BeemApiClient.get_consumption_history()
     """
@@ -355,7 +354,6 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
     end = datetime.now(local_tz).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     start = end - timedelta(days=7)
 
-    url = f"{BEEM_API_BASE}/consumption/houses/active-energy/intraday"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -370,18 +368,44 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
         resp.raise_for_status()
         data = await resp.json()
 
-    save_response("beem", "consumption/houses/active-energy/intraday", data)
+    save_response("beem", save_key, data)
 
-    houses = data.get("houses", [])
-    measures = houses[0].get("measures", []) if houses else []
-    sample = measures[:6]
+    containers = data.get("houses") or data.get("devices") or [data]
+    total_measures = sum(len(c.get("measures", [])) for c in containers)
 
-    pp("BEEM GET /consumption/houses/active-energy/intraday", {
+    pp(f"BEEM GET {label}", {
         "params": params,
-        "total_measures": len(measures),
-        "sample": sample,
+        "containers": len(containers),
+        "total_measures": total_measures,
+        "sample": (containers[0].get("measures", []) if containers else [])[:4],
     })
     return data
+
+
+async def beem_all_intraday(session: aiohttp.ClientSession, token: str):
+    """Fetch all three intraday streams needed for consumption bootstrap."""
+    streams = {
+        "production": (
+            "/production/energy/intraday",
+            f"{BEEM_API_BASE}/production/energy/intraday",
+            "production/energy/intraday",
+        ),
+        "grid_import": (
+            "/consumption/houses/active-energy/intraday",
+            f"{BEEM_API_BASE}/consumption/houses/active-energy/intraday",
+            "consumption/houses/active-energy/intraday",
+        ),
+        "grid_export": (
+            "/consumption/houses/active-returned-energy/intraday",
+            f"{BEEM_API_BASE}/consumption/houses/active-returned-energy/intraday",
+            "consumption/houses/active-returned-energy/intraday",
+        ),
+    }
+    for name, (label, url, save_key) in streams.items():
+        if has_response("beem", save_key):
+            print(f"  -- Skipping {save_key} (already exists)")
+            continue
+        await beem_fetch_intraday(session, token, label, url, save_key)
 
 
 # =====================================================================
@@ -684,7 +708,9 @@ async def main():
                 "devices",
                 "devices/mqtt/token",
                 "batteries/control-parameters",
+                "production/energy/intraday",
                 "consumption/houses/active-energy/intraday",
+                "consumption/houses/active-returned-energy/intraday",
                 "mqtt-streaming",
             ]
             if not has_response("beem", ep)
@@ -727,10 +753,7 @@ async def main():
             else:
                 print("  -- Skipping batteries/control-parameters (already exists)")
 
-            if not has_response("beem", "consumption/houses/active-energy/intraday"):
-                await beem_consumption_intraday(session, token)
-            else:
-                print("  -- Skipping consumption/houses/active-energy/intraday (already exists)")
+            await beem_all_intraday(session, token)
 
             if not has_response("beem", "mqtt-streaming"):
                 save_mqtt_reference(battery_serial)

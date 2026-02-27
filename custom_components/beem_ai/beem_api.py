@@ -198,21 +198,21 @@ class BeemApiClient:
     ) -> list[tuple[datetime, float]]:
         """Fetch intraday consumption history from the Beem API.
 
-        Retrieves hourly consumption data in 7-day chunks to avoid
-        overloading the API. Each value is Wh per hour interval, which
-        equals average watts for that hour.
+        True house consumption = production + grid_import - grid_export.
+        The single 'active-energy' endpoint only gives grid import, which
+        misses solar self-consumption and battery discharge entirely.
 
-        This bypasses the normal rate limiter since it's a one-time
-        bootstrap operation.
+        We fetch three streams and combine them:
+          - production/energy/intraday          (solar production Wh)
+          - consumption/houses/active-energy     (grid import Wh)
+          - consumption/houses/active-returned   (grid export Wh)
 
-        Returns a list of (timestamp, watts) pairs.
+        Returns a list of (timestamp, watts) pairs representing real
+        household consumption (Wh per hour ≈ average watts).
         """
-        results: list[tuple[datetime, float]] = []
         from datetime import timezone
 
         local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-        # 'to' = midnight of tomorrow, 'from' = 'to' minus N days
-        # Beem API requires tz-aware ISO timestamps and 'to' at midnight
         end = (
             datetime.now(local_tz)
             .replace(hour=0, minute=0, second=0, microsecond=0)
@@ -220,17 +220,80 @@ class BeemApiClient:
         )
         start = end - timedelta(days=days)
 
+        endpoints = {
+            "production": f"{self._api_base}/production/energy/intraday",
+            "grid_import": (
+                f"{self._api_base}/consumption/houses/"
+                f"active-energy/intraday"
+            ),
+            "grid_export": (
+                f"{self._api_base}/consumption/houses/"
+                f"active-returned-energy/intraday"
+            ),
+        }
+
+        # Fetch all three streams: {stream: {iso_str: wh_value}}
+        streams: dict[str, dict[str, float]] = {}
+        for stream_name, base_url in endpoints.items():
+            stream_data = await self._fetch_intraday_stream(
+                stream_name, base_url, start, end, days,
+            )
+            streams[stream_name] = stream_data
+
+        # Combine: consumption = production + grid_import - grid_export
+        production = streams.get("production", {})
+        grid_import = streams.get("grid_import", {})
+        grid_export = streams.get("grid_export", {})
+
+        all_timestamps = sorted(
+            set(production) | set(grid_import) | set(grid_export)
+        )
+
+        results: list[tuple[datetime, float]] = []
+        for ts_str in all_timestamps:
+            prod = production.get(ts_str, 0.0)
+            imp = grid_import.get(ts_str, 0.0)
+            exp = grid_export.get(ts_str, 0.0)
+            consumption = prod + imp - exp
+            # Clamp to zero — rounding errors can produce small negatives
+            consumption = max(0.0, consumption)
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                results.append((ts, consumption))
+            except (ValueError, TypeError):
+                continue
+
+        log.info(
+            "REST: computed %d consumption history points from "
+            "%d production + %d grid_import + %d grid_export over %d days",
+            len(results),
+            len(production),
+            len(grid_import),
+            len(grid_export),
+            days,
+        )
+        return results
+
+    async def _fetch_intraday_stream(
+        self,
+        name: str,
+        base_url: str,
+        start: datetime,
+        end: datetime,
+        days: int,
+    ) -> dict[str, float]:
+        """Fetch one intraday stream in 7-day chunks.
+
+        Returns {iso_timestamp_str: wh_value} keyed by startDate.
+        """
+        data_map: dict[str, float] = {}
         chunk_days = 7
-        chunks = (days + chunk_days - 1) // chunk_days  # ceiling division
+        chunks = (days + chunk_days - 1) // chunk_days
 
         for i in range(chunks):
             chunk_start = start + timedelta(days=i * chunk_days)
             chunk_end = min(start + timedelta(days=(i + 1) * chunk_days), end)
 
-            url = (
-                f"{self._api_base}/consumption/houses/"
-                f"active-energy/intraday"
-            )
             params = {
                 "from": chunk_start.isoformat(),
                 "to": chunk_end.isoformat(),
@@ -238,11 +301,9 @@ class BeemApiClient:
             }
 
             log.info(
-                "REST: fetching consumption history chunk %d/%d (%s to %s)",
-                i + 1,
-                chunks,
-                params["from"][:10],
-                params["to"][:10],
+                "REST: fetching %s chunk %d/%d (%s to %s)",
+                name, i + 1, chunks,
+                params["from"][:10], params["to"][:10],
             )
 
             try:
@@ -253,60 +314,52 @@ class BeemApiClient:
                     "headers": headers,
                     "params": params,
                 }
-                resp = await self._session.request("GET", url, **kwargs)
+                resp = await self._session.request("GET", base_url, **kwargs)
 
                 if resp.status == 429:
-                    log.warning(
-                        "REST: 429 during consumption history fetch, stopping"
-                    )
+                    log.warning("REST: 429 during %s fetch, stopping", name)
                     break
 
                 if not resp.ok:
                     body = await resp.text()
                     log.warning(
-                        "REST: consumption history chunk %d returned %d: %s",
-                        i + 1,
-                        resp.status,
-                        body[:200],
+                        "REST: %s chunk %d returned %d: %s",
+                        name, i + 1, resp.status, body[:200],
                     )
                     continue
 
-                data = await resp.json()
-                houses = data.get("houses", [])
-                if not houses:
-                    log.debug("REST: no houses in consumption response")
+                resp_data = await resp.json()
+                # Response key varies: "houses", "devices", or "batteries"
+                containers = (
+                    resp_data.get("houses")
+                    or resp_data.get("devices")
+                    or resp_data.get("batteries")
+                    or [resp_data]
+                )
+                if not containers:
                     continue
 
-                measures = houses[0].get("measures", [])
-                for m in measures:
-                    start_date = m.get("startDate")
-                    value = m.get("value")
-                    if start_date is None or value is None:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(
-                            start_date.replace("Z", "+00:00")
-                        )
-                        results.append((ts, float(value)))
-                    except (ValueError, TypeError):
-                        continue
+                # Sum across all containers (production has multiple
+                # devices, one per MPPT — we need total production)
+                for container in containers:
+                    for m in container.get("measures", []):
+                        ts_str = m.get("startDate")
+                        value = m.get("value")
+                        if ts_str is not None and value is not None:
+                            data_map[ts_str] = (
+                                data_map.get(ts_str, 0.0) + float(value)
+                            )
 
             except (aiohttp.ClientError, asyncio.TimeoutError):
-                log.exception(
-                    "REST: consumption history chunk %d failed", i + 1
-                )
+                log.exception("REST: %s chunk %d failed", name, i + 1)
                 continue
 
-            # 1s delay between chunks to be gentle on the API
+            # 1s delay between chunks
             if i < chunks - 1:
                 await asyncio.sleep(1)
 
-        log.info(
-            "REST: fetched %d consumption history data points over %d days",
-            len(results),
-            days,
-        )
-        return results
+        log.info("REST: fetched %d %s data points", len(data_map), name)
+        return data_map
 
     # ------------------------------------------------------------------
     # Internal helpers

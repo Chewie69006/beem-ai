@@ -273,8 +273,8 @@ class TestGetConsumptionHistory:
         results = await api_client.get_consumption_history(days=30)
 
         assert results == []
-        # Should have only made 1 request (stopped after 429)
-        assert api_client._session.request.call_count == 1
+        # 3 streams (production, grid_import, grid_export), each stops after first 429
+        assert api_client._session.request.call_count == 3
 
 
 # ------------------------------------------------------------------
