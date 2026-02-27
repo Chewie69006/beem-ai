@@ -622,11 +622,29 @@ async def solcast_forecast(session: aiohttp.ClientSession, site_id: str, site_in
     Rate limit: 10 requests/day on free hobbyist plan (tracked internally).
     """
     url = f"https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts"
-    headers = {"Authorization": f"Bearer {SOLCAST_API_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {SOLCAST_API_KEY}",
+        "Accept": "application/json",
+    }
 
     async with session.get(url, headers=headers) as resp:
         resp.raise_for_status()
-        data = await resp.json()
+        body = await resp.text()
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            print(f"  !! Solcast site {site_index + 1}: response is not JSON "
+                  f"(content-type={resp.content_type}). "
+                  f"Check your SOLCAST_API_KEY in config.py.")
+            print(f"     Body preview: {body[:200]}")
+            # Save raw response for debugging
+            save_response("solcast", f"forecasts_site_{site_index + 1}_error", {
+                "error": "Response is not JSON — likely invalid API key",
+                "status": resp.status,
+                "content_type": resp.content_type,
+                "body_preview": body[:500],
+            })
+            return {}
 
     save_response("solcast", f"forecasts_site_{site_index + 1}", data)
 

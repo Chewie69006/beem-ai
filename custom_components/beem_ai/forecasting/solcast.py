@@ -83,7 +83,10 @@ class SolcastSource:
             return {}
 
         url = f"https://api.solcast.com.au/rooftop_sites/{self.site_id}/forecasts"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        }
 
         try:
             async with self._session.get(
@@ -92,7 +95,7 @@ class SolcastSource:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 resp.raise_for_status()
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 self._record_request()
         except aiohttp.ClientError:
             log.exception("Solcast API request failed")
