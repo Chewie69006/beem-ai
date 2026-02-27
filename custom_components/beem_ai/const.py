@@ -37,8 +37,6 @@ SENSOR_CONSUMPTION = "consumption"
 SENSOR_BATTERY_SOH = "battery_soh"
 SENSOR_SOLAR_FORECAST_TODAY = "solar_forecast_today"
 SENSOR_SOLAR_FORECAST_TOMORROW = "solar_forecast_tomorrow"
-SENSOR_CONSUMPTION_FORECAST_TODAY = "consumption_forecast_today"
-
 # Binary sensor keys
 BINARY_SENSOR_MQTT_CONNECTED = "mqtt_connected"
 

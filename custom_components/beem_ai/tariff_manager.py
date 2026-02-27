@@ -163,6 +163,22 @@ class TariffManager:
         t = dt.time()
         return any(self._time_in_period(t, p) for p in self._periods)
 
+    def get_daily_reset_hour(self) -> int:
+        """Return the hour for daily reset: start of cheapest & longest period, rounded up."""
+        if not self._periods:
+            return 0  # midnight fallback
+
+        def _duration_minutes(p: TariffPeriod) -> int:
+            s = p.start.hour * 60 + p.start.minute
+            e = p.end.hour * 60 + p.end.minute
+            return (e - s) % 1440  # handles midnight crossing
+
+        best = min(self._periods, key=lambda p: (p.price, -_duration_minutes(p)))
+        h, m = best.start.hour, best.start.minute
+        if m > 0:
+            return (h + 1) % 24
+        return h
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

@@ -170,3 +170,41 @@ class TestReconfigure:
         ]
         no_periods_tariff.reconfigure({"tariff_periods_json": periods})
         assert no_periods_tariff.get_tariff_at(self._dt(12, 0)) == "Test"
+
+
+# ── TariffManager: get_daily_reset_hour ──────────────────────────────
+
+
+class TestGetDailyResetHour:
+    def test_no_periods_returns_midnight(self, no_periods_tariff):
+        assert no_periods_tariff.get_daily_reset_hour() == 0
+
+    def test_cheapest_period_on_the_hour(self, custom_tariff):
+        """'Nuit' starts at 23:00 (on the hour) → reset at 23."""
+        assert custom_tariff.get_daily_reset_hour() == 23
+
+    def test_cheapest_period_not_on_the_hour_rounds_up(self):
+        """Period starting at 21:26 → reset at 22."""
+        periods = [
+            {"label": "Night", "start": "21:26", "end": "06:00", "price": 0.10},
+        ]
+        tm = TariffManager(default_price=0.25, periods=periods)
+        assert tm.get_daily_reset_hour() == 22
+
+    def test_rounds_up_across_midnight(self):
+        """Period starting at 23:30 → (23+1) % 24 = 0."""
+        periods = [
+            {"label": "Night", "start": "23:30", "end": "06:00", "price": 0.10},
+        ]
+        tm = TariffManager(default_price=0.25, periods=periods)
+        assert tm.get_daily_reset_hour() == 0
+
+    def test_tiebreaker_longest_duration(self):
+        """Two periods at same price — picks the longer one."""
+        periods = [
+            {"label": "Short", "start": "02:00", "end": "04:00", "price": 0.10},
+            {"label": "Long", "start": "22:00", "end": "06:00", "price": 0.10},
+        ]
+        tm = TariffManager(default_price=0.25, periods=periods)
+        # Long starts at 22:00 (on the hour) → 22
+        assert tm.get_daily_reset_hour() == 22

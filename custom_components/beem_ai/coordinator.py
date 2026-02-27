@@ -77,8 +77,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
 
-        # Consumption forecast override (user-set value, cleared at midnight)
-        self._consumption_override: float | None = None
+        # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
+        self._consumption_tomorrow_override: float | None = None
+        # True after promotion of a user-overridden tomorrow → today
+        self._consumption_today_protected: bool = False
 
         # Schedule handles
         self._daily_reset_unsub = None
@@ -331,26 +333,46 @@ class BeemAICoordinator(DataUpdateCoordinator):
     _last_reset_date = None
 
     async def _check_daily_reset(self, _now=None) -> None:
-        """Check if it's midnight for daily reset."""
+        """Check if it's the daily reset hour (start of cheapest tariff period, rounded up)."""
         from datetime import datetime
         now = datetime.now()
-        if now.hour == 0 and now.minute == 0:
+        reset_hour = self._tariff.get_daily_reset_hour() if self._tariff else 0
+        if now.hour == reset_hour and now.minute == 0:
             today = now.date()
             if self._last_reset_date != today:
                 self._last_reset_date = today
                 await self._daily_reset()
 
     async def _daily_reset(self) -> None:
-        """Midnight reset of daily counters."""
-        self._consumption_override = None
+        """Daily reset: promote tomorrow → today, compute fresh tomorrow."""
+        # 1. Promote tomorrow → today
+        promoted = self.state_store.forecast.consumption_tomorrow_kwh
+        if self._consumption_tomorrow_override is not None:
+            self._consumption_today_protected = True
+        else:
+            self._consumption_today_protected = False
+        self.state_store.update_forecast(consumption_today_kwh=promoted)
+        _LOGGER.info(
+            "Promoted consumption tomorrow (%.1f kWh) → today (protected=%s)",
+            promoted, self._consumption_today_protected,
+        )
+
+        # 2. Clear tomorrow override
+        self._consumption_tomorrow_override = None
+
+        # 3. Persist analytics
         if self._consumption:
             self._consumption.save()
         if self._forecast_tracker:
             self._forecast_tracker.save()
+
+        # 4. Refresh forecasts → computes fresh tomorrow
+        await self._refresh_forecasts()
+
         if self._data_dir:
             self.state_store.save_forecast(self._data_dir)
             _LOGGER.info("Persisted forecast state to disk")
-        _LOGGER.info("Daily counters reset")
+        _LOGGER.info("Daily reset complete")
 
     async def _refresh_forecasts(self) -> None:
         """Refresh solar and consumption forecasts."""
@@ -362,13 +384,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 today_kwh = self._consumption.get_forecast_kwh_today()
                 tomorrow_kwh = self._consumption.get_forecast_kwh_tomorrow()
                 hourly = self._consumption.get_hourly_consumption_forecast_tomorrow()
-                update = {
-                    "consumption_tomorrow_kwh": tomorrow_kwh,
-                    "consumption_hourly": hourly,
-                }
-                # Preserve user override for today's consumption
-                if self._consumption_override is None:
+                update: dict = {"consumption_hourly": hourly}
+                # Skip today if protected (promoted user override)
+                if not self._consumption_today_protected:
                     update["consumption_today_kwh"] = today_kwh
+                # Skip tomorrow if user override is active
+                if self._consumption_tomorrow_override is None:
+                    update["consumption_tomorrow_kwh"] = tomorrow_kwh
                 self.state_store.update_forecast(**update)
 
             f = self.state_store.forecast
@@ -413,11 +435,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     # ---- Consumption forecast override ----
 
-    async def async_set_consumption_forecast(self, value: float) -> None:
-        """Set a manual override for today's consumption forecast."""
-        self._consumption_override = value
-        self.state_store.update_forecast(consumption_today_kwh=value)
-        _LOGGER.info("Consumption forecast overridden to %.1f kWh by user", value)
+    async def async_set_consumption_forecast_tomorrow(self, value: float) -> None:
+        """Set a manual override for tomorrow's consumption forecast."""
+        self._consumption_tomorrow_override = value
+        self.state_store.update_forecast(consumption_tomorrow_kwh=value)
+        _LOGGER.info("Consumption forecast tomorrow overridden to %.1f kWh by user", value)
         self.async_update_listeners()
 
     # ---- Shutdown ----
