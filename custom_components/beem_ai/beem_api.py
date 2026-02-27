@@ -208,25 +208,32 @@ class BeemApiClient:
         Returns a list of (timestamp, watts) pairs.
         """
         results: list[tuple[datetime, float]] = []
-        now = datetime.now()
+        from datetime import timezone
+
+        local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+        # 'to' = midnight of tomorrow, 'from' = 'to' minus N days
+        # Beem API requires tz-aware ISO timestamps and 'to' at midnight
+        end = (
+            datetime.now(local_tz)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)
+        )
+        start = end - timedelta(days=days)
+
         chunk_days = 7
         chunks = (days + chunk_days - 1) // chunk_days  # ceiling division
 
         for i in range(chunks):
-            chunk_end = now - timedelta(days=i * chunk_days)
-            chunk_start = now - timedelta(days=min((i + 1) * chunk_days, days))
+            chunk_start = start + timedelta(days=i * chunk_days)
+            chunk_end = min(start + timedelta(days=(i + 1) * chunk_days), end)
 
             url = (
                 f"{self._api_base}/consumption/houses/"
                 f"active-energy/intraday"
             )
             params = {
-                "from": chunk_start.replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                ).isoformat(),
-                "to": chunk_end.replace(
-                    hour=23, minute=59, second=59, microsecond=0
-                ).isoformat(),
+                "from": chunk_start.isoformat(),
+                "to": chunk_end.isoformat(),
                 "scale": "PT60M",
             }
 

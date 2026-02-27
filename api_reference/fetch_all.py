@@ -327,7 +327,7 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
     Request:
         GET {BEEM_API_BASE}/consumption/houses/active-energy/intraday
         Authorization: Bearer {token}
-        Params: from (ISO), to (ISO), scale=PT60M
+        Params: from (ISO with tz offset), to (ISO with tz offset), scale=PT60M
 
     Response shape:
         {
@@ -342,13 +342,17 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
 
     Notes:
         - value = Wh per hour interval (equivalent to average watts for that hour)
+        - from/to MUST include timezone offset (e.g. +01:00) — naive datetimes get 400
+        - 'to' should be midnight of the day after the last desired day
         - Used at bootstrap to seed the ConsumptionAnalyzer EMA buckets
         - Integration fetches ~30 days in 7-day chunks with 1s delay between
 
     Used by: beem_api.py -> BeemApiClient.get_consumption_history()
     """
-    from datetime import timedelta
-    end = datetime.now()
+    from datetime import timedelta, timezone
+
+    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+    end = datetime.now(local_tz).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     start = end - timedelta(days=7)
 
     url = f"{BEEM_API_BASE}/consumption/houses/active-energy/intraday"
@@ -357,8 +361,8 @@ async def beem_consumption_intraday(session: aiohttp.ClientSession, token: str) 
         "Accept": "application/json",
     }
     params = {
-        "from": start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
-        "to": end.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
+        "from": start.isoformat(),
+        "to": end.isoformat(),
         "scale": "PT60M",
     }
 
