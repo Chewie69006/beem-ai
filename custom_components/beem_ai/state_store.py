@@ -55,8 +55,8 @@ class BatteryState:
 
     @property
     def consumption_w(self) -> float:
-        """Estimated household consumption."""
-        return self.solar_power_w + self.import_power_w + max(0.0, -self.battery_power_w)
+        """Estimated household consumption (energy balance)."""
+        return max(0.0, self.solar_power_w + self.meter_power_w - self.battery_power_w)
 
 
 @dataclass

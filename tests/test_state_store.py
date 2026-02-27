@@ -67,14 +67,33 @@ class TestBatteryStateProperties:
         assert b.import_power_w == 0.0
 
     def test_consumption_w_solar_plus_import(self):
-        # solar 2000W + importing 500W + no discharge => 2500W
+        # solar 2000W + importing 500W, battery charging 100W
+        # consumption = 2000 + 500 - 100 = 2400W
         b = BatteryState(solar_power_w=2000.0, meter_power_w=500.0, battery_power_w=100.0)
-        assert b.consumption_w == 2500.0
+        assert b.consumption_w == 2400.0
 
     def test_consumption_w_with_discharge(self):
-        # solar 1000W + import 0 + discharge 500W (battery_power_w=-500)
+        # solar 1000W + no grid + discharge 500W (battery_power_w=-500)
+        # consumption = 1000 + 0 - (-500) = 1500W
         b = BatteryState(solar_power_w=1000.0, meter_power_w=0.0, battery_power_w=-500.0)
         assert b.consumption_w == 1500.0
+
+    def test_consumption_w_solar_charging_battery(self):
+        # solar 3000W, battery charging 1500W, no grid
+        # consumption = 3000 + 0 - 1500 = 1500W
+        b = BatteryState(solar_power_w=3000.0, meter_power_w=0.0, battery_power_w=1500.0)
+        assert b.consumption_w == 1500.0
+
+    def test_consumption_w_solar_exporting(self):
+        # solar 2000W, exporting 500W to grid (meter=-500), no battery
+        # consumption = 2000 + (-500) - 0 = 1500W
+        b = BatteryState(solar_power_w=2000.0, meter_power_w=-500.0, battery_power_w=0.0)
+        assert b.consumption_w == 1500.0
+
+    def test_consumption_w_clamped_to_zero(self):
+        # Measurement noise could yield negative — clamp to 0
+        b = BatteryState(solar_power_w=0.0, meter_power_w=100.0, battery_power_w=200.0)
+        assert b.consumption_w == 0.0
 
     def test_consumption_w_all_zero(self):
         b = BatteryState()
