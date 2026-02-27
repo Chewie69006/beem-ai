@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 from datetime import timedelta
 
@@ -44,7 +45,7 @@ from .tariff_manager import TariffManager
 _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(minutes=2)
-FORECAST_INTERVAL = timedelta(hours=1)
+FORECAST_INTERVAL = timedelta(hours=4)
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -81,6 +82,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Persistence directory (set in async_setup)
         self._data_dir: str | None = None
+        self._file_log_handler: logging.Handler | None = None
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -91,6 +93,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         data_dir = self.hass.config.path("beem_ai_data")
         os.makedirs(data_dir, exist_ok=True)
         self._data_dir = data_dir
+
+        # Set up persistent log file
+        self._setup_file_logging(data_dir)
 
         # Restore persisted state before anything else reads it
         _LOGGER.info("Loading persisted state from %s", data_dir)
@@ -158,6 +163,29 @@ class BeemAICoordinator(DataUpdateCoordinator):
         await self._refresh_forecasts()
 
         _LOGGER.info("BeemAI coordinator setup complete")
+
+    def _setup_file_logging(self, data_dir: str) -> None:
+        """Add a RotatingFileHandler to the beem_ai logger for persistent logs."""
+        log_path = os.path.join(data_dir, "beem_ai.log")
+        handler = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+        )
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        # Attach to the package-level logger so all beem_ai modules log to file
+        pkg_logger = logging.getLogger("custom_components.beem_ai")
+        # Avoid adding duplicate handlers on config entry reload
+        if not any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            and getattr(h, "baseFilename", None) == handler.baseFilename
+            for h in pkg_logger.handlers
+        ):
+            pkg_logger.addHandler(handler)
+        self._file_log_handler = handler
+        _LOGGER.info("Persistent log file: %s (5 MB × 3 backups)", log_path)
 
     @staticmethod
     def _parse_tariff_periods(options: dict) -> list[dict] | None:
@@ -293,7 +321,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     async def _forecast_loop(self, _now=None) -> None:
         """Hourly forecast refresh."""
-        _LOGGER.info("Hourly forecast refresh triggered")
+        _LOGGER.info("Forecast refresh triggered (every 4h)")
         await self._refresh_forecasts()
         if self._data_dir:
             self.state_store.save_forecast(self._data_dir)
@@ -410,5 +438,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Close HTTP session
         if self._session:
             await self._session.close()
+
+        # Remove file log handler
+        if self._file_log_handler:
+            pkg_logger = logging.getLogger("custom_components.beem_ai")
+            pkg_logger.removeHandler(self._file_log_handler)
+            self._file_log_handler.close()
 
         _LOGGER.info("BeemAI shutdown complete")

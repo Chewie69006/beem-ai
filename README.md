@@ -56,15 +56,16 @@ Home Assistant's configured location for solar forecasting.
 | Latitude / Longitude       | HA config | Installation location (optional override)              |
 | Solcast API Key / Site ID  | —       | Optional premium solar forecast (10 calls/day)            |
 | Default tariff price       | €0.27   | Peak electricity price in EUR/kWh                         |
-| Tariff periods (1-6)       | French 3-tier | Custom periods with label, time range, and price  |
-| Min SoC summer             | 0 (off) | Battery floor in summer months                            |
-| Min SoC winter             | 50 %    | Battery floor in winter months (Nov–Mar)                  |
+| Tariff periods (1-6)       | None    | Custom periods with label, time range, and price  |
+| Min SoC                    | 20 %    | Battery floor (applied year-round)                        |
 | **Smart CFTG**             | Off     | Dynamic grid charging during off-peak based on SoC        |
 | Water heater switch entity | —       | HA entity ID of the smart plug switch                     |
 | Water heater power entity  | —       | HA entity ID of the power sensor on the plug              |
 | Water heater power (W)     | 2000 W  | Nominal consumption of the water heater                   |
-| Solar panel arrays         | 2       | Number of panel orientations; tilt / azimuth / kWp each   |
 | **Dry-run mode**           | Off     | Log all commands without executing them (see below)       |
+
+> **Note:** Solar panel arrays (tilt, azimuth, kWp, MPPT ID, panel layout) are fetched
+> automatically from the Beem API on startup — no manual configuration needed.
 
 ---
 
@@ -81,21 +82,31 @@ Entities are organized into three HA devices:
 | Grid Power | Sensor | Grid import/export (W) |
 | Consumption | Sensor | Estimated house consumption (W) |
 | Battery SoH | Sensor | Battery health (%) |
-| Optimal Charge Target | Sensor | Tonight's target SoC (%) |
-| Optimal Charge Power | Sensor | Planned charge power (W) |
 
-### BeemAI Solar Array
+### BeemAI Solar Array (one device per array, auto-discovered from API)
 | Entity | Type | Description |
 |--------|------|-------------|
-| Solar Forecast Today | Sensor | Solar forecast for today (kWh) |
-| Solar Forecast Tomorrow | Sensor | Solar forecast for tomorrow (kWh) |
+| Capacity | Sensor | Peak power (kWp) |
+| Tilt | Sensor | Panel tilt angle (°) |
+| Azimuth | Sensor | Compass bearing (°) |
+| MPPT ID | Sensor | MPPT identifier |
+| Panels in Series | Sensor | Number of panels in series |
+| Panels in Parallel | Sensor | Number of panels in parallel |
 
 ### BeemAI System
 | Entity | Type | Description |
 |--------|------|-------------|
+| Solar Forecast Today | Sensor | Ensemble solar forecast for today (kWh) |
+| Solar Forecast Tomorrow | Sensor | Ensemble solar forecast for tomorrow (kWh) |
 | Optimization Status | Sensor | Current phase + reasoning text |
 | Consumption Forecast Today | Sensor | Consumption forecast for today (kWh) |
 | Cost Savings Today | Sensor | Estimated savings today (EUR) |
+| Optimal Charge Target | Sensor | Tonight's target SoC (%) |
+| Optimal Charge Power | Sensor | Planned charge power (W) |
+| Allow Grid Charge | Sensor | Whether grid charging is active (on/off) |
+| Prevent Discharge | Sensor | Whether discharge is blocked (on/off) |
+| Battery Mode | Sensor | Current control mode (auto/advanced) |
+| Min SoC | Sensor | Active minimum SoC floor (%) |
 | MQTT Connected | Binary sensor | MQTT live-data connection status |
 | Grid Charging Recommended | Binary sensor | Whether grid charging is planned |
 | Enabled | Switch | Enable / disable the automation entirely |
@@ -104,50 +115,99 @@ Entities are organized into three HA devices:
 
 ## How It Works
 
-### Battery Optimization
+### Lifecycle of a Typical Day
 
-The engine runs two loops:
+Here's what BeemAI does from evening to evening, in chronological order:
 
-#### Evening Optimization (21:00 every day)
+```
+00:00  Nightly optimization → compute tonight's charge plan
+       ├── Fetch solar forecast for today (P50 = ensemble median)
+       ├── Estimate today's consumption (learned from your history)
+       ├── Calculate: do I need to charge from the grid tonight?
+       ├── Schedule phase transitions based on your tariff periods
+       └── Daily reset: clear savings counter, save all data to disk
 
-Called once at 21:00, plans the entire overnight charge strategy for the next morning.
+00:30  Off-peak phase starts (depends on your tariff config)
+       └── If charging needed: enable grid charging at calculated power
 
-1. Fetches tomorrow's solar forecast (P10 — conservative estimate)
-2. Estimates tomorrow's consumption from learned household patterns
-3. Calculates the **net solar balance** = solar forecast − consumption forecast
-4. Determines **target SoC** based on how much grid charge is needed:
+02:00  Cheapest period starts (depends on your tariff config)
+       └── Continue or start grid charging at cheapest rate
 
-| Condition | Net balance | Target SoC |
+06:00  Off-peak ends → switch to solar_mode
+       ├── Disable grid charging
+       ├── Allow battery discharge (powers the house from battery + solar)
+       └── Status shows: "Daytime: solar priority, battery discharge allowed"
+
+Every 4h: Forecast refresh → re-calculate plan with updated numbers
+       └── The "Optimization Status" sensor updates with new forecast values
+
+Every 5 min: Intraday safety checks
+       ├── Is MQTT data fresh?
+       ├── Is SoC dangerously low while discharging? → Emergency stop
+       └── Track actual vs forecast solar production
+
+Every 5 min: Water heater evaluation (if configured)
+Every 5 min: Smart CFTG check (if enabled)
+```
+
+### Battery Optimization — Details
+
+#### What the Optimizer Decides
+
+At midnight (and again every 4 hours when forecasts refresh), the optimizer calculates:
+
+1. **Target SoC** — how full should the battery be by morning?
+2. **Charge power** — at what wattage should it charge from the grid?
+3. **Phase schedule** — when to start/stop grid charging
+
+The key formula is simple:
+```
+deficit = today_consumption − today_solar_P50
+```
+- **P50** is the ensemble median solar estimate — the most likely production scenario
+- **Consumption** includes house + water heater, learned from historical data
+
+| Deficit | Target SoC | Why |
 |---|---|---|
-| Very sunny | > 80% of capacity | 20% (leave room for solar) |
-| Moderate sun | > 0 kWh | Night consumption + 10% buffer |
-| Slightly cloudy | > −5 kWh | 60–80%, adjusted for deficit |
-| Heavy deficit | ≤ −5 kWh | 80–95%, blended with current SoC |
+| ≤ 0 kWh (solar surplus) | 0% | No CFTG needed — solar covers everything |
+| > 0 kWh | deficit / capacity × 100, rounded up to nearest 5% | Charge just enough to cover the gap |
 
-5. Applies a **winter floor** (min 50% in Nov–Mar)
-6. Applies a **confidence adjustment** (+15% if forecast confidence is low)
-7. Picks the smallest charge power step that reaches target in 4 hours: 500 W → 1000 W → 2500 W → 5000 W
-8. Decides if the cheap HC window (23:00–02:00) is also needed
+**Example:** consumption = 20 kWh, solar = 12 kWh → deficit = 8 kWh → target = ceil(8 / 13.4 × 100) = **60%**
+
+Adjustments:
+- **Low confidence** (only 1 forecast source worked): +15%
+- **Min SoC floor** from your settings
+- Capped at 95% (always leave headroom for solar)
+
+**Charge power** picks the smallest step from [500, 1000, 2500, 5000] W that can deliver the needed energy within the cheapest tariff window.
 
 #### Phase Schedule (evening → morning)
 
-Phase times are dynamically computed from your configured tariff periods:
+Phase timing comes from your configured tariff periods:
 
-| Phase | Default Time | Action |
+| Phase | What happens | Battery state |
 |---|---|---|
-| `evening_hold` | 21:00 → off-peak start | Hold: no discharge, no grid charge |
-| `offpeak_charge` | Off-peak start → cheapest start | Grid charge at calculated power (if needed) |
-| `cheapest_charge` | Cheapest period | Grid charge at full power (cheapest rate) |
-| `solar_mode` | After off-peak ends | Release to solar priority |
+| `night_hold` | 00:00 → off-peak start | Discharge blocked, no grid charge |
+| `offpeak_charge` | Off-peak start → cheapest start | Grid charging at calculated power (if needed) |
+| `cheapest_charge` | Cheapest tariff period | Grid charging continues at cheapest rate |
+| `solar_mode` | After off-peak ends → next evening | Discharge allowed, no grid charge — normal solar operation |
 
-With Smart CFTG enabled, off-peak phases defer grid charging decisions to the
-5-minute CFTG monitor loop, which dynamically toggles based on SoC vs threshold.
+**"Daytime: solar priority, battery discharge allowed"** = the battery is in normal mode. Solar charges it, and it discharges to power your house when solar isn't enough. This is the expected daytime state.
+
+#### Why the Plan Changes Every 4 Hours
+
+The forecast refreshes every 4 hours and triggers a re-optimization. This is intentional:
+- Morning forecasts are more accurate than last night's
+- The plan adjusts to reality as the day progresses
+- During `solar_mode`, the re-optimization produces the same outcome (solar mode stays active)
+- The numbers in "Optimization Status" update to reflect latest forecast data
 
 #### Intraday Monitoring (every 5 minutes)
 
-- Runs safety checks (stale MQTT data, SoC below floor, low battery health)
-- **Emergency stop**: if SoC is critically low while discharging, switches to safe fallback plan
-- Tracks actual vs. forecast solar for accuracy learning
+Does **not** change the plan. Only monitors:
+- Safety checks (stale data, low SoC, disconnections)
+- Emergency stop if SoC is critically low while discharging
+- Tracks actual vs. forecast solar deviation (logged if >20%)
 
 ---
 
@@ -175,16 +235,22 @@ thresholds so the heater doesn't toggle every 5 minutes near the boundary.
 
 ### Solar Forecasting
 
-Three sources merged into a weighted ensemble:
+Three sources merged into an equally-weighted ensemble:
 
-| Source | Cost | Rate limit | Notes |
+| Source | Cost | Rate limit | How it uses your arrays |
 |---|---|---|---|
-| Open-Meteo | Free, no key | None | Global Tilted Irradiance → DC output conversion |
-| Forecast.Solar | Free | 12 req/hour | Per-array API calls |
-| Solcast | Paid (10 free/day) | 10 req/day | P10 / P50 / P90 confidence intervals |
+| Open-Meteo | Free, no key | None | One API call **per array** (uses tilt, azimuth, kWp), sums results |
+| Forecast.Solar | Free | 12 req/hour | One API call **per array** (uses tilt, azimuth, kWp), sums results |
+| Solcast | Free hobbyist (10/day) | 10 req/day | **Single call** for the whole site — arrays are configured on Solcast's website, not duplicated locally |
 
-Weights are computed from each source's historical accuracy (30-day rolling MAE).
-Sources that persistently over- or under-predict are down-weighted automatically.
+Each source returns hourly watt values for today and tomorrow. Results are merged by
+weighted average (currently equal weights — 1/N per active source).
+
+**Confidence level**: 1 source = `low` → +15% charge target buffer, 2 = `medium`, 3 = `high`.
+
+**Solcast does not double-count.** It fetches your site's total forecast (which already
+includes all arrays you configured on solcast.com.au). Open-Meteo and Forecast.Solar make
+separate per-array calls using tilt/azimuth/kWp from the Beem API and sum them.
 
 ---
 
@@ -193,13 +259,9 @@ Sources that persistently over- or under-predict are down-weighted automatically
 Define up to 6 custom tariff periods in Options. Each period has a label, start/end
 time (HH:MM), and price. Periods can cross midnight (e.g. 23:00–02:00).
 
-**Default (French 3-tier, used when no custom periods configured):**
+**Default (no periods configured):**
 
-| Tariff | Hours | Default price |
-|---|---|---|
-| HSC (super off-peak) | 02:00–06:00 | €0.16/kWh |
-| HC (off-peak) | 23:00–02:00, 06:00–07:00 | €0.21/kWh |
-| HP (peak) | 07:00–23:00 | €0.27/kWh |
+If no custom periods are defined, the default tariff price applies 24/7 (single flat rate, labeled "HP"). Configure off-peak periods in Options to enable overnight charging optimization.
 
 Any time outside configured periods uses the default tariff price.
 
@@ -246,4 +308,11 @@ python -m venv .venv && .venv/bin/pip install pytest pytest-asyncio aiohttp aiom
 .venv/bin/python -m pytest tests/ -v
 ```
 
-265 tests covering all modules.
+274 tests covering all modules.
+
+---
+
+## Technical Specifications
+
+See [SPECS.md](SPECS.md) for detailed technical specifications of every subsystem,
+including startup sequence, data flow, API contracts, and known issues.

@@ -9,7 +9,7 @@
 - Each period has: label (str), start (HH:MM), end (HH:MM), price (EUR/kWh)
 - Periods are stored as JSON in `OPT_TARIFF_PERIODS_JSON`
 - A default price (`OPT_TARIFF_DEFAULT_PRICE`) applies outside any period
-- If no periods are configured, falls back to French 3-tier: HC (23-02, 06-07), HSC (02-06), HP (07-23)
+- If no periods are configured, only the default price applies 24/7 (single tariff, labeled "HP")
 - `TariffManager.is_in_cheapest_period()` checks if current time is in the lowest-price period
 - `TariffManager.is_in_any_period()` checks if current time is in any configured period
 - Periods can cross midnight (e.g. 23:00-02:00)

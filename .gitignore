@@ -39,6 +39,13 @@ htmlcov/
 # Old AppDaemon app (source reference only, not part of HACS component)
 config/
 
+# API reference (secrets and saved responses)
+api_reference/config.py
+api_reference/beem/
+api_reference/open_meteo/
+api_reference/forecast_solar/
+api_reference/solcast/
+
 # Archives
 *.tar.gz
 *.zip
