@@ -4,7 +4,7 @@ Planned improvements and fixes identified from SPECS.md review and user feedback
 
 ---
 
-## 0. Complete Refactoring — Strip to Core
+## ~~0. Complete Refactoring — Strip to Core~~ ✓ DONE
 
 **Branch:** `feature-refactoring`
 
@@ -87,20 +87,9 @@ After the refactoring, features are added back one at a time, each as a clean im
 
 ---
 
-## 1. Multi-Site Solcast Support
+## ~~1. Multi-Site Solcast Support~~ ✓ DONE
 
-**Problem:** The current code accepts a single `solcast_site_id` in options. If the user has multiple solar arrays configured as separate Solcast sites, only one site's forecast is fetched — the other array is missing from Solcast's contribution to the ensemble.
-
-**Proposed solution:**
-- Fetch solar arrays from Beem API (already done) — each array has a unique `mppt_id`
-- In the options flow, add a per-array Solcast Site ID field (keyed by `mppt_id` or array index)
-- Store as JSON in options: `solcast_site_ids_json` → `[{"array_index": 0, "site_id": "xxx"}, ...]`
-- Alternatively: accept a comma-separated list of site IDs in the existing single field
-- `SolcastSource` becomes `SolcastMultiSiteSource`: fetches each site independently, sums hourly values (same pattern as Open-Meteo/Forecast.Solar)
-- P10/P90 values are summed across sites
-- Rate budget (10/day) is shared across all sites — with 2 sites, each refresh costs 2 API calls
-
-**Simplest option:** Comma-separated site IDs in the existing field. Requires minimal options flow changes. Each site is fetched independently and results summed.
+Per-array Solcast Site IDs via options flow (init → solcast → tariffs). Each array gets its own `solcast_site_{i}_id` field. Stored as `OPT_SOLCAST_SITE_IDS_JSON`. SolcastSource fetches each site independently and sums hourly P10/P50/P90 values. Budget shared across all sites (10/day). Config flow simplified — no more solcast step during initial setup. Diagnostic sensor per solar array shows configured site ID. Migration from legacy single `solcast_site_id` handled automatically.
 
 ---
 
@@ -125,18 +114,9 @@ This means: if Solcast has been more accurate than Open-Meteo over the last 30 d
 
 ---
 
-## 3. Reduce Forecast Refresh Interval to 4 Hours
+## ~~3. Reduce Forecast Refresh Interval to 4 Hours~~ ✓ DONE
 
-**Problem:** Forecasts refresh every hour (`FORECAST_INTERVAL = timedelta(hours=1)` in `coordinator.py`). Solcast's free plan allows 10 calls/day. With 1 site that's already 24 calls/day (only 10 succeed, rest are skipped). With 2 sites (roadmap #1), it's 48 attempted calls. Open-Meteo and Forecast.Solar are less constrained but still wasteful — solar forecasts don't change dramatically hour-to-hour.
-
-**Fix:** Change `FORECAST_INTERVAL` from 1 hour to 4 hours. This gives 6 refreshes/day:
-- With 1 Solcast site: 6 calls/day (well within budget)
-- With 2 Solcast sites: 12 calls/day (slightly over, but Solcast's budget tracker will skip the last refresh gracefully)
-- Forecast.Solar: 12 calls/day with 2 arrays (well within 12/hour limit)
-
-Refreshes would land at roughly: startup, +4h, +8h, +12h, +16h, +20h — covering the key planning windows (morning, midday, evening).
-
-**Also:** Remove the re-optimization after each forecast refresh during daytime (ties into roadmap #5). The evening optimization at 21:00 remains the primary planning trigger.
+Implemented in `coordinator.py` — `FORECAST_INTERVAL` changed from 1 hour to 4 hours. Persistent log file also added.
 
 ---
 
@@ -181,51 +161,15 @@ Implemented in `coordinator.py:_refresh_forecasts()` — sets `consumption_today
 
 ---
 
-## 9. Migrate Solcast to Advanced PV Power Endpoint
+## ~~9. Migrate Solcast to Advanced PV Power Endpoint~~ ✗ NOT FEASIBLE
 
-**Problem:** The current code uses the legacy Solcast endpoint:
-```
-GET https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts
-```
-Solcast recommends the newer "Advanced PV Power" model, which uses a more sophisticated PV simulation (based on pvlib-python with proprietary extensions) including snow soiling, albedo, and better temperature/wind derating.
-
-**New endpoint:**
-```
-GET https://api.solcast.com.au/data/forecast/advanced_pv_power?resource_id={resource_id}
-```
-
-**Key differences:**
-- Response fields change: `pv_power` → `pv_power_advanced`, `pv_power10` → `pv_power_advanced10`, `pv_power90` → `pv_power_advanced90`
-- Uses `resource_id` query param instead of path param `site_id` (value is the same site ID)
-- Supports up to 14 days ahead (vs 7 for legacy)
-- Configurable resolution: 5, 15, or 60 minutes via `period` param (e.g. `period=PT60M`)
-- Site configuration (tilt, azimuth, capacity) is managed via `resources/pv_power_site` endpoints on Solcast's side — not passed per request
-- Same rate limit (10 calls/day on free plan)
-
-**Changes needed:**
-- `solcast.py`: Update URL from `rooftop_sites/{site_id}/forecasts` to `data/forecast/advanced_pv_power?resource_id={site_id}&format=json&period=PT60M`
-- `solcast.py`: Parse `pv_power_advanced` / `pv_power_advanced10` / `pv_power_advanced90` instead of `pv_power` / `pv_power10` / `pv_power90`
-- `api_reference/fetch_all.py`: Update Solcast fetch function with new endpoint
-- No config flow changes — `resource_id` is the same value as the current `site_id`
+The `advanced_pv_power` endpoint returns **403 Forbidden** on the free hobbyist plan. This endpoint requires a paid Solcast subscription. Staying with `rooftop_sites/{site_id}/forecasts` which works on the hobbyist plan and provides the same P10/P50/P90 data.
 
 ---
 
-## 10. Persist Logs to Disk
+## ~~10. Persist Logs to Disk~~ ✓ DONE
 
-**Problem:** All BeemAI logging goes to Home Assistant's in-memory log (Settings → System → Logs). Once HA restarts or the log rotates, historical entries are lost. This makes it hard to debug issues that happened hours or days ago.
-
-**Proposed solution:**
-- Add a dedicated file handler for the `beem_ai` logger
-- Write to `{HA_config}/beem_ai_data/beem_ai.log`
-- Use `RotatingFileHandler` with a sensible max size (e.g. 5 MB, 3 backups = 20 MB max)
-- Log level: `DEBUG` to file, keep HA console at `INFO`
-- Initialize in `coordinator.async_setup()` alongside other data directory setup
-- Include timestamps, module name, and log level in format
-
-**Benefits:**
-- Full debug history survives HA restarts
-- Can be inspected via SSH/file manager without HA UI
-- Rotation prevents unbounded disk growth
+Implemented in `coordinator.py:_setup_file_logging()` — `RotatingFileHandler` writes to `beem_ai_data/beem_ai.log` (5 MB × 3 backups).
 
 ---
 
