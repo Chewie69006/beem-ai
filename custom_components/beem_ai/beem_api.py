@@ -54,6 +54,9 @@ class BeemApiClient:
         self._call_timestamps: list[datetime] = []
         self._cooldown_until: Optional[datetime] = None
 
+        # Deduplication for control parameter writes.
+        self._last_sent_control: Optional[dict] = None
+
     # ------------------------------------------------------------------
     # Authentication
     # ------------------------------------------------------------------
@@ -432,6 +435,55 @@ class BeemApiClient:
 
         log.info("REST: fetched %d %s data points", len(data_map), name)
         return data_map
+
+    # ------------------------------------------------------------------
+    # Battery control parameters
+    # ------------------------------------------------------------------
+
+    async def set_control_parameters(
+        self,
+        *,
+        mode: str,
+        allow_charge_from_grid: bool,
+        prevent_discharge: bool,
+        charge_power: int,
+        min_soc: int,
+        max_soc: int,
+    ) -> bool:
+        """Send battery control parameters via PATCH /batteries/{id}/control-parameters.
+
+        Returns True on success, False on failure or rate-limit.
+        Deduplicates: skips the call if params are unchanged since last send.
+        """
+        body = {
+            "mode": mode,
+            "allowChargeFromGrid": allow_charge_from_grid,
+            "preventDischarge": prevent_discharge,
+            "chargeFromGridMaxPower": charge_power,
+            "minSoc": min_soc,
+            "maxSoc": max_soc,
+        }
+
+        # Deduplicate — skip if nothing changed.
+        if body == self._last_sent_control:
+            log.debug("REST: control params unchanged, skipping PATCH")
+            return True
+
+        url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
+        log.info("REST: PATCH %s — %s", url, body)
+
+        try:
+            resp = await self._request("PATCH", url, json=body)
+        except _RateLimited:
+            log.warning("REST: rate-limited — cannot set control parameters")
+            return False
+
+        if resp is None:
+            return False
+
+        self._last_sent_control = body
+        log.info("REST: control parameters updated successfully")
+        return True
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "beem_ai"
-PLATFORMS = ["sensor", "binary_sensor", "switch", "number"]
+PLATFORMS = ["sensor", "binary_sensor", "switch", "number", "select"]
 
 # --- Config entry data keys (set during config flow) ---
 CONF_EMAIL = "email"

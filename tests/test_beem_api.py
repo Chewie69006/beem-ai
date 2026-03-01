@@ -355,6 +355,129 @@ class TestGetBatteryState:
         assert result is None
 
 
+# ------------------------------------------------------------------
+# set_control_parameters()
+# ------------------------------------------------------------------
+
+
+class TestSetControlParameters:
+    @pytest.mark.asyncio
+    async def test_success_returns_true(self, api_client):
+        """Successful PATCH returns True."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(status=200, json_data={})
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        result = await api_client.set_control_parameters(
+            mode="auto",
+            allow_charge_from_grid=True,
+            prevent_discharge=False,
+            charge_power=2000,
+            min_soc=20,
+            max_soc=100,
+        )
+
+        assert result is True
+        # Verify PATCH was called with correct camelCase body
+        call_kwargs = api_client._session.request.call_args
+        assert call_kwargs[0][0] == "PATCH"
+        body = call_kwargs[1]["json"]
+        assert body["mode"] == "auto"
+        assert body["allowChargeFromGrid"] is True
+        assert body["preventDischarge"] is False
+        assert body["chargeFromGridMaxPower"] == 2000
+        assert body["minSoc"] == 20
+        assert body["maxSoc"] == 100
+
+    @pytest.mark.asyncio
+    async def test_deduplication_skips_unchanged(self, api_client):
+        """Sending identical params twice only makes one API call."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(status=200, json_data={})
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        params = dict(
+            mode="auto",
+            allow_charge_from_grid=False,
+            prevent_discharge=False,
+            charge_power=0,
+            min_soc=20,
+            max_soc=100,
+        )
+
+        result1 = await api_client.set_control_parameters(**params)
+        result2 = await api_client.set_control_parameters(**params)
+
+        assert result1 is True
+        assert result2 is True
+        # Only one actual HTTP call
+        assert api_client._session.request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_deduplication_sends_when_changed(self, api_client):
+        """Changing one param triggers a new API call."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(status=200, json_data={})
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        base = dict(
+            mode="auto",
+            allow_charge_from_grid=False,
+            prevent_discharge=False,
+            charge_power=0,
+            min_soc=20,
+            max_soc=100,
+        )
+
+        await api_client.set_control_parameters(**base)
+        await api_client.set_control_parameters(**{**base, "min_soc": 30})
+
+        assert api_client._session.request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_returns_false(self, api_client):
+        """Rate-limited client returns False."""
+        api_client._access_token = "tok-abc"
+        api_client._call_timestamps = [
+            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
+        ]
+
+        result = await api_client.set_control_parameters(
+            mode="auto",
+            allow_charge_from_grid=False,
+            prevent_discharge=False,
+            charge_power=0,
+            min_soc=20,
+            max_soc=100,
+        )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_api_failure_returns_false(self, api_client):
+        """Network error returns False and does not cache params."""
+        api_client._access_token = "tok-abc"
+        api_client._session.request = AsyncMock(
+            side_effect=aiohttp.ClientError("down")
+        )
+
+        result = await api_client.set_control_parameters(
+            mode="auto",
+            allow_charge_from_grid=False,
+            prevent_discharge=False,
+            charge_power=0,
+            min_soc=20,
+            max_soc=100,
+        )
+
+        assert result is False
+        # Params should NOT be cached on failure
+        assert api_client._last_sent_control is None
+
+
 class TestShutdown:
     @pytest.mark.asyncio
     async def test_cancels_refresh_task(self, api_client):

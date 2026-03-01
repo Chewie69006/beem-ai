@@ -189,7 +189,43 @@ _ha_bs.BinarySensorDeviceClass = _BinarySensorDeviceClass
 
 # homeassistant.components.switch
 _ha_sw = _mod("homeassistant.components.switch")
-_ha_sw.SwitchEntity = MagicMock
+
+
+class _SwitchEntity:
+    """Stub SwitchEntity base class."""
+    pass
+
+
+_ha_sw.SwitchEntity = _SwitchEntity
+
+# homeassistant.components.number
+_ha_num = _mod("homeassistant.components.number")
+
+
+class _NumberEntity:
+    """Stub NumberEntity base class."""
+    pass
+
+
+class _NumberMode:
+    AUTO = "auto"
+    BOX = "box"
+    SLIDER = "slider"
+
+
+_ha_num.NumberEntity = _NumberEntity
+_ha_num.NumberMode = _NumberMode
+
+# homeassistant.components.select
+_ha_select = _mod("homeassistant.components.select")
+
+
+class _SelectEntity:
+    """Stub SelectEntity base class."""
+    pass
+
+
+_ha_select.SelectEntity = _SelectEntity
 
 # ---------------------------------------------------------------------------
 # Now it is safe to import from custom_components.beem_ai

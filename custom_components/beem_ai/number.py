@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .sensor import _system_device_info
+from .sensor import _battery_device_info, _system_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +23,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up BeemAI number entities from a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([BeemAIConsumptionForecastTomorrowNumber(coordinator, entry)])
+    async_add_entities([
+        BeemAIConsumptionForecastTomorrowNumber(coordinator, entry),
+        BeemAIChargePowerNumber(coordinator, entry),
+        BeemAIMinSocNumber(coordinator, entry),
+        BeemAIMaxSocNumber(coordinator, entry),
+    ])
 
 
 class BeemAIConsumptionForecastTomorrowNumber(CoordinatorEntity, NumberEntity):
@@ -63,4 +68,111 @@ class BeemAIConsumptionForecastTomorrowNumber(CoordinatorEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set the consumption forecast override for tomorrow."""
         await self.coordinator.async_set_consumption_forecast_tomorrow(value)
+        self.async_write_ha_state()
+
+
+class BeemAIChargePowerNumber(CoordinatorEntity, NumberEntity):
+    """Grid charge power limit (watts)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Charge Power"
+    _attr_icon = "mdi:lightning-bolt"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 5000
+    _attr_native_step = 100
+    _attr_native_unit_of_measurement = "W"
+    _attr_mode = NumberMode.SLIDER
+    _attr_translation_key = "charge_power"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_charge_power"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info for grouping entities."""
+        return _battery_device_info(self._entry)
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current charge power limit."""
+        return self.coordinator.state_store.control.charge_from_grid_max_power
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the charge power limit."""
+        await self.coordinator.async_set_battery_control(
+            charge_from_grid_max_power=int(value)
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIMinSocNumber(CoordinatorEntity, NumberEntity):
+    """Minimum state of charge (%)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Min SoC"
+    _attr_icon = "mdi:battery-arrow-down"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 5
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.SLIDER
+    _attr_translation_key = "min_soc"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_min_soc"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info for grouping entities."""
+        return _battery_device_info(self._entry)
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current minimum SoC."""
+        return self.coordinator.state_store.control.min_soc
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the minimum SoC."""
+        await self.coordinator.async_set_battery_control(min_soc=int(value))
+        self.async_write_ha_state()
+
+
+class BeemAIMaxSocNumber(CoordinatorEntity, NumberEntity):
+    """Maximum state of charge (%)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Max SoC"
+    _attr_icon = "mdi:battery-arrow-up"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 5
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.SLIDER
+    _attr_translation_key = "max_soc"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_max_soc"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info for grouping entities."""
+        return _battery_device_info(self._entry)
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current maximum SoC."""
+        return self.coordinator.state_store.control.max_soc
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the maximum SoC."""
+        await self.coordinator.async_set_battery_control(max_soc=int(value))
         self.async_write_ha_state()

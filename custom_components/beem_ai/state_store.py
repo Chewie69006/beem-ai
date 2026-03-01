@@ -87,6 +87,18 @@ class ForecastData:
     confidence: str = "low"  # low, medium, high
 
 
+@dataclass
+class ControlState:
+    """Battery control parameters (mirrors API control-parameters)."""
+
+    mode: str = "auto"                    # "auto" | "advanced"
+    allow_charge_from_grid: bool = False
+    prevent_discharge: bool = False
+    charge_from_grid_max_power: int = 0   # watts, 0-5000
+    min_soc: int = 20                     # %, 0-100
+    max_soc: int = 100                    # %, 0-100
+
+
 class StateStore:
     """Thread-safe container for all shared state."""
 
@@ -94,6 +106,7 @@ class StateStore:
         self._lock = threading.RLock()
         self._battery = BatteryState()
         self._forecast = ForecastData()
+        self._control = ControlState()
         self._enabled = True
         self._mqtt_connected = False
         self._rest_available = True
@@ -137,6 +150,18 @@ class StateStore:
     def rest_available(self, value: bool):
         with self._lock:
             self._rest_available = value
+
+    @property
+    def control(self) -> ControlState:
+        with self._lock:
+            return self._control
+
+    def update_control(self, **kwargs):
+        """Update control state fields atomically."""
+        with self._lock:
+            for key, value in kwargs.items():
+                if hasattr(self._control, key):
+                    setattr(self._control, key, value)
 
     def update_battery(self, **kwargs):
         """Update battery state fields atomically."""

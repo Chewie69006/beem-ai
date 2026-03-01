@@ -3,7 +3,7 @@
 import threading
 from datetime import datetime
 
-from custom_components.beem_ai.state_store import BatteryState, StateStore
+from custom_components.beem_ai.state_store import BatteryState, ControlState, StateStore
 
 
 # ── BatteryState property tests ─────────────────────────────────────
@@ -206,3 +206,29 @@ class TestStateStoreProperties:
     def test_rest_available_setter(self, state_store):
         state_store.rest_available = False
         assert state_store.rest_available is False
+
+
+# ── ControlState ───────────────────────────────────────────────────
+
+
+class TestControlState:
+    def test_defaults(self):
+        c = ControlState()
+        assert c.mode == "auto"
+        assert c.allow_charge_from_grid is False
+        assert c.prevent_discharge is False
+        assert c.charge_from_grid_max_power == 0
+        assert c.min_soc == 20
+        assert c.max_soc == 100
+
+    def test_update_control_sets_fields(self, state_store):
+        state_store.update_control(mode="advanced", min_soc=10)
+        assert state_store.control.mode == "advanced"
+        assert state_store.control.min_soc == 10
+
+    def test_update_control_ignores_unknown(self, state_store):
+        state_store.update_control(nonexistent=42, max_soc=90)
+        assert state_store.control.max_soc == 90
+
+    def test_control_property_returns_state(self, state_store):
+        assert isinstance(state_store.control, ControlState)

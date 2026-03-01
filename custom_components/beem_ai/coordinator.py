@@ -517,6 +517,45 @@ class BeemAICoordinator(DataUpdateCoordinator):
         else:
             _LOGGER.info("BeemAI disabled by user")
 
+    # ---- Battery control ----
+
+    async def async_set_battery_control(self, **kwargs) -> bool:
+        """Update battery control parameters via the Beem API.
+
+        Accepts any subset of: mode, allow_charge_from_grid, prevent_discharge,
+        charge_from_grid_max_power, min_soc, max_soc.  Missing fields are filled
+        from the current control state.
+        """
+        if not self._api_client:
+            return False
+
+        # Merge with current state so we always send a full parameter set.
+        current = self.state_store.control
+        params = {
+            "mode": kwargs.get("mode", current.mode),
+            "allow_charge_from_grid": kwargs.get(
+                "allow_charge_from_grid", current.allow_charge_from_grid
+            ),
+            "prevent_discharge": kwargs.get(
+                "prevent_discharge", current.prevent_discharge
+            ),
+            "charge_power": kwargs.get(
+                "charge_from_grid_max_power", current.charge_from_grid_max_power
+            ),
+            "min_soc": kwargs.get("min_soc", current.min_soc),
+            "max_soc": kwargs.get("max_soc", current.max_soc),
+        }
+
+        success = await self._api_client.set_control_parameters(**params)
+        if success:
+            # Update local state to match what was sent.
+            self.state_store.update_control(**kwargs)
+            self.async_update_listeners()
+            _LOGGER.info("Battery control updated: %s", kwargs)
+        else:
+            _LOGGER.warning("Failed to set battery control: %s", kwargs)
+        return success
+
     # ---- Consumption forecast override ----
 
     async def async_set_consumption_forecast_tomorrow(self, value: float) -> None:
