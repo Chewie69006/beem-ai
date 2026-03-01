@@ -173,27 +173,15 @@ Implemented in `coordinator.py:_setup_file_logging()` — `RotatingFileHandler` 
 
 ---
 
-## 11. Supplement MQTT with API Data for Resilience
+## 11. Refresh State from REST API Before Optimization
 
-**Problem:** MQTT is the primary real-time data source (SoC, solar power, grid power, battery power, consumption). When MQTT drops (HA restart, network issue, Beem outage), the integration has stale data and no way to recover until MQTT reconnects. Consumption learning also stops during gaps.
+**Problem:** MQTT is the primary real-time data source, but if MQTT has been disconnected or data is stale when the optimizer runs, the optimization plan is based on outdated SoC/power values.
 
-**Proposed solution:** Use the Beem REST API as a secondary data source that periodically refreshes key metrics, so the integration always has reasonably fresh data even during MQTT outages.
+**Proposed solution:** Immediately before running optimization, fetch current battery state from the Beem REST API to ensure the optimizer always works with fresh data.
 
 **Approach:**
-- Add a periodic API poll (e.g., every 2–5 min) that fetches current battery state via the REST API
-- When MQTT is connected and delivering data, API values serve as a sanity check / fallback
-- When MQTT is disconnected, API values become the primary source — entities stay updated instead of going stale
-- Consumption analyzer continues learning from API-sourced data during MQTT gaps
-- MQTT remains the preferred source when available (lower latency, higher resolution)
-
-**Priority logic:**
-1. MQTT connected + fresh data → use MQTT values (real-time)
-2. MQTT disconnected or stale (>60s) → fall back to API-polled values
-3. Log when falling back so the user can diagnose MQTT issues
-
-**Benefits:**
-- No more stale sensors during MQTT outages
-- Consumption EMA keeps learning even when MQTT drops
-- Better user experience — entities don't go "unavailable" on brief disconnects
-- REST API is already authenticated and available (used for login, solar equipment, control params)
+- Before each optimization run, call the REST API to get current SoC and battery state
+- Update the state store with API values so the optimizer sees fresh data
+- MQTT remains the primary source for real-time entity updates — this is only a pre-optimization refresh
+- Log when the API-fetched SoC differs significantly from the last MQTT value (indicates stale MQTT data)
 
