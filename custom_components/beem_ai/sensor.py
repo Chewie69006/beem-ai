@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -165,6 +166,16 @@ async def async_setup_entry(
         ),
     ]
 
+    # Parse Solcast site ID mappings for per-array sensors
+    solcast_site_map: dict[int, str] = {}
+    raw_site_ids = entry.options.get("solcast_site_ids_json", "")
+    if raw_site_ids:
+        try:
+            for sid_entry in json.loads(raw_site_ids):
+                solcast_site_map[sid_entry["array_index"]] = sid_entry["site_id"]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+
     # --- Per-array solar sensors (creates a device per panel array) ---
     for idx, array in enumerate(coordinator.panel_arrays):
         tilt = array.get("tilt", 30)
@@ -173,6 +184,7 @@ async def async_setup_entry(
         mppt_id = array.get("mppt_id")
         panels_series = array.get("panels_in_series")
         panels_parallel = array.get("panels_in_parallel")
+        solcast_site_id = solcast_site_map.get(idx, "Not configured")
 
         sensors.append(BeemAISensor(
             coordinator, entry,
@@ -243,6 +255,18 @@ async def async_setup_entry(
             state_class=None,
             unit=None,
             value_fn=lambda c, _v=panels_parallel: _v,
+            device_type="solar",
+            solar_index=idx,
+        ))
+        sensors.append(BeemAISensor(
+            coordinator, entry,
+            key=f"solar_array_{idx + 1}_solcast_site_id",
+            name=f"Array {idx + 1} Solcast Site ID",
+            icon="mdi:cloud-outline",
+            device_class=None,
+            state_class=None,
+            unit=None,
+            value_fn=lambda c, _v=solcast_site_id: _v,
             device_type="solar",
             solar_index=idx,
         ))

@@ -18,6 +18,8 @@ from custom_components.beem_ai.const import (
     CONF_USER_ID,
     DEFAULT_API_BASE,
     DOMAIN,
+    OPT_LOCATION_LAT,
+    OPT_LOCATION_LON,
 )
 
 
@@ -26,6 +28,8 @@ def mock_flow():
     """Create a config flow instance with mocked hass."""
     flow = BeemAIConfigFlow()
     flow.hass = MagicMock()
+    flow.hass.config.latitude = 48.85
+    flow.hass.config.longitude = 2.35
     # Mock async_set_unique_id and _abort_if_unique_id_configured
     flow.async_set_unique_id = AsyncMock()
     flow._abort_if_unique_id_configured = MagicMock()
@@ -58,11 +62,10 @@ async def test_step_user_shows_form(mock_flow):
 
 @pytest.mark.asyncio
 async def test_step_user_valid_credentials(mock_flow):
-    """Valid email+password proceeds to solcast step."""
+    """Valid email+password creates entry directly (no solcast step)."""
     mock_flow._async_login = AsyncMock(return_value=("tok-abc", "uid-42"))
     mock_flow._async_get_battery = AsyncMock(return_value=("bat-1", "SN-001"))
 
-    # Step 1: user credentials → proceeds to solcast step
     await mock_flow.async_step_user(user_input=VALID_USER_INPUT)
 
     mock_flow._async_login.assert_awaited_once_with("user@example.com", "s3cret")
@@ -70,40 +73,14 @@ async def test_step_user_valid_credentials(mock_flow):
     mock_flow._abort_if_unique_id_configured.assert_called_once()
     mock_flow._async_get_battery.assert_awaited_once_with("tok-abc", "uid-42")
 
-    # Should show solcast form (not create entry directly)
-    mock_flow.async_show_form.assert_called_once()
-    assert mock_flow.async_show_form.call_args.kwargs["step_id"] == "solcast"
-
-    # Verify login data stored
-    assert mock_flow._login_data[CONF_EMAIL] == "user@example.com"
-    assert mock_flow._login_data[CONF_BATTERY_ID] == "bat-1"
-
-
-@pytest.mark.asyncio
-async def test_step_solcast_creates_entry(mock_flow):
-    """Solcast step creates the entry with login data and options."""
-    mock_flow._login_data = {
-        CONF_EMAIL: "user@example.com",
-        CONF_PASSWORD: "s3cret",
-        CONF_BATTERY_ID: "bat-1",
-        CONF_BATTERY_SERIAL: "SN-001",
-        CONF_USER_ID: "uid-42",
-        CONF_API_BASE: DEFAULT_API_BASE,
-    }
-    mock_flow.hass.config.latitude = 48.85
-    mock_flow.hass.config.longitude = 2.35
-
-    await mock_flow.async_step_solcast(user_input={
-        "solcast_api_key": "key-123",
-        "solcast_site_id": "site-456",
-    })
-
+    # Should create entry directly (no solcast step)
     mock_flow.async_create_entry.assert_called_once()
     call_kwargs = mock_flow.async_create_entry.call_args.kwargs
     assert call_kwargs["data"][CONF_EMAIL] == "user@example.com"
     assert call_kwargs["data"][CONF_BATTERY_ID] == "bat-1"
-    assert call_kwargs["options"]["solcast_api_key"] == "key-123"
-    assert call_kwargs["options"]["location_lat"] == 48.85
+    assert call_kwargs["data"][CONF_BATTERY_SERIAL] == "SN-001"
+    assert call_kwargs["options"][OPT_LOCATION_LAT] == 48.85
+    assert call_kwargs["options"][OPT_LOCATION_LON] == 2.35
 
 
 @pytest.mark.asyncio

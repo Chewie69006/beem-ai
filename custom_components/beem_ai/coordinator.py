@@ -28,7 +28,7 @@ from .const import (
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
     OPT_SOLCAST_API_KEY,
-    OPT_SOLCAST_SITE_ID,
+    OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
 )
@@ -250,6 +250,27 @@ class BeemAICoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.exception("Failed to bootstrap consumption from API history")
 
+    @staticmethod
+    def _parse_solcast_site_ids(options: dict) -> list[str]:
+        """Parse Solcast site IDs from options JSON, with migration from legacy format."""
+        # Migration: convert legacy single site_id to new JSON format
+        legacy_site = options.get("solcast_site_id")
+        if legacy_site and not options.get(OPT_SOLCAST_SITE_IDS_JSON):
+            _LOGGER.info(
+                "Migrating legacy solcast_site_id '%s' to new JSON format", legacy_site
+            )
+            return [legacy_site]
+
+        raw = options.get(OPT_SOLCAST_SITE_IDS_JSON, "")
+        if not raw:
+            return []
+        try:
+            entries = json.loads(raw)
+            return [e["site_id"] for e in entries if e.get("site_id")]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            _LOGGER.warning("Failed to parse Solcast site IDs JSON: %s", raw)
+            return []
+
     def _build_forecast_sources(self, options: dict) -> list:
         """Instantiate forecast sources from options."""
         # Use HA's configured location as fallback
@@ -269,15 +290,18 @@ class BeemAICoordinator(DataUpdateCoordinator):
         ]
 
         solcast_key = options.get(OPT_SOLCAST_API_KEY)
-        solcast_site = options.get(OPT_SOLCAST_SITE_ID)
-        if solcast_key and solcast_site:
+        site_ids = self._parse_solcast_site_ids(options)
+        if solcast_key and site_ids:
             total_kwp = sum(a["kwp"] for a in panel_arrays)
             sources.append(SolcastSource(
                 session=self._session,
                 api_key=solcast_key,
-                site_id=solcast_site,
+                site_ids=site_ids,
                 total_kwp=total_kwp,
             ))
+            _LOGGER.info(
+                "Solcast configured with %d site(s): %s", len(site_ids), site_ids
+            )
 
         return sources
 

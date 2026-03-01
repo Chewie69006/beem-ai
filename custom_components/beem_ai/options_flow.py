@@ -13,10 +13,11 @@ from homeassistant.config_entries import OptionsFlow, ConfigFlowResult
 from .const import (
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
+    DOMAIN,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
     OPT_SOLCAST_API_KEY,
-    OPT_SOLCAST_SITE_ID,
+    OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
@@ -32,6 +33,7 @@ class BeemAIOptionsFlow(OptionsFlow):
         """Initialise options flow."""
         self._tariff_period_count: int = DEFAULT_TARIFF_PERIOD_COUNT
         self._options: dict[str, Any] = {}
+        self._panel_array_count: int = 0
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -42,7 +44,7 @@ class BeemAIOptionsFlow(OptionsFlow):
                 OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
             )
             self._options = user_input
-            return await self.async_step_tariffs()
+            return await self.async_step_solcast()
 
         current = self.config_entry.options
 
@@ -60,10 +62,6 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_SOLCAST_API_KEY,
                     default=current.get(OPT_SOLCAST_API_KEY, ""),
                 ): str,
-                vol.Optional(
-                    OPT_SOLCAST_SITE_ID,
-                    default=current.get(OPT_SOLCAST_SITE_ID, ""),
-                ): str,
                 vol.Required(
                     OPT_TARIFF_DEFAULT_PRICE,
                     default=current.get(OPT_TARIFF_DEFAULT_PRICE, DEFAULT_TARIFF_DEFAULT_PRICE),
@@ -77,10 +75,53 @@ class BeemAIOptionsFlow(OptionsFlow):
 
         return self.async_show_form(step_id="init", data_schema=schema)
 
+    async def async_step_solcast(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Second step — per-array Solcast Site IDs."""
+        if user_input is not None:
+            # Serialize site_id mappings to JSON
+            site_ids = []
+            for i in range(self._panel_array_count):
+                sid = user_input.get(f"solcast_site_{i}_id", "").strip()
+                if sid:
+                    site_ids.append({"array_index": i, "site_id": sid})
+            self._options[OPT_SOLCAST_SITE_IDS_JSON] = json.dumps(site_ids)
+            return await self.async_step_tariffs()
+
+        # Discover array count from coordinator
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        panel_arrays = getattr(coordinator, "panel_arrays", []) if coordinator else []
+        self._panel_array_count = max(len(panel_arrays), 1)
+
+        # Load existing site_id mappings
+        existing_map: dict[int, str] = {}
+        raw = self.config_entry.options.get(OPT_SOLCAST_SITE_IDS_JSON, "")
+        if raw:
+            try:
+                for entry in json.loads(raw):
+                    existing_map[entry["array_index"]] = entry["site_id"]
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+
+        fields: dict[vol.Marker, Any] = {}
+        for i in range(self._panel_array_count):
+            fields[
+                vol.Optional(
+                    f"solcast_site_{i}_id",
+                    default=existing_map.get(i, ""),
+                )
+            ] = str
+
+        return self.async_show_form(
+            step_id="solcast",
+            data_schema=vol.Schema(fields),
+        )
+
     async def async_step_tariffs(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Second step — configurable tariff periods."""
+        """Third step — configurable tariff periods."""
         if user_input is not None:
             periods = []
             for i in range(1, self._tariff_period_count + 1):

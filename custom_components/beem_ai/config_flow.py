@@ -19,8 +19,6 @@ from .const import (
     CONF_USER_ID,
     DEFAULT_API_BASE,
     DOMAIN,
-    OPT_SOLCAST_API_KEY,
-    OPT_SOLCAST_SITE_ID,
     OPT_LOCATION_LAT,
     OPT_LOCATION_LON,
 )
@@ -34,23 +32,10 @@ USER_SCHEMA = vol.Schema(
     }
 )
 
-SOLCAST_SCHEMA = vol.Schema(
-    {
-        vol.Optional(OPT_SOLCAST_API_KEY, default=""): str,
-        vol.Optional(OPT_SOLCAST_SITE_ID, default=""): str,
-    }
-)
-
-
 class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for BeemAI."""
 
     VERSION = 1
-
-    def __init__(self):
-        """Initialize the config flow."""
-        super().__init__()
-        self._login_data: dict[str, Any] = {}
 
     @staticmethod
     def async_get_options_flow(config_entry):
@@ -88,52 +73,30 @@ class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
                 except CannotConnect:
                     errors["base"] = "cannot_connect"
                 else:
-                    # Store login data and proceed to Solcast step
-                    self._login_data = {
-                        CONF_EMAIL: email,
-                        CONF_PASSWORD: password,
-                        CONF_BATTERY_ID: battery_id,
-                        CONF_BATTERY_SERIAL: battery_serial,
-                        CONF_USER_ID: user_id,
-                        CONF_API_BASE: DEFAULT_API_BASE,
-                    }
-                    return await self.async_step_solcast()
+                    # Use HA's configured location as default
+                    ha_lat = getattr(getattr(self.hass, 'config', None), 'latitude', 0.0)
+                    ha_lon = getattr(getattr(self.hass, 'config', None), 'longitude', 0.0)
+
+                    return self.async_create_entry(
+                        title=f"Beem ({email})",
+                        data={
+                            CONF_EMAIL: email,
+                            CONF_PASSWORD: password,
+                            CONF_BATTERY_ID: battery_id,
+                            CONF_BATTERY_SERIAL: battery_serial,
+                            CONF_USER_ID: user_id,
+                            CONF_API_BASE: DEFAULT_API_BASE,
+                        },
+                        options={
+                            OPT_LOCATION_LAT: ha_lat,
+                            OPT_LOCATION_LON: ha_lon,
+                        },
+                    )
 
         return self.async_show_form(
             step_id="user",
             data_schema=USER_SCHEMA,
             errors=errors,
-        )
-
-    async def async_step_solcast(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle optional Solcast configuration step."""
-        if user_input is not None:
-            # Use HA's configured location as default
-            ha_lat = getattr(getattr(self.hass, 'config', None), 'latitude', 0.0)
-            ha_lon = getattr(getattr(self.hass, 'config', None), 'longitude', 0.0)
-
-            # Store Solcast config in options (not config data)
-            options = {}
-            if user_input.get(OPT_SOLCAST_API_KEY):
-                options[OPT_SOLCAST_API_KEY] = user_input[OPT_SOLCAST_API_KEY]
-            if user_input.get(OPT_SOLCAST_SITE_ID):
-                options[OPT_SOLCAST_SITE_ID] = user_input[OPT_SOLCAST_SITE_ID]
-
-            # Set HA location as default
-            options[OPT_LOCATION_LAT] = ha_lat
-            options[OPT_LOCATION_LON] = ha_lon
-
-            return self.async_create_entry(
-                title=f"Beem ({self._login_data[CONF_EMAIL]})",
-                data=self._login_data,
-                options=options,
-            )
-
-        return self.async_show_form(
-            step_id="solcast",
-            data_schema=SOLCAST_SCHEMA,
         )
 
     async def _async_login(
