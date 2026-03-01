@@ -1,6 +1,6 @@
 """Solcast API adapter for solar production forecasting (async).
 
-Uses the Advanced PV Power endpoint which returns per-site forecasts
+Uses the rooftop_sites endpoint which returns per-site forecasts
 with P10/P50/P90 probability estimates.  The free hobbyist plan allows
 10 API calls per day.  With N sites, each refresh costs N calls, so
 effective refreshes/day = 10/N.
@@ -21,7 +21,7 @@ MAX_REQUESTS_PER_DAY = 10
 
 
 class SolcastSource:
-    """Fetch advanced PV power forecasts from Solcast."""
+    """Fetch rooftop PV power forecasts from Solcast."""
 
     def __init__(
         self,
@@ -89,14 +89,11 @@ class SolcastSource:
             "Accept": "application/json",
         }
 
-        all_forecasts: list[dict] = []
+        all_forecasts: list[list[dict]] = []
 
         for site_id in self.site_ids:
-            url = (
-                "https://api.solcast.com.au/data/forecast/advanced_pv_power"
-                f"?resource_id={site_id}&format=json&period=PT60M"
-            )
-            log.info("Solcast fetching site %s via advanced PV power endpoint", site_id)
+            url = f"https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts"
+            log.info("Solcast fetching site %s", site_id)
 
             try:
                 async with self._session.get(
@@ -166,10 +163,10 @@ class SolcastSource:
                 d = local_dt.date()
                 hour = local_dt.hour
 
-                # Advanced endpoint fields are in kW — convert to W
-                pv50 = entry.get("pv_power_advanced", 0) * 1000.0
-                pv10 = entry.get("pv_power_advanced10", 0) * 1000.0
-                pv90 = entry.get("pv_power_advanced90", 0) * 1000.0
+                # Values are in kW — convert to W
+                pv50 = entry.get("pv_estimate", 0) * 1000.0
+                pv10 = entry.get("pv_estimate10", 0) * 1000.0
+                pv90 = entry.get("pv_estimate90", 0) * 1000.0
 
                 if d == today_date:
                     site_today_p50[hour] += pv50
@@ -180,7 +177,7 @@ class SolcastSource:
                     site_tomorrow_p10[hour] += pv10
                     site_tomorrow_p90[hour] += pv90
 
-            # Add this site's hourly values into the bucket lists for averaging
+            # Add this site's hourly values into the bucket lists for summing
             for h, v in site_today_p50.items():
                 today_p50[h].append(v)
             for h, v in site_today_p10.items():

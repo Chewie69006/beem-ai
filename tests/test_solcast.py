@@ -1,4 +1,4 @@
-"""Tests for Solcast multi-site source with advanced PV power endpoint."""
+"""Tests for Solcast multi-site source with rooftop_sites endpoint."""
 
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -15,13 +15,13 @@ def _make_session():
 
 
 def _make_forecast_entry(period_end: str, pv50: float, pv10: float, pv90: float) -> dict:
-    """Create a single forecast entry using advanced endpoint field names."""
+    """Create a single forecast entry using rooftop_sites field names."""
     return {
         "period_end": period_end,
-        "period": "PT60M",
-        "pv_power_advanced": pv50,
-        "pv_power_advanced10": pv10,
-        "pv_power_advanced90": pv90,
+        "period": "PT30M",
+        "pv_estimate": pv50,
+        "pv_estimate10": pv10,
+        "pv_estimate90": pv90,
     }
 
 
@@ -162,10 +162,9 @@ async def test_fetch_single_site():
     assert src._request_count == 1
     assert "today" in result
     assert "today_kwh" in result
-    # Verify the URL uses advanced endpoint
+    # Verify the URL uses rooftop_sites endpoint
     call_args = session.get.call_args
-    assert "advanced_pv_power" in call_args[0][0]
-    assert "resource_id=site-a" in call_args[0][0]
+    assert "rooftop_sites/site-a/forecasts" in call_args[0][0]
 
 
 @pytest.mark.asyncio
@@ -246,27 +245,27 @@ def test_reconfigure_updates_site_ids():
 
 
 # ------------------------------------------------------------------
-# _parse_multi() — advanced endpoint field names
+# _parse_multi() — rooftop_sites field names
 # ------------------------------------------------------------------
 
 
-def test_parse_uses_advanced_field_names():
-    """Parser reads pv_power_advanced fields (not legacy pv_estimate)."""
+def test_parse_uses_pv_estimate_fields():
+    """Parser reads pv_estimate fields from rooftop_sites endpoint."""
     today = date.today()
     forecasts = [[
         {
             "period_end": f"{today.isoformat()}T12:00:00Z",
-            "period": "PT60M",
-            "pv_power_advanced": 3.5,
-            "pv_power_advanced10": 2.0,
-            "pv_power_advanced90": 5.0,
+            "period": "PT30M",
+            "pv_estimate": 3.5,
+            "pv_estimate10": 2.0,
+            "pv_estimate90": 5.0,
         },
     ]]
 
     src = SolcastSource(session=_make_session(), api_key="k", site_ids=["s"])
     result = src._parse_multi(forecasts)
 
-    # 3.5 kW = 3500 W (check the hour 12 bucket, but actual hour depends on timezone)
+    # 3.5 kW = 3500 W
     total_w = sum(result["today"].values())
     assert total_w > 0  # At least some data parsed
     total_p10 = sum(result["today_p10"].values())
@@ -274,22 +273,19 @@ def test_parse_uses_advanced_field_names():
     assert total_p10 < total_w < total_p90
 
 
-def test_parse_legacy_fields_produce_zero():
-    """Legacy pv_estimate fields are NOT read (only advanced fields)."""
+def test_parse_missing_fields_produce_zero():
+    """Missing pv_estimate fields default to 0."""
     today = date.today()
     forecasts = [[
         {
             "period_end": f"{today.isoformat()}T12:00:00Z",
-            "period": "PT60M",
-            "pv_estimate": 5.0,       # legacy — should be ignored
-            "pv_estimate10": 3.0,     # legacy
-            "pv_estimate90": 7.0,     # legacy
+            "period": "PT30M",
+            # No pv_estimate fields at all
         },
     ]]
 
     src = SolcastSource(session=_make_session(), api_key="k", site_ids=["s"])
     result = src._parse_multi(forecasts)
 
-    # With no pv_power_advanced fields, all values should be 0
     total = sum(result["today"].values()) + sum(result["tomorrow"].values())
     assert total == 0

@@ -623,27 +623,26 @@ async def forecast_solar(session: aiohttp.ClientSession, tilt: float, azimuth: f
 
 
 # =====================================================================
-# 9. SOLCAST — GET /data/forecast/advanced_pv_power
+# 9. SOLCAST — GET /rooftop_sites/{site_id}/forecasts
 # =====================================================================
 
 async def solcast_forecast(session: aiohttp.ClientSession, site_id: str, site_index: int) -> dict:
     """
-    Advanced PV Power forecast with P10/P50/P90 confidence intervals.
+    Rooftop PV forecast with P10/P50/P90 confidence intervals.
 
     Request:
-        GET https://api.solcast.com.au/data/forecast/advanced_pv_power
-            ?resource_id={site_id}&format=json&period=PT60M
+        GET https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts
         Authorization: Bearer {api_key}
 
     Response shape:
         {
             "forecasts": [
                 {
-                    "pv_power_advanced": 2.5,      # P50 in kW
-                    "pv_power_advanced10": 1.8,     # P10 (conservative) in kW
-                    "pv_power_advanced90": 3.2,     # P90 (optimistic) in kW
+                    "pv_estimate": 2.5,      # P50 in kW
+                    "pv_estimate10": 1.8,     # P10 (conservative) in kW
+                    "pv_estimate90": 3.2,     # P90 (optimistic) in kW
                     "period_end": "2026-02-26T10:00:00.0000000Z",
-                    "period": "PT60M"               # 60-minute intervals
+                    "period": "PT30M"         # 30-minute intervals
                 },
                 ...
             ]
@@ -651,18 +650,16 @@ async def solcast_forecast(session: aiohttp.ClientSession, site_id: str, site_in
 
     Notes:
         - Values are in kW (code converts to watts: * 1000)
-        - period_end = end of the 60-min window
-        - Each "site" on Solcast = one physical array (configured at toolkit.solcast.com.au)
+        - period_end = end of the 30-min window
+        - Each "site" on Solcast = one physical array (configured on solcast.com.au)
         - If you have 2 arrays, you need 2 sites and 2 API calls per refresh
         - Solcast already accounts for your array config — NO double-counting
+        - The advanced_pv_power endpoint requires a paid plan (403 on hobbyist)
 
     Used by: forecasting/solcast.py -> SolcastSource.fetch()
     Rate limit: 10 requests/day on free hobbyist plan (tracked internally).
     """
-    url = (
-        "https://api.solcast.com.au/data/forecast/advanced_pv_power"
-        f"?resource_id={site_id}&format=json&period=PT60M"
-    )
+    url = f"https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts"
     headers = {
         "Authorization": f"Bearer {SOLCAST_API_KEY}",
         "Accept": "application/json",
@@ -692,17 +689,17 @@ async def solcast_forecast(session: aiohttp.ClientSession, site_id: str, site_in
     sample = [
         {
             "period_end": f["period_end"],
-            "P10_kW": f.get("pv_power_advanced10", 0),
-            "P50_kW": f.get("pv_power_advanced", 0),
-            "P90_kW": f.get("pv_power_advanced90", 0),
+            "P10_kW": f.get("pv_estimate10", 0),
+            "P50_kW": f.get("pv_estimate", 0),
+            "P90_kW": f.get("pv_estimate90", 0),
         }
-        for f in forecasts if f.get("pv_power_advanced", 0) > 0
+        for f in forecasts if f.get("pv_estimate", 0) > 0
     ][:6]
 
-    pp(f"SOLCAST /data/forecast/advanced_pv_power (site {site_index + 1})", {
+    pp(f"SOLCAST /rooftop_sites/forecasts (site {site_index + 1})", {
         "site_id": site_id,
         "total_periods": len(forecasts),
-        "period_duration": "60 min",
+        "period_duration": "30 min",
         "units": "kW",
         "sample_nonzero": sample,
     })
