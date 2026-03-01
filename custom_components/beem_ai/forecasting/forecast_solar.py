@@ -126,13 +126,29 @@ class ForecastSolarSource:
     # Per-array fetch
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _compass_to_solar_azimuth(compass: float) -> float:
+        """Convert compass bearing to solar azimuth (0=South, -90=East, 90=West).
+
+        Beem API returns compass bearing: 0=North, 90=East, 180=South, 270=West.
+        Forecast.Solar expects: -180=North, -90=East, 0=South, 90=West, 180=North.
+        """
+        az = 180.0 - compass
+        # Wrap to -180..180
+        while az > 180:
+            az -= 360
+        while az < -180:
+            az += 360
+        return az
+
     async def _fetch_for_array(
         self, tilt: float, azimuth: float, kwp: float
     ) -> dict:
         """Fetch forecast for a single panel array."""
+        solar_azimuth = self._compass_to_solar_azimuth(azimuth)
         url = (
             f"https://api.forecast.solar/estimate/"
-            f"{self.lat}/{self.lon}/{tilt}/{azimuth}/{kwp}"
+            f"{self.lat}/{self.lon}/{tilt}/{solar_azimuth}/{kwp}"
         )
 
         try:

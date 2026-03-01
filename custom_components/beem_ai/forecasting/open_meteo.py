@@ -88,20 +88,28 @@ class OpenMeteoSource:
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _compass_to_solar_azimuth(compass: float) -> float:
+        """Convert compass bearing to solar azimuth (0=South, -90=East, 90=West).
+
+        Beem API returns compass bearing: 0=North, 90=East, 180=South, 270=West.
+        Open-Meteo expects: -180=North, -90=East, 0=South, 90=West, 180=North.
+        """
+        az = 180.0 - compass
+        while az > 180:
+            az -= 360
+        while az < -180:
+            az += 360
+        return az
+
     async def _fetch_for_array(self, tilt: float, azimuth: float, kwp: float) -> dict:
         """Fetch GTI forecast for a single panel array.
 
         Open-Meteo azimuth convention: 0=South, 90=West, -90=East (-180..180).
-        User-configured azimuth may be a compass bearing (0=North, 180=South,
-        270=West).  Convert automatically when the value is outside -180..180.
+        Beem API provides compass bearing (0=North, 90=East, 180=South, 270=West).
+        Always convert from compass bearing to solar azimuth.
         """
-        if azimuth > 180 or azimuth < -180:
-            # Compass bearing → Open-Meteo: subtract 180, then wrap to -180..180
-            azimuth = azimuth - 180
-            if azimuth > 180:
-                azimuth -= 360
-            elif azimuth < -180:
-                azimuth += 360
+        solar_azimuth = self._compass_to_solar_azimuth(azimuth)
 
         try:
             async with self._session.get(
@@ -111,7 +119,7 @@ class OpenMeteoSource:
                     "longitude": self.lon,
                     "hourly": "global_tilted_irradiance",
                     "tilt": tilt,
-                    "azimuth": azimuth,
+                    "azimuth": solar_azimuth,
                     "forecast_days": 2,
                     "timezone": "auto",
                 },
