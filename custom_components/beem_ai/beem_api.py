@@ -190,6 +190,64 @@ class BeemApiClient:
         return []
 
     # ------------------------------------------------------------------
+    # Battery state (pre-optimization refresh)
+    # ------------------------------------------------------------------
+
+    async def get_battery_state(self) -> Optional[dict]:
+        """Fetch current battery state from the REST API.
+
+        Tries GET /batteries/{id} first, falls back to GET /devices.
+        Returns a dict with state fields (soc, solarPower, batteryPower,
+        meterPower, etc.) or None if unavailable.
+        """
+        # Try dedicated battery endpoint first
+        url = f"{self._api_base}/batteries/{self._battery_id}"
+        log.info("REST: fetching battery state from %s", url)
+
+        try:
+            resp = await self._request("GET", url)
+        except _RateLimited:
+            log.warning("REST: rate-limited — cannot fetch battery state")
+            return None
+
+        if resp is not None:
+            try:
+                data = await resp.json()
+                if isinstance(data, dict) and "soc" in data:
+                    log.info("REST: got battery state (SoC=%.1f%%)", data["soc"])
+                    return data
+            except Exception:
+                log.debug("REST: /batteries/{id} did not return parseable state")
+
+        # Fallback: extract from /devices
+        log.debug("REST: falling back to /devices for battery state")
+        devices_url = f"{self._api_base}/devices"
+        try:
+            resp = await self._request("GET", devices_url)
+        except _RateLimited:
+            return None
+
+        if resp is None:
+            return None
+
+        try:
+            data = await resp.json()
+            batteries = data.get("batteries") if isinstance(data, dict) else data
+            if batteries:
+                for battery in batteries:
+                    if str(battery.get("id")) == str(self._battery_id):
+                        if "soc" in battery:
+                            log.info(
+                                "REST: got battery state from /devices (SoC=%.1f%%)",
+                                battery["soc"],
+                            )
+                        return battery
+        except Exception:
+            log.exception("REST: failed to parse /devices for battery state")
+
+        return None
+
+    # ------------------------------------------------------------------
     # Consumption history (bootstrap)
     # ------------------------------------------------------------------
 

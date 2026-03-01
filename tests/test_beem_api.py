@@ -282,6 +282,79 @@ class TestGetConsumptionHistory:
 # ------------------------------------------------------------------
 
 
+class TestGetBatteryState:
+    @pytest.mark.asyncio
+    async def test_returns_state_from_battery_endpoint(self, api_client):
+        """Direct /batteries/{id} returns state with SoC."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(json_data={
+            "soc": 72.5,
+            "solarPower": 3200.0,
+            "batteryPower": 1500.0,
+            "meterPower": -800.0,
+        })
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        result = await api_client.get_battery_state()
+
+        assert result is not None
+        assert result["soc"] == 72.5
+        assert result["solarPower"] == 3200.0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_devices_endpoint(self, api_client):
+        """When /batteries/{id} has no SoC, falls back to /devices."""
+        api_client._access_token = "tok-abc"
+
+        call_count = 0
+
+        async def side_effect(method, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: /batteries/{id} returns no SoC
+                return _mock_response(json_data={"id": "bat-123"})
+            # Second call: /devices returns battery with SoC
+            return _mock_response(json_data={
+                "batteries": [{
+                    "id": "bat-123",
+                    "soc": 65.0,
+                    "solarPower": 1000.0,
+                }]
+            })
+
+        api_client._session.request = AsyncMock(side_effect=side_effect)
+
+        result = await api_client.get_battery_state()
+
+        assert result is not None
+        assert result["soc"] == 65.0
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_rate_limited(self, api_client):
+        """Rate-limited client returns None."""
+        api_client._access_token = "tok-abc"
+        api_client._call_timestamps = [
+            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
+        ]
+
+        result = await api_client.get_battery_state()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_both_fail(self, api_client):
+        """Both endpoints failing returns None."""
+        api_client._access_token = "tok-abc"
+        api_client._session.request = AsyncMock(
+            side_effect=aiohttp.ClientError("network down")
+        )
+
+        result = await api_client.get_battery_state()
+        assert result is None
+
+
 class TestShutdown:
     @pytest.mark.asyncio
     async def test_cancels_refresh_task(self, api_client):

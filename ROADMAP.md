@@ -126,26 +126,7 @@ Implemented in `coordinator.py:_refresh_forecasts()` — sets `consumption_today
 
 ---
 
-## 5. Implement Cost Savings Tracking
-
-**Problem:** `daily_savings_eur` is declared, reset at midnight, and exposed as a sensor, but no code ever increments it. The "Cost Savings Today" sensor always shows 0.
-
-**Fix:** In the intraday loop or battery update handler, calculate savings when the battery discharges during peak hours (avoiding grid import at peak price). Use `tariff.calculate_savings_vs_hp()` which already exists.
-
----
-
-## 6. Avoid Confusing Daytime Re-optimization Logs
-
-**Problem:** Forecast refresh triggers `run_nightly_optimization()` even during daytime. This creates log entries like "Nightly plan: target=X%" at 14:00, which is confusing. The plan briefly switches to `night_hold` before immediately scheduling `solar_mode`.
-
-**Options:**
-- A) Only re-run full optimization between 00:00–06:00; during daytime, just update forecast data without re-planning
-- B) Add a `run_daytime_reforecast()` that updates the forecast numbers in the plan reasoning without changing phases
-- C) If current phase is `solar_mode`, skip the phase scheduling and only update the reasoning text
-
----
-
-## 7. Forecast Deviation → Plan Adjustment
+## 5. Forecast Deviation → Plan Adjustment
 
 **Problem:** `_track_forecast_deviation` logs when actual solar differs from forecast by >20%, but takes no action.
 
@@ -153,7 +134,7 @@ Implemented in `coordinator.py:_refresh_forecasts()` — sets `consumption_today
 
 ---
 
-## 8. Battery Mode Sensor Accuracy
+## 6. Battery Mode Sensor Accuracy
 
 **Problem:** The "Battery Mode" sensor shows "advanced" if `charge_power_w > 0`, else "auto". But the API always sends `mode="advanced"` for all commands. The sensor doesn't reflect what was actually sent.
 
@@ -161,19 +142,19 @@ Implemented in `coordinator.py:_refresh_forecasts()` — sets `consumption_today
 
 ---
 
-## ~~9. Migrate Solcast to Advanced PV Power Endpoint~~ ✗ NOT FEASIBLE
+## ~~7. Migrate Solcast to Advanced PV Power Endpoint~~ ✗ NOT FEASIBLE
 
 The `advanced_pv_power` endpoint returns **403 Forbidden** on the free hobbyist plan. This endpoint requires a paid Solcast subscription. Staying with `rooftop_sites/{site_id}/forecasts` which works on the hobbyist plan and provides the same P10/P50/P90 data.
 
 ---
 
-## ~~10. Persist Logs to Disk~~ ✓ DONE
+## ~~8. Persist Logs to Disk~~ ✓ DONE
 
 Implemented in `coordinator.py:_setup_file_logging()` — `RotatingFileHandler` writes to `beem_ai_data/beem_ai.log` (5 MB × 3 backups).
 
 ---
 
-## 11. Refresh State from REST API Before Optimization
+## 9. Refresh State from REST API Before Optimization
 
 **Problem:** MQTT is the primary real-time data source, but if MQTT has been disconnected or data is stale when the optimizer runs, the optimization plan is based on outdated SoC/power values.
 

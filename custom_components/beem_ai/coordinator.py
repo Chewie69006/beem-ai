@@ -402,6 +402,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
         """Refresh solar and consumption forecasts."""
         try:
             if self._forecast:
+                # Apply accuracy-weighted ensemble before refresh (#2)
+                if self._forecast_tracker and self._forecast.sources_used:
+                    weights = self._forecast_tracker.get_weights(
+                        self._forecast.sources_used
+                    )
+                    self._forecast.set_weights(weights)
+                    _LOGGER.debug("Applied accuracy weights: %s", weights)
+
                 await self._forecast.refresh()
 
             if self._consumption:
@@ -426,6 +434,58 @@ class BeemAICoordinator(DataUpdateCoordinator):
             )
         except Exception:
             _LOGGER.exception("Failed to refresh forecasts")
+
+    # ---- Pre-optimization API refresh (#11) ----
+
+    async def async_refresh_battery_from_api(self) -> bool:
+        """Refresh battery state from REST API before optimization.
+
+        Call this immediately before running optimization to ensure
+        the state store has fresh data even if MQTT is stale.
+        Returns True if the state store was updated.
+        """
+        if not self._api_client:
+            return False
+
+        data = await self._api_client.get_battery_state()
+        if not data:
+            _LOGGER.warning("API refresh: no battery state returned from REST API")
+            return False
+
+        # Map API fields to state store fields
+        field_map = {
+            "soc": "soc",
+            "solarPower": "solar_power_w",
+            "batteryPower": "battery_power_w",
+            "meterPower": "meter_power_w",
+            "inverterPower": "inverter_power_w",
+            "globalSoh": "soh",
+        }
+
+        updates = {}
+        for api_field, store_field in field_map.items():
+            if api_field in data and data[api_field] is not None:
+                updates[store_field] = float(data[api_field])
+
+        if not updates:
+            _LOGGER.info("API refresh: no state fields in API response")
+            return False
+
+        # Log discrepancy between MQTT and API values
+        mqtt_soc = self.state_store.battery.soc
+        api_soc = updates.get("soc")
+        if api_soc is not None and abs(api_soc - mqtt_soc) > 2.0:
+            _LOGGER.warning(
+                "API refresh: SoC discrepancy — MQTT=%.1f%%, API=%.1f%% "
+                "(diff=%.1f%%, MQTT data may be stale)",
+                mqtt_soc, api_soc, abs(api_soc - mqtt_soc),
+            )
+
+        self.state_store.update_battery(**updates)
+        _LOGGER.info(
+            "API refresh: updated battery state from REST API: %s", updates
+        )
+        return True
 
     # ---- Options update ----
 
