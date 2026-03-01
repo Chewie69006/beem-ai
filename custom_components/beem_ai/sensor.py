@@ -61,6 +61,19 @@ def _system_device_info(entry: ConfigEntry) -> dict:
     }
 
 
+def _get_solcast_site_id(entry, array_index: int) -> str:
+    """Read the Solcast site ID for a given array from current config options."""
+    raw = entry.options.get("solcast_site_ids_json", "")
+    if raw:
+        try:
+            for sid_entry in json.loads(raw):
+                if sid_entry.get("array_index") == array_index:
+                    return sid_entry["site_id"]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+    return "Not configured"
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -166,16 +179,6 @@ async def async_setup_entry(
         ),
     ]
 
-    # Parse Solcast site ID mappings for per-array sensors
-    solcast_site_map: dict[int, str] = {}
-    raw_site_ids = entry.options.get("solcast_site_ids_json", "")
-    if raw_site_ids:
-        try:
-            for sid_entry in json.loads(raw_site_ids):
-                solcast_site_map[sid_entry["array_index"]] = sid_entry["site_id"]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-
     # --- Per-array solar sensors (creates a device per panel array) ---
     for idx, array in enumerate(coordinator.panel_arrays):
         tilt = array.get("tilt", 30)
@@ -184,7 +187,6 @@ async def async_setup_entry(
         mppt_id = array.get("mppt_id")
         panels_series = array.get("panels_in_series")
         panels_parallel = array.get("panels_in_parallel")
-        solcast_site_id = solcast_site_map.get(idx, "Not configured")
 
         sensors.append(BeemAISensor(
             coordinator, entry,
@@ -266,7 +268,7 @@ async def async_setup_entry(
             device_class=None,
             state_class=None,
             unit=None,
-            value_fn=lambda c, _v=solcast_site_id: _v,
+            value_fn=lambda c, _e=entry, _i=idx: _get_solcast_site_id(_e, _i),
             device_type="solar",
             solar_index=idx,
         ))
