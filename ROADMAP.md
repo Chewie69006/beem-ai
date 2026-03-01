@@ -171,22 +171,3 @@ The `advanced_pv_power` endpoint returns **403 Forbidden** on the free hobbyist 
 
 Implemented in `coordinator.py:_setup_file_logging()` — `RotatingFileHandler` writes to `beem_ai_data/beem_ai.log` (5 MB × 3 backups).
 
----
-
-## 11. Replace Live MQTT Consumption Tracking with Daily API Fetch
-
-**Problem:** `ConsumptionAnalyzer` currently learns from two sources: (1) one-time bootstrap via `seed_from_history()` on fresh install, and (2) live `record_consumption()` calls from the MQTT handler in `coordinator.py`. If MQTT is disconnected (HA restart, network issue, Beem outage), hours of consumption data are lost and the EMA buckets for those hours never update.
-
-**Proposed change:**
-- Drop `record_consumption()` from the MQTT path in `coordinator.py`
-- Add a daily scheduled task (e.g., at 00:15 or 01:00) that fetches yesterday's data from all 5 Beem API intraday streams (`production`, `grid_import`, `grid_export`, `battery_charged`, `battery_discharged`)
-- Compute true house consumption using the energy balance formula: `prod + import - export - charged + discharged`
-- Feed the 24 hourly values into the EMA via `seed_from_history()`
-- Save immediately after seeding
-
-**Benefits:**
-- No gaps from MQTT downtime — the API always has the full picture
-- Single source of truth for consumption learning (API, not MQTT)
-- Less code in the MQTT handler (no more `record_consumption()` calls)
-- More accurate: uses the full 5-stream energy balance instead of the MQTT-derived consumption estimate
-- Runs once per day = 5 API calls, well within rate limits
