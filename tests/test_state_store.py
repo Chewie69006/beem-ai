@@ -220,11 +220,16 @@ class TestControlState:
         assert c.charge_from_grid_max_power == 0
         assert c.min_soc == 20
         assert c.max_soc == 100
+        assert c.can_change_mode is True
 
     def test_update_control_sets_fields(self, state_store):
         state_store.update_control(mode="advanced", min_soc=10)
         assert state_store.control.mode == "advanced"
         assert state_store.control.min_soc == 10
+
+    def test_update_control_can_change_mode(self, state_store):
+        state_store.update_control(can_change_mode=False)
+        assert state_store.control.can_change_mode is False
 
     def test_update_control_ignores_unknown(self, state_store):
         state_store.update_control(nonexistent=42, max_soc=90)

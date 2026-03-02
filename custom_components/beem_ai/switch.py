@@ -85,6 +85,11 @@ class BeemAIAllowGridChargeSwitch(CoordinatorEntity, SwitchEntity):
         return _battery_device_info(self._entry)
 
     @property
+    def available(self) -> bool:
+        """Available only when mode is advanced."""
+        return self.coordinator.state_store.control.mode == "advanced"
+
+    @property
     def is_on(self) -> bool:
         """Return True if grid charging is allowed."""
         return self.coordinator.state_store.control.allow_charge_from_grid
@@ -118,6 +123,11 @@ class BeemAIPreventDischargeSwitch(CoordinatorEntity, SwitchEntity):
     def device_info(self):
         """Return device info for grouping entities."""
         return _battery_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        """Available only when mode is advanced."""
+        return self.coordinator.state_store.control.mode == "advanced"
 
     @property
     def is_on(self) -> bool:

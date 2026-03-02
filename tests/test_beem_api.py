@@ -158,14 +158,13 @@ class TestRateLimiting:
         mock_resp.text = AsyncMock(return_value="Too Many Requests")
         api_client._session.request = AsyncMock(return_value=mock_resp)
 
-        # Use _request directly since set_control_params was removed
+        # Use _request directly
         try:
             resp = await api_client._request("GET", "https://api.beem.energy/v1/devices")
         except _RateLimited:
             pass
 
         # If the 429 was processed, cooldown should be set
-        # (Note: _request returns None on 429 status, doesn't raise)
         assert api_client._cooldown_until is not None or resp is None
 
 
@@ -187,11 +186,6 @@ class TestAuthHeaders:
         api_client._access_token = "tok-abc"
         headers = api_client._auth_headers()
         assert headers["Authorization"] == "Bearer tok-abc"
-
-
-# ------------------------------------------------------------------
-# shutdown()
-# ------------------------------------------------------------------
 
 
 # ------------------------------------------------------------------
@@ -278,7 +272,7 @@ class TestGetConsumptionHistory:
 
 
 # ------------------------------------------------------------------
-# shutdown()
+# get_battery_state()
 # ------------------------------------------------------------------
 
 
@@ -356,6 +350,59 @@ class TestGetBatteryState:
 
 
 # ------------------------------------------------------------------
+# get_control_parameters()
+# ------------------------------------------------------------------
+
+
+class TestGetControlParameters:
+    @pytest.mark.asyncio
+    async def test_success_returns_dict(self, api_client):
+        """Successful GET returns control params dict."""
+        api_client._access_token = "tok-abc"
+
+        mock_resp = _mock_response(json_data={
+            "mode": "advanced",
+            "allowChargeFromGrid": True,
+            "preventDischarge": False,
+            "chargeFromGridMaxPower": 2500,
+            "minSoc": 15,
+            "maxSoc": 95,
+            "canChangeMode": True,
+        })
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        result = await api_client.get_control_parameters()
+
+        assert result is not None
+        assert result["mode"] == "advanced"
+        assert result["allowChargeFromGrid"] is True
+        assert result["chargeFromGridMaxPower"] == 2500
+        assert result["canChangeMode"] is True
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_returns_none(self, api_client):
+        """Rate-limited client returns None."""
+        api_client._access_token = "tok-abc"
+        api_client._call_timestamps = [
+            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
+        ]
+
+        result = await api_client.get_control_parameters()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_network_error_returns_none(self, api_client):
+        """Network error returns None."""
+        api_client._access_token = "tok-abc"
+        api_client._session.request = AsyncMock(
+            side_effect=aiohttp.ClientError("down")
+        )
+
+        result = await api_client.get_control_parameters()
+        assert result is None
+
+
+# ------------------------------------------------------------------
 # set_control_parameters()
 # ------------------------------------------------------------------
 
@@ -369,73 +416,30 @@ class TestSetControlParameters:
         mock_resp = _mock_response(status=200, json_data={})
         api_client._session.request = AsyncMock(return_value=mock_resp)
 
-        result = await api_client.set_control_parameters(
-            mode="auto",
-            allow_charge_from_grid=True,
-            prevent_discharge=False,
-            charge_power=2000,
-            min_soc=20,
-            max_soc=100,
-        )
+        result = await api_client.set_control_parameters({"mode": "auto"})
 
         assert result is True
-        # Verify PATCH was called with correct camelCase body
+        # Verify PATCH was called with the params dict
         call_kwargs = api_client._session.request.call_args
         assert call_kwargs[0][0] == "PATCH"
         body = call_kwargs[1]["json"]
         assert body["mode"] == "auto"
-        assert body["allowChargeFromGrid"] is True
-        assert body["preventDischarge"] is False
-        assert body["chargeFromGridMaxPower"] == 2000
-        assert body["minSoc"] == 20
-        assert body["maxSoc"] == 100
 
     @pytest.mark.asyncio
-    async def test_deduplication_skips_unchanged(self, api_client):
-        """Sending identical params twice only makes one API call."""
+    async def test_partial_params_sent_as_is(self, api_client):
+        """Only the provided fields are sent in the PATCH body."""
         api_client._access_token = "tok-abc"
 
         mock_resp = _mock_response(status=200, json_data={})
         api_client._session.request = AsyncMock(return_value=mock_resp)
 
-        params = dict(
-            mode="auto",
-            allow_charge_from_grid=False,
-            prevent_discharge=False,
-            charge_power=0,
-            min_soc=20,
-            max_soc=100,
+        result = await api_client.set_control_parameters(
+            {"allowChargeFromGrid": True, "minSoc": 30}
         )
 
-        result1 = await api_client.set_control_parameters(**params)
-        result2 = await api_client.set_control_parameters(**params)
-
-        assert result1 is True
-        assert result2 is True
-        # Only one actual HTTP call
-        assert api_client._session.request.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_deduplication_sends_when_changed(self, api_client):
-        """Changing one param triggers a new API call."""
-        api_client._access_token = "tok-abc"
-
-        mock_resp = _mock_response(status=200, json_data={})
-        api_client._session.request = AsyncMock(return_value=mock_resp)
-
-        base = dict(
-            mode="auto",
-            allow_charge_from_grid=False,
-            prevent_discharge=False,
-            charge_power=0,
-            min_soc=20,
-            max_soc=100,
-        )
-
-        await api_client.set_control_parameters(**base)
-        await api_client.set_control_parameters(**{**base, "min_soc": 30})
-
-        assert api_client._session.request.call_count == 2
+        assert result is True
+        body = api_client._session.request.call_args[1]["json"]
+        assert body == {"allowChargeFromGrid": True, "minSoc": 30}
 
     @pytest.mark.asyncio
     async def test_rate_limited_returns_false(self, api_client):
@@ -445,37 +449,26 @@ class TestSetControlParameters:
             datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
         ]
 
-        result = await api_client.set_control_parameters(
-            mode="auto",
-            allow_charge_from_grid=False,
-            prevent_discharge=False,
-            charge_power=0,
-            min_soc=20,
-            max_soc=100,
-        )
+        result = await api_client.set_control_parameters({"mode": "auto"})
 
         assert result is False
 
     @pytest.mark.asyncio
     async def test_api_failure_returns_false(self, api_client):
-        """Network error returns False and does not cache params."""
+        """Network error returns False."""
         api_client._access_token = "tok-abc"
         api_client._session.request = AsyncMock(
             side_effect=aiohttp.ClientError("down")
         )
 
-        result = await api_client.set_control_parameters(
-            mode="auto",
-            allow_charge_from_grid=False,
-            prevent_discharge=False,
-            charge_power=0,
-            min_soc=20,
-            max_soc=100,
-        )
+        result = await api_client.set_control_parameters({"mode": "auto"})
 
         assert result is False
-        # Params should NOT be cached on failure
-        assert api_client._last_sent_control is None
+
+
+# ------------------------------------------------------------------
+# shutdown()
+# ------------------------------------------------------------------
 
 
 class TestShutdown:

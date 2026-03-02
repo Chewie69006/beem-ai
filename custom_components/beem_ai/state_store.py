@@ -91,12 +91,13 @@ class ForecastData:
 class ControlState:
     """Battery control parameters (mirrors API control-parameters)."""
 
-    mode: str = "auto"                    # "auto" | "advanced"
+    mode: str = "auto"                    # "auto" | "pause" | "advanced"
     allow_charge_from_grid: bool = False
     prevent_discharge: bool = False
-    charge_from_grid_max_power: int = 0   # watts, 0-5000
-    min_soc: int = 20                     # %, 0-100
-    max_soc: int = 100                    # %, 0-100
+    charge_from_grid_max_power: int = 0   # watts: 500|1000|2500|5000
+    min_soc: int = 20                     # %, 10-50
+    max_soc: int = 100                    # %, 50-100
+    can_change_mode: bool = True          # API: canChangeMode
 
 
 class StateStore:

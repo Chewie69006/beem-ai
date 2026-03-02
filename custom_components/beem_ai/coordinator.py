@@ -120,8 +120,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         await self._api_client.login()
 
-        # Fetch solar equipment config from API
+        # Fetch solar equipment config and current control parameters from API
         self.panel_arrays = await self._fetch_panel_arrays()
+        await self._refresh_control_params()
 
         # MQTT client
         self._mqtt_client = BeemMqttClient(
@@ -326,7 +327,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Periodic catch-up refresh (every 2 min)."""
-        # This just triggers entity updates via coordinator pattern
+        # Refresh control parameters from API each cycle
+        await self._refresh_control_params()
         return {
             "battery_soc": self.state_store.battery.soc,
             "mqtt_connected": self.state_store.mqtt_connected,
@@ -517,39 +519,71 @@ class BeemAICoordinator(DataUpdateCoordinator):
         else:
             _LOGGER.info("BeemAI disabled by user")
 
+    # ---- Control parameter refresh ----
+
+    async def _refresh_control_params(self) -> None:
+        """Fetch control parameters from API and update local state."""
+        if not self._api_client:
+            return
+
+        data = await self._api_client.get_control_parameters()
+        if not data:
+            return
+
+        # Map camelCase API response → snake_case ControlState fields
+        field_map = {
+            "mode": "mode",
+            "allowChargeFromGrid": "allow_charge_from_grid",
+            "preventDischarge": "prevent_discharge",
+            "chargeFromGridMaxPower": "charge_from_grid_max_power",
+            "minSoc": "min_soc",
+            "maxSoc": "max_soc",
+            "canChangeMode": "can_change_mode",
+        }
+
+        updates = {}
+        for api_key, store_key in field_map.items():
+            if api_key in data and data[api_key] is not None:
+                updates[store_key] = data[api_key]
+
+        if updates:
+            self.state_store.update_control(**updates)
+            _LOGGER.info("Control params refreshed from API: %s", updates)
+
     # ---- Battery control ----
 
     async def async_set_battery_control(self, **kwargs) -> bool:
         """Update battery control parameters via the Beem API.
 
         Accepts any subset of: mode, allow_charge_from_grid, prevent_discharge,
-        charge_from_grid_max_power, min_soc, max_soc.  Missing fields are filled
-        from the current control state.
+        charge_from_grid_max_power, min_soc, max_soc.  Only changed fields are
+        sent; after a successful PATCH, re-fetches from API (source of truth).
         """
         if not self._api_client:
             return False
 
-        # Merge with current state so we always send a full parameter set.
-        current = self.state_store.control
-        params = {
-            "mode": kwargs.get("mode", current.mode),
-            "allow_charge_from_grid": kwargs.get(
-                "allow_charge_from_grid", current.allow_charge_from_grid
-            ),
-            "prevent_discharge": kwargs.get(
-                "prevent_discharge", current.prevent_discharge
-            ),
-            "charge_power": kwargs.get(
-                "charge_from_grid_max_power", current.charge_from_grid_max_power
-            ),
-            "min_soc": kwargs.get("min_soc", current.min_soc),
-            "max_soc": kwargs.get("max_soc", current.max_soc),
+        # Map snake_case kwargs → camelCase API params
+        key_map = {
+            "mode": "mode",
+            "allow_charge_from_grid": "allowChargeFromGrid",
+            "prevent_discharge": "preventDischarge",
+            "charge_from_grid_max_power": "chargeFromGridMaxPower",
+            "min_soc": "minSoc",
+            "max_soc": "maxSoc",
         }
 
-        success = await self._api_client.set_control_parameters(**params)
+        params = {}
+        for local_key, api_key in key_map.items():
+            if local_key in kwargs:
+                params[api_key] = kwargs[local_key]
+
+        if not params:
+            return True
+
+        success = await self._api_client.set_control_parameters(params)
         if success:
-            # Update local state to match what was sent.
-            self.state_store.update_control(**kwargs)
+            # Re-fetch from API — it is the source of truth.
+            await self._refresh_control_params()
             self.async_update_listeners()
             _LOGGER.info("Battery control updated: %s", kwargs)
         else:

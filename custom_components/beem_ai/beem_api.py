@@ -54,8 +54,6 @@ class BeemApiClient:
         self._call_timestamps: list[datetime] = []
         self._cooldown_until: Optional[datetime] = None
 
-        # Deduplication for control parameter writes.
-        self._last_sent_control: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Authentication
@@ -440,40 +438,42 @@ class BeemApiClient:
     # Battery control parameters
     # ------------------------------------------------------------------
 
-    async def set_control_parameters(
-        self,
-        *,
-        mode: str,
-        allow_charge_from_grid: bool,
-        prevent_discharge: bool,
-        charge_power: int,
-        min_soc: int,
-        max_soc: int,
-    ) -> bool:
-        """Send battery control parameters via PATCH /batteries/{id}/control-parameters.
+    async def get_control_parameters(self) -> Optional[dict]:
+        """Fetch current control parameters via GET /batteries/{id}/control-parameters.
 
-        Returns True on success, False on failure or rate-limit.
-        Deduplicates: skips the call if params are unchanged since last send.
+        Returns the raw API dict (camelCase keys) or None on failure.
         """
-        body = {
-            "mode": mode,
-            "allowChargeFromGrid": allow_charge_from_grid,
-            "preventDischarge": prevent_discharge,
-            "chargeFromGridMaxPower": charge_power,
-            "minSoc": min_soc,
-            "maxSoc": max_soc,
-        }
-
-        # Deduplicate — skip if nothing changed.
-        if body == self._last_sent_control:
-            log.debug("REST: control params unchanged, skipping PATCH")
-            return True
-
         url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
-        log.info("REST: PATCH %s — %s", url, body)
+        log.info("REST: GET %s", url)
 
         try:
-            resp = await self._request("PATCH", url, json=body)
+            resp = await self._request("GET", url)
+        except _RateLimited:
+            log.warning("REST: rate-limited — cannot fetch control parameters")
+            return None
+
+        if resp is None:
+            return None
+
+        try:
+            data = await resp.json()
+            log.info("REST: got control parameters: %s", data)
+            return data
+        except Exception:
+            log.exception("REST: failed to parse control-parameters response")
+            return None
+
+    async def set_control_parameters(self, params: dict) -> bool:
+        """Send battery control parameters via PATCH /batteries/{id}/control-parameters.
+
+        Accepts a dict of camelCase params (only changed fields need to be sent).
+        Returns True on success, False on failure or rate-limit.
+        """
+        url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
+        log.info("REST: PATCH %s — %s", url, params)
+
+        try:
+            resp = await self._request("PATCH", url, json=params)
         except _RateLimited:
             log.warning("REST: rate-limited — cannot set control parameters")
             return False
@@ -481,7 +481,6 @@ class BeemApiClient:
         if resp is None:
             return False
 
-        self._last_sent_control = body
         log.info("REST: control parameters updated successfully")
         return True
 

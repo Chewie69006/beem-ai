@@ -1,4 +1,4 @@
-"""Number entity for BeemAI — editable consumption forecast tomorrow."""
+"""Number entity for BeemAI — editable consumption forecast tomorrow and SoC limits."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
         BeemAIConsumptionForecastTomorrowNumber(coordinator, entry),
-        BeemAIChargePowerNumber(coordinator, entry),
         BeemAIMinSocNumber(coordinator, entry),
         BeemAIMaxSocNumber(coordinator, entry),
     ])
@@ -71,52 +70,15 @@ class BeemAIConsumptionForecastTomorrowNumber(CoordinatorEntity, NumberEntity):
         self.async_write_ha_state()
 
 
-class BeemAIChargePowerNumber(CoordinatorEntity, NumberEntity):
-    """Grid charge power limit (watts)."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Charge Power"
-    _attr_icon = "mdi:lightning-bolt"
-    _attr_native_min_value = 0
-    _attr_native_max_value = 5000
-    _attr_native_step = 100
-    _attr_native_unit_of_measurement = "W"
-    _attr_mode = NumberMode.SLIDER
-    _attr_translation_key = "charge_power"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        """Initialize the number entity."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_charge_power"
-        self._entry = entry
-
-    @property
-    def device_info(self):
-        """Return device info for grouping entities."""
-        return _battery_device_info(self._entry)
-
-    @property
-    def native_value(self) -> int | None:
-        """Return the current charge power limit."""
-        return self.coordinator.state_store.control.charge_from_grid_max_power
-
-    async def async_set_native_value(self, value: float) -> None:
-        """Set the charge power limit."""
-        await self.coordinator.async_set_battery_control(
-            charge_from_grid_max_power=int(value)
-        )
-        self.async_write_ha_state()
-
-
 class BeemAIMinSocNumber(CoordinatorEntity, NumberEntity):
     """Minimum state of charge (%)."""
 
     _attr_has_entity_name = True
     _attr_name = "Min SoC"
     _attr_icon = "mdi:battery-arrow-down"
-    _attr_native_min_value = 0
-    _attr_native_max_value = 100
-    _attr_native_step = 5
+    _attr_native_min_value = 10
+    _attr_native_max_value = 50
+    _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
     _attr_mode = NumberMode.SLIDER
     _attr_translation_key = "min_soc"
@@ -131,6 +93,11 @@ class BeemAIMinSocNumber(CoordinatorEntity, NumberEntity):
     def device_info(self):
         """Return device info for grouping entities."""
         return _battery_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        """Available only when mode is advanced."""
+        return self.coordinator.state_store.control.mode == "advanced"
 
     @property
     def native_value(self) -> int | None:
@@ -149,9 +116,9 @@ class BeemAIMaxSocNumber(CoordinatorEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Max SoC"
     _attr_icon = "mdi:battery-arrow-up"
-    _attr_native_min_value = 0
+    _attr_native_min_value = 50
     _attr_native_max_value = 100
-    _attr_native_step = 5
+    _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
     _attr_mode = NumberMode.SLIDER
     _attr_translation_key = "max_soc"
@@ -166,6 +133,11 @@ class BeemAIMaxSocNumber(CoordinatorEntity, NumberEntity):
     def device_info(self):
         """Return device info for grouping entities."""
         return _battery_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        """Available only when mode is advanced."""
+        return self.coordinator.state_store.control.mode == "advanced"
 
     @property
     def native_value(self) -> int | None:

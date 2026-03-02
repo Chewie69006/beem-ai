@@ -9,7 +9,6 @@ from custom_components.beem_ai.switch import (
     BeemAIPreventDischargeSwitch,
 )
 from custom_components.beem_ai.number import (
-    BeemAIChargePowerNumber,
     BeemAIMinSocNumber,
     BeemAIMaxSocNumber,
 )
@@ -67,6 +66,20 @@ class TestAllowGridChargeSwitch:
         sw = BeemAIAllowGridChargeSwitch(coordinator, entry)
         assert sw._attr_unique_id == "test-entry-123_allow_grid_charge"
 
+    def test_available_when_advanced(self, coordinator, entry, state_store):
+        state_store.update_control(mode="advanced")
+        sw = BeemAIAllowGridChargeSwitch(coordinator, entry)
+        assert sw.available is True
+
+    def test_unavailable_when_auto(self, coordinator, entry):
+        sw = BeemAIAllowGridChargeSwitch(coordinator, entry)
+        assert sw.available is False
+
+    def test_unavailable_when_pause(self, coordinator, entry, state_store):
+        state_store.update_control(mode="pause")
+        sw = BeemAIAllowGridChargeSwitch(coordinator, entry)
+        assert sw.available is False
+
 
 # ------------------------------------------------------------------
 # Prevent Discharge Switch
@@ -91,34 +104,14 @@ class TestPreventDischargeSwitch:
         sw = BeemAIPreventDischargeSwitch(coordinator, entry)
         assert sw._attr_unique_id == "test-entry-123_prevent_discharge"
 
+    def test_available_when_advanced(self, coordinator, entry, state_store):
+        state_store.update_control(mode="advanced")
+        sw = BeemAIPreventDischargeSwitch(coordinator, entry)
+        assert sw.available is True
 
-# ------------------------------------------------------------------
-# Charge Power Number
-# ------------------------------------------------------------------
-
-
-class TestChargePowerNumber:
-    def test_native_value_reads_control_state(self, coordinator, entry):
-        num = BeemAIChargePowerNumber(coordinator, entry)
-        assert num.native_value == 0
-
-    def test_native_value_after_update(self, coordinator, entry, state_store):
-        state_store.update_control(charge_from_grid_max_power=3000)
-        num = BeemAIChargePowerNumber(coordinator, entry)
-        assert num.native_value == 3000
-
-    @pytest.mark.asyncio
-    async def test_set_value(self, coordinator, entry):
-        num = BeemAIChargePowerNumber(coordinator, entry)
-        num.async_write_ha_state = MagicMock()
-        await num.async_set_native_value(2500.0)
-        coordinator.async_set_battery_control.assert_awaited_once_with(
-            charge_from_grid_max_power=2500
-        )
-
-    def test_unique_id(self, coordinator, entry):
-        num = BeemAIChargePowerNumber(coordinator, entry)
-        assert num._attr_unique_id == "test-entry-123_charge_power"
+    def test_unavailable_when_auto(self, coordinator, entry):
+        sw = BeemAIPreventDischargeSwitch(coordinator, entry)
+        assert sw.available is False
 
 
 # ------------------------------------------------------------------
@@ -131,6 +124,12 @@ class TestMinSocNumber:
         num = BeemAIMinSocNumber(coordinator, entry)
         assert num.native_value == 20
 
+    def test_range(self, coordinator, entry):
+        num = BeemAIMinSocNumber(coordinator, entry)
+        assert num._attr_native_min_value == 10
+        assert num._attr_native_max_value == 50
+        assert num._attr_native_step == 1
+
     @pytest.mark.asyncio
     async def test_set_value(self, coordinator, entry):
         num = BeemAIMinSocNumber(coordinator, entry)
@@ -141,6 +140,15 @@ class TestMinSocNumber:
     def test_unique_id(self, coordinator, entry):
         num = BeemAIMinSocNumber(coordinator, entry)
         assert num._attr_unique_id == "test-entry-123_min_soc"
+
+    def test_available_when_advanced(self, coordinator, entry, state_store):
+        state_store.update_control(mode="advanced")
+        num = BeemAIMinSocNumber(coordinator, entry)
+        assert num.available is True
+
+    def test_unavailable_when_auto(self, coordinator, entry):
+        num = BeemAIMinSocNumber(coordinator, entry)
+        assert num.available is False
 
 
 # ------------------------------------------------------------------
@@ -153,6 +161,12 @@ class TestMaxSocNumber:
         num = BeemAIMaxSocNumber(coordinator, entry)
         assert num.native_value == 100
 
+    def test_range(self, coordinator, entry):
+        num = BeemAIMaxSocNumber(coordinator, entry)
+        assert num._attr_native_min_value == 50
+        assert num._attr_native_max_value == 100
+        assert num._attr_native_step == 1
+
     @pytest.mark.asyncio
     async def test_set_value(self, coordinator, entry):
         num = BeemAIMaxSocNumber(coordinator, entry)
@@ -163,3 +177,12 @@ class TestMaxSocNumber:
     def test_unique_id(self, coordinator, entry):
         num = BeemAIMaxSocNumber(coordinator, entry)
         assert num._attr_unique_id == "test-entry-123_max_soc"
+
+    def test_available_when_advanced(self, coordinator, entry, state_store):
+        state_store.update_control(mode="advanced")
+        num = BeemAIMaxSocNumber(coordinator, entry)
+        assert num.available is True
+
+    def test_unavailable_when_auto(self, coordinator, entry):
+        num = BeemAIMaxSocNumber(coordinator, entry)
+        assert num.available is False
