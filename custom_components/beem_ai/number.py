@@ -80,7 +80,7 @@ class BeemAIMinSocNumber(CoordinatorEntity, NumberEntity):
     _attr_native_max_value = 50
     _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
-    _attr_mode = NumberMode.SLIDER
+    _attr_mode = NumberMode.BOX
     _attr_translation_key = "min_soc"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
@@ -120,7 +120,7 @@ class BeemAIMaxSocNumber(CoordinatorEntity, NumberEntity):
     _attr_native_max_value = 100
     _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
-    _attr_mode = NumberMode.SLIDER
+    _attr_mode = NumberMode.BOX
     _attr_translation_key = "max_soc"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
