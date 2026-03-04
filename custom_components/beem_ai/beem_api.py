@@ -14,10 +14,6 @@ log = logging.getLogger(__name__)
 # Auth token refresh interval (50 minutes, JWT TTL is 58 minutes).
 TOKEN_REFRESH_SECONDS = 50 * 60
 
-# Self-imposed rate limit: 10 API calls per hour.
-RATE_LIMIT_MAX_CALLS = 10
-RATE_LIMIT_WINDOW_SECONDS = 3600
-
 # Cooldown after receiving HTTP 429 (20 minutes).
 RATE_LIMIT_COOLDOWN_SECONDS = 20 * 60
 
@@ -50,8 +46,7 @@ class BeemApiClient:
         self._token_expiry: Optional[datetime] = None
         self._refresh_task: Optional[asyncio.Task] = None
 
-        # Rate limiting.
-        self._call_timestamps: list[datetime] = []
+        # 429 cooldown.
         self._cooldown_until: Optional[datetime] = None
 
 
@@ -124,12 +119,7 @@ class BeemApiClient:
 
         payload = {"clientId": client_id, "clientType": "user"}
 
-        try:
-            resp = await self._request("POST", url, json=payload)
-        except _RateLimited:
-            log.warning("REST: rate-limited — cannot fetch MQTT token")
-            return None
-
+        resp = await self._request("POST", url, json=payload)
         if resp is None:
             return None
 
@@ -155,12 +145,7 @@ class BeemApiClient:
         url = f"{self._api_base}/devices"
         log.info("REST: fetching solar equipments from %s", url)
 
-        try:
-            resp = await self._request("GET", url)
-        except _RateLimited:
-            log.warning("REST: rate-limited — cannot fetch solar equipments")
-            return []
-
+        resp = await self._request("GET", url)
         if resp is None:
             return []
 
@@ -205,12 +190,7 @@ class BeemApiClient:
         url = f"{self._api_base}/batteries/{self._battery_id}"
         log.info("REST: fetching battery state from %s", url)
 
-        try:
-            resp = await self._request("GET", url)
-        except _RateLimited:
-            log.warning("REST: rate-limited — cannot fetch battery state")
-            return None
-
+        resp = await self._request("GET", url)
         if resp is not None:
             try:
                 data = await resp.json()
@@ -223,11 +203,7 @@ class BeemApiClient:
         # Fallback: extract from /devices
         log.debug("REST: falling back to /devices for battery state")
         devices_url = f"{self._api_base}/devices"
-        try:
-            resp = await self._request("GET", devices_url)
-        except _RateLimited:
-            return None
-
+        resp = await self._request("GET", devices_url)
         if resp is None:
             return None
 
@@ -446,12 +422,7 @@ class BeemApiClient:
         url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
         log.info("REST: GET %s", url)
 
-        try:
-            resp = await self._request("GET", url)
-        except _RateLimited:
-            log.warning("REST: rate-limited — cannot fetch control parameters")
-            return None
-
+        resp = await self._request("GET", url)
         if resp is None:
             return None
 
@@ -472,12 +443,7 @@ class BeemApiClient:
         url = f"{self._api_base}/batteries/{self._battery_id}/control-parameters"
         log.info("REST: PATCH %s — %s", url, params)
 
-        try:
-            resp = await self._request("PATCH", url, json=params)
-        except _RateLimited:
-            log.warning("REST: rate-limited — cannot set control parameters")
-            return False
-
+        resp = await self._request("PATCH", url, json=params)
         if resp is None:
             return False
 
@@ -500,13 +466,18 @@ class BeemApiClient:
         url: str,
         **kwargs,
     ) -> Optional[aiohttp.ClientResponse]:
-        """Execute an authenticated HTTP request with rate-limit enforcement.
+        """Execute an authenticated HTTP request with 429 cooldown handling.
 
-        Returns the ClientResponse on success, None on failure.
-        Raises _RateLimited if the call would violate the rate limit.
+        Returns the ClientResponse on success, None on failure or cooldown.
         """
-        if not self._check_rate_limit():
-            raise _RateLimited()
+        # Honour 429 cooldown.
+        if self._cooldown_until:
+            now = datetime.now()
+            if now < self._cooldown_until:
+                remaining = (self._cooldown_until - now).total_seconds()
+                log.debug("REST: still in 429 cooldown (%.0fs remaining)", remaining)
+                return None
+            self._cooldown_until = None
 
         kwargs.setdefault("timeout", aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
         kwargs.setdefault("headers", {})
@@ -518,8 +489,6 @@ class BeemApiClient:
             log.exception("REST: %s %s network error", method, url)
             self._state_store.rest_available = False
             return None
-
-        self._record_call()
 
         if resp.status == 429:
             log.warning(
@@ -544,41 +513,6 @@ class BeemApiClient:
 
         self._state_store.rest_available = True
         return resp
-
-    # ------------------------------------------------------------------
-    # Rate limiting
-    # ------------------------------------------------------------------
-
-    def _check_rate_limit(self) -> bool:
-        """Return True if a new call is allowed."""
-        now = datetime.now()
-
-        # Honour 429 cooldown.
-        if self._cooldown_until and now < self._cooldown_until:
-            remaining = (self._cooldown_until - now).total_seconds()
-            log.debug("REST: still in cooldown (%.0fs remaining)", remaining)
-            return False
-
-        # Clear expired cooldown.
-        self._cooldown_until = None
-
-        # Prune timestamps outside the sliding window.
-        cutoff = now - timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
-        self._call_timestamps = [ts for ts in self._call_timestamps if ts > cutoff]
-
-        if len(self._call_timestamps) >= RATE_LIMIT_MAX_CALLS:
-            log.warning(
-                "REST: self-imposed rate limit reached (%d/%d per hour)",
-                len(self._call_timestamps),
-                RATE_LIMIT_MAX_CALLS,
-            )
-            return False
-
-        return True
-
-    def _record_call(self):
-        """Record a successful API call timestamp for rate limiting."""
-        self._call_timestamps.append(datetime.now())
 
     # ------------------------------------------------------------------
     # Token refresh scheduling
@@ -619,7 +553,3 @@ class BeemApiClient:
             except asyncio.CancelledError:
                 pass
         log.info("REST: client shut down")
-
-
-class _RateLimited(Exception):
-    """Raised internally when an API call is blocked by rate limiting."""

@@ -134,11 +134,17 @@ Implemented in `coordinator.py:_refresh_forecasts()` — sets `consumption_today
 
 ---
 
-## 6. Battery Mode Sensor Accuracy
+## ~~6. Battery Mode Control~~ ✓ DONE
 
-**Problem:** The "Battery Mode" sensor shows "advanced" if `charge_power_w > 0`, else "auto". But the API always sends `mode="advanced"` for all commands. The sensor doesn't reflect what was actually sent.
+Implemented battery control entities matching the Beem_Energy reference integration:
+- **Battery Mode** (`select`): `auto` / `pause` / `advanced` — available when `canChangeMode` is true
+- **Allow Charge From Grid** (`switch`): available only in advanced mode
+- **Prevent Discharge** (`switch`): available only in advanced mode
+- **Charge Power** (`select`): discrete values `500|1000|2500|5000` W — available only in advanced mode
+- **Min SoC** (`number`, %, BOX): range 10–50, step 1 — available only in advanced mode
+- **Max SoC** (`number`, %, BOX): range 50–100, step 1 — available only in advanced mode
 
-**Fix:** Track the actual mode sent to the API in StateStore and use that for the sensor value.
+API is source of truth: `GET /batteries/{id}/control-parameters` fetched on startup + every 2-min poll + after each PATCH. Only changed fields sent in PATCH (partial camelCase params).
 
 ---
 

@@ -10,9 +10,7 @@ import pytest_asyncio
 
 from custom_components.beem_ai.beem_api import (
     RATE_LIMIT_COOLDOWN_SECONDS,
-    RATE_LIMIT_MAX_CALLS,
     BeemApiClient,
-    _RateLimited,
 )
 
 
@@ -124,48 +122,65 @@ class TestGetMqttToken:
         token = await api_client.get_mqtt_token("beemapp-42-1234567890000")
 
         assert token == "mqtt-jwt-xyz"
-        # Verify correct body was sent.
         body = api_client._session.request.call_args[1]["json"]
         assert body["clientId"] == "beemapp-42-1234567890000"
         assert body["clientType"] == "user"
 
     @pytest.mark.asyncio
-    async def test_rate_limited_returns_none(self, api_client):
-        """When self-imposed rate limit is hit, returns None."""
+    async def test_returns_none_during_429_cooldown(self, api_client):
+        """During 429 cooldown, returns None without making a request."""
         api_client._access_token = "tok-abc"
-        # Fill up the rate-limit bucket.
-        api_client._call_timestamps = [
-            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
-        ]
+        api_client._cooldown_until = datetime.now() + timedelta(minutes=10)
 
         token = await api_client.get_mqtt_token("beemapp-42-1234567890000")
 
         assert token is None
+        api_client._session.request.assert_not_called()
 
 
 # ------------------------------------------------------------------
-# Rate limiting
+# 429 cooldown
 # ------------------------------------------------------------------
 
 
-class TestRateLimiting:
+class TestCooldown:
     @pytest.mark.asyncio
     async def test_429_triggers_cooldown(self, api_client):
         """HTTP 429 puts the client into a 20-minute cooldown."""
         api_client._access_token = "tok-abc"
 
         mock_resp = _mock_response(status=429, ok=False)
-        mock_resp.text = AsyncMock(return_value="Too Many Requests")
         api_client._session.request = AsyncMock(return_value=mock_resp)
 
-        # Use _request directly
-        try:
-            resp = await api_client._request("GET", "https://api.beem.energy/v1/devices")
-        except _RateLimited:
-            pass
+        resp = await api_client._request("GET", "https://api.beem.energy/v1/devices")
 
-        # If the 429 was processed, cooldown should be set
-        assert api_client._cooldown_until is not None or resp is None
+        assert resp is None
+        assert api_client._cooldown_until is not None
+
+    @pytest.mark.asyncio
+    async def test_cooldown_blocks_requests(self, api_client):
+        """During cooldown, _request returns None without calling the API."""
+        api_client._access_token = "tok-abc"
+        api_client._cooldown_until = datetime.now() + timedelta(minutes=10)
+
+        resp = await api_client._request("GET", "https://api.beem.energy/v1/devices")
+
+        assert resp is None
+        api_client._session.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expired_cooldown_allows_requests(self, api_client):
+        """After cooldown expires, requests proceed normally."""
+        api_client._access_token = "tok-abc"
+        api_client._cooldown_until = datetime.now() - timedelta(seconds=1)
+
+        mock_resp = _mock_response(json_data={"ok": True})
+        api_client._session.request = AsyncMock(return_value=mock_resp)
+
+        resp = await api_client._request("GET", "https://api.beem.energy/v1/devices")
+
+        assert resp is not None
+        assert api_client._cooldown_until is None
 
 
 # ------------------------------------------------------------------
@@ -214,7 +229,6 @@ class TestGetConsumptionHistory:
         assert len(results) == 2
         assert results[0][1] == 450.5
         assert results[1][1] == 620.0
-        # Timestamps should be datetime objects
         assert isinstance(results[0][0], datetime)
 
     @pytest.mark.asyncio
@@ -253,7 +267,6 @@ class TestGetConsumptionHistory:
 
         results = await api_client.get_consumption_history(days=14)
 
-        # Should have at least the data from the first successful chunk
         assert len(results) >= 1
 
     @pytest.mark.asyncio
@@ -307,9 +320,7 @@ class TestGetBatteryState:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                # First call: /batteries/{id} returns no SoC
                 return _mock_response(json_data={"id": "bat-123"})
-            # Second call: /devices returns battery with SoC
             return _mock_response(json_data={
                 "batteries": [{
                     "id": "bat-123",
@@ -327,12 +338,10 @@ class TestGetBatteryState:
         assert call_count == 2
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_rate_limited(self, api_client):
-        """Rate-limited client returns None."""
+    async def test_returns_none_during_429_cooldown(self, api_client):
+        """During 429 cooldown, returns None."""
         api_client._access_token = "tok-abc"
-        api_client._call_timestamps = [
-            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
-        ]
+        api_client._cooldown_until = datetime.now() + timedelta(minutes=10)
 
         result = await api_client.get_battery_state()
         assert result is None
@@ -380,12 +389,10 @@ class TestGetControlParameters:
         assert result["canChangeMode"] is True
 
     @pytest.mark.asyncio
-    async def test_rate_limited_returns_none(self, api_client):
-        """Rate-limited client returns None."""
+    async def test_returns_none_during_429_cooldown(self, api_client):
+        """During 429 cooldown, returns None."""
         api_client._access_token = "tok-abc"
-        api_client._call_timestamps = [
-            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
-        ]
+        api_client._cooldown_until = datetime.now() + timedelta(minutes=10)
 
         result = await api_client.get_control_parameters()
         assert result is None
@@ -419,7 +426,6 @@ class TestSetControlParameters:
         result = await api_client.set_control_parameters({"mode": "auto"})
 
         assert result is True
-        # Verify PATCH was called with the params dict
         call_kwargs = api_client._session.request.call_args
         assert call_kwargs[0][0] == "PATCH"
         body = call_kwargs[1]["json"]
@@ -442,12 +448,10 @@ class TestSetControlParameters:
         assert body == {"allowChargeFromGrid": True, "minSoc": 30}
 
     @pytest.mark.asyncio
-    async def test_rate_limited_returns_false(self, api_client):
-        """Rate-limited client returns False."""
+    async def test_returns_false_during_429_cooldown(self, api_client):
+        """During 429 cooldown, returns False."""
         api_client._access_token = "tok-abc"
-        api_client._call_timestamps = [
-            datetime.now() for _ in range(RATE_LIMIT_MAX_CALLS)
-        ]
+        api_client._cooldown_until = datetime.now() + timedelta(minutes=10)
 
         result = await api_client.set_control_parameters({"mode": "auto"})
 
