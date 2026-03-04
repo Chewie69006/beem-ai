@@ -437,7 +437,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.exception("Failed to refresh forecasts")
 
-    # ---- Pre-optimization API refresh (#11) ----
+    # ---- Pre-optimization API refresh (#9) ----
 
     async def async_refresh_battery_from_api(self) -> bool:
         """Refresh battery state from REST API before optimization.

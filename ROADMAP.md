@@ -160,15 +160,7 @@ Implemented in `coordinator.py:_setup_file_logging()` — `RotatingFileHandler` 
 
 ---
 
-## 9. Refresh State from REST API Before Optimization
+## ~~9. Refresh State from REST API Before Optimization~~ ✓ DONE
 
-**Problem:** MQTT is the primary real-time data source, but if MQTT has been disconnected or data is stale when the optimizer runs, the optimization plan is based on outdated SoC/power values.
-
-**Proposed solution:** Immediately before running optimization, fetch current battery state from the Beem REST API to ensure the optimizer always works with fresh data.
-
-**Approach:**
-- Before each optimization run, call the REST API to get current SoC and battery state
-- Update the state store with API values so the optimizer sees fresh data
-- MQTT remains the primary source for real-time entity updates — this is only a pre-optimization refresh
-- Log when the API-fetched SoC differs significantly from the last MQTT value (indicates stale MQTT data)
+Implemented `async_refresh_battery_from_api()` in `coordinator.py` — ready to be called before each optimization run. Maps API fields (`soc`, `solarPower`, `batteryPower`, `meterPower`, `inverterPower`, `globalSoh`) to state store fields. Logs SoC discrepancy warning when MQTT and API values differ by >2%. MQTT remains the primary real-time source; this is a point-in-time refresh for optimization freshness.
 
