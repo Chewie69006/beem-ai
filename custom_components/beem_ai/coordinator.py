@@ -31,6 +31,8 @@ from .const import (
     OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_WATER_HEATER_POWER_SENSOR,
+    OPT_WATER_HEATER_SWITCH,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
 from .forecast_tracker import ForecastTracker
@@ -41,6 +43,7 @@ from .forecasting.solcast import SolcastSource
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
+from .water_heater_controller import WaterHeaterController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._forecast: SolarForecast | None = None
         self._consumption: ConsumptionAnalyzer | None = None
         self._forecast_tracker: ForecastTracker | None = None
+        self._water_heater: WaterHeaterController | None = None
 
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
@@ -88,6 +92,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Persistence directory (set in async_setup)
         self._data_dir: str | None = None
         self._file_log_handler: logging.Handler | None = None
+
+    @property
+    def water_heater(self) -> WaterHeaterController | None:
+        """Return the water heater controller (if configured)."""
+        return self._water_heater
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -156,6 +165,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         self._forecast_tracker = ForecastTracker(data_dir=data_dir)
         self._forecast_tracker.load()
+
+        # Water heater controller (optional)
+        self._setup_water_heater(options)
 
         # Start MQTT (connect() is synchronous — it creates a background task)
         _LOGGER.info("Starting MQTT client")
@@ -337,6 +349,23 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     # ---- Event handlers ----
 
+    def _setup_water_heater(self, options: dict) -> None:
+        """Create or destroy the water heater controller based on options."""
+        switch_id = options.get(OPT_WATER_HEATER_SWITCH, "")
+        power_id = options.get(OPT_WATER_HEATER_POWER_SENSOR, "")
+        if switch_id and power_id:
+            self._water_heater = WaterHeaterController(
+                hass=self.hass,
+                switch_entity_id=switch_id,
+                power_sensor_entity_id=power_id,
+            )
+            _LOGGER.info(
+                "Water heater controller configured: switch=%s, power=%s",
+                switch_id, power_id,
+            )
+        else:
+            self._water_heater = None
+
     def _on_battery_update(self):
         """Handle battery data update from MQTT."""
         # Record consumption
@@ -344,6 +373,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._consumption.record_consumption(
                 self.state_store.battery.consumption_w
             )
+        # Evaluate water heater
+        if self._water_heater:
+            soc = self.state_store.battery.soc
+            export_w = -self.state_store.battery.meter_power_w  # negative = export
+            self.hass.async_create_task(self._water_heater.evaluate(soc, export_w))
         # Trigger entity updates (without logging noise)
         self.async_update_listeners()
 
@@ -383,16 +417,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
             promoted, self._consumption_today_protected,
         )
 
-        # 2. Clear tomorrow override
+        # 2. Reset water heater daily energy
+        if self._water_heater:
+            self._water_heater.reset_daily()
+
+        # 3. Clear tomorrow override
         self._consumption_tomorrow_override = None
 
-        # 3. Persist analytics
+        # 4. Persist analytics
         if self._consumption:
             self._consumption.save()
         if self._forecast_tracker:
             self._forecast_tracker.save()
 
-        # 4. Refresh forecasts → computes fresh tomorrow
+        # 5. Refresh forecasts → computes fresh tomorrow
         await self._refresh_forecasts()
 
         if self._data_dir:
@@ -509,6 +547,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._forecast:
             self._forecast.reconfigure(config)
 
+        # Reconfigure water heater controller
+        self._setup_water_heater(options)
+
     # ---- Enable/disable ----
 
     async def async_set_enabled(self, enabled: bool) -> None:
@@ -612,6 +653,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
+
+        # Turn off water heater if heating
+        if self._water_heater and self._water_heater.is_heating:
+            await self._water_heater._turn_off()
 
         # Stop MQTT
         if self._mqtt_client:

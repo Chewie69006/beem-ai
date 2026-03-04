@@ -10,6 +10,8 @@ import voluptuous as vol
 
 from homeassistant.config_entries import OptionsFlow, ConfigFlowResult
 
+from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+
 from .const import (
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DEFAULT_TARIFF_PERIOD_COUNT,
@@ -21,6 +23,8 @@ from .const import (
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_WATER_HEATER_POWER_SENSOR,
+    OPT_WATER_HEATER_SWITCH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -134,7 +138,7 @@ class BeemAIOptionsFlow(OptionsFlow):
                     }
                 )
             self._options[OPT_TARIFF_PERIODS_JSON] = json.dumps(periods)
-            return self.async_create_entry(title="", data=self._options)
+            return await self.async_step_water_heater()
 
         # Load existing tariff period data for defaults
         existing_periods: list[dict] = []
@@ -176,4 +180,37 @@ class BeemAIOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="tariffs",
             data_schema=vol.Schema(fields),
+        )
+
+    async def async_step_water_heater(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Fourth step — optional water heater entity pickers."""
+        if user_input is not None:
+            self._options[OPT_WATER_HEATER_SWITCH] = user_input.get(
+                OPT_WATER_HEATER_SWITCH, ""
+            )
+            self._options[OPT_WATER_HEATER_POWER_SENSOR] = user_input.get(
+                OPT_WATER_HEATER_POWER_SENSOR, ""
+            )
+            return self.async_create_entry(title="", data=self._options)
+
+        current = self.config_entry.options
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    OPT_WATER_HEATER_SWITCH,
+                    default=current.get(OPT_WATER_HEATER_SWITCH, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="switch")),
+                vol.Optional(
+                    OPT_WATER_HEATER_POWER_SENSOR,
+                    default=current.get(OPT_WATER_HEATER_POWER_SENSOR, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="water_heater",
+            data_schema=schema,
         )

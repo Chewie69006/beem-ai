@@ -17,6 +17,8 @@ from custom_components.beem_ai.const import (
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_WATER_HEATER_POWER_SENSOR,
+    OPT_WATER_HEATER_SWITCH,
 )
 
 
@@ -201,11 +203,12 @@ async def test_step_tariffs_shows_form():
 
 
 @pytest.mark.asyncio
-async def test_step_tariffs_creates_entry():
-    """Tariff input is serialized to JSON and creates entry directly."""
+async def test_step_tariffs_proceeds_to_water_heater():
+    """Tariff input is serialized to JSON and proceeds to water_heater step."""
     flow = _make_flow()
     flow._tariff_period_count = 2
     flow._options = dict(VALID_INIT_INPUT)
+    flow.async_step_water_heater = AsyncMock(return_value="water_heater_result")
 
     tariff_input = {
         "tariff_1_label": "HC",
@@ -220,9 +223,8 @@ async def test_step_tariffs_creates_entry():
 
     await flow.async_step_tariffs(user_input=tariff_input)
 
-    flow.async_create_entry.assert_called_once()
-    saved_data = flow.async_create_entry.call_args.kwargs["data"]
-    periods_json = saved_data[OPT_TARIFF_PERIODS_JSON]
+    flow.async_step_water_heater.assert_called_once()
+    periods_json = flow._options[OPT_TARIFF_PERIODS_JSON]
     assert isinstance(periods_json, str)
     periods = json.loads(periods_json)
     assert len(periods) == 2
@@ -259,13 +261,80 @@ async def test_step_tariffs_existing_defaults():
 
 
 # ------------------------------------------------------------------
-# Full flow: init -> solcast -> tariffs -> entry
+# async_step_water_heater
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_step_water_heater_shows_form():
+    """No input shows the water heater form with entity pickers."""
+    flow = _make_flow()
+
+    await flow.async_step_water_heater(user_input=None)
+
+    flow.async_show_form.assert_called_once()
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "water_heater"
+
+
+@pytest.mark.asyncio
+async def test_step_water_heater_with_existing_values():
+    """Existing entity IDs populate form defaults."""
+    existing_options = {
+        OPT_WATER_HEATER_SWITCH: "switch.water_heater",
+        OPT_WATER_HEATER_POWER_SENSOR: "sensor.water_heater_power",
+    }
+    flow = _make_flow(options=existing_options)
+
+    await flow.async_step_water_heater(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    for key_obj in schema.schema:
+        key_str = str(key_obj)
+        if key_str == OPT_WATER_HEATER_SWITCH:
+            assert key_obj.default() == "switch.water_heater"
+        elif key_str == OPT_WATER_HEATER_POWER_SENSOR:
+            assert key_obj.default() == "sensor.water_heater_power"
+
+
+@pytest.mark.asyncio
+async def test_step_water_heater_creates_entry():
+    """Water heater input stores entities and creates entry."""
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_water_heater(user_input={
+        OPT_WATER_HEATER_SWITCH: "switch.boiler",
+        OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
+    })
+
+    flow.async_create_entry.assert_called_once()
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
+    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
+
+
+@pytest.mark.asyncio
+async def test_step_water_heater_empty_creates_entry():
+    """Empty water heater input stores empty strings and creates entry."""
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_water_heater(user_input={})
+
+    flow.async_create_entry.assert_called_once()
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved_data[OPT_WATER_HEATER_SWITCH] == ""
+    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == ""
+
+
+# ------------------------------------------------------------------
+# Full flow: init -> solcast -> tariffs -> water_heater -> entry
 # ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_full_flow():
-    """End-to-end: init -> solcast -> tariffs -> create_entry."""
+    """End-to-end: init -> solcast -> tariffs -> water_heater -> create_entry."""
     flow = _make_flow()
 
     # Step 1: init -> shows solcast form
@@ -282,7 +351,7 @@ async def test_full_flow():
     flow.async_show_form.assert_called_once()
     assert flow.async_show_form.call_args.kwargs["step_id"] == "tariffs"
 
-    # Step 3: tariffs -> creates entry
+    # Step 3: tariffs -> shows water_heater form
     flow.async_show_form.reset_mock()
     tariff_input = {
         "tariff_1_label": "HC",
@@ -295,6 +364,15 @@ async def test_full_flow():
         "tariff_2_price": 0.12,
     }
     await flow.async_step_tariffs(user_input=tariff_input)
+    flow.async_show_form.assert_called_once()
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "water_heater"
+
+    # Step 4: water_heater -> creates entry
+    flow.async_show_form.reset_mock()
+    await flow.async_step_water_heater(user_input={
+        OPT_WATER_HEATER_SWITCH: "switch.boiler",
+        OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
+    })
 
     # Should create entry
     flow.async_create_entry.assert_called_once()
@@ -304,6 +382,8 @@ async def test_full_flow():
     assert saved_data[OPT_LOCATION_LAT] == 48.85
     assert OPT_TARIFF_PERIODS_JSON in saved_data
     assert OPT_SOLCAST_SITE_IDS_JSON in saved_data
+    assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
+    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
 
     # Verify Solcast site IDs
     site_ids = json.loads(saved_data[OPT_SOLCAST_SITE_IDS_JSON])

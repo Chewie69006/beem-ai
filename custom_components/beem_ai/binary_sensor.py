@@ -29,4 +29,13 @@ async def async_setup_entry(
             value_fn=lambda c: c.state_store.mqtt_connected,
             device_type="system",
         ),
+        BeemAIBinarySensor(
+            coordinator, entry,
+            key="water_heater_heating",
+            name="Water Heater",
+            icon="mdi:water-boiler",
+            device_class=None,
+            value_fn=lambda c: c.water_heater.is_heating if c.water_heater else False,
+            device_type="system",
+        ),
     ])

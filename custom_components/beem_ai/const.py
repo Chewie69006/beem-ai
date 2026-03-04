@@ -23,6 +23,8 @@ OPT_SOLCAST_SITE_IDS_JSON = "solcast_site_ids_json"
 OPT_TARIFF_DEFAULT_PRICE = "tariff_default_price"
 OPT_TARIFF_PERIODS_JSON = "tariff_periods_json"
 OPT_TARIFF_PERIOD_COUNT = "tariff_period_count"
+OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
+OPT_WATER_HEATER_POWER_SENSOR = "water_heater_power_entity"
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27
