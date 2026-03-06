@@ -70,6 +70,11 @@ class WaterHeaterController:
         if soc > SOC_START_THRESHOLD and export_w >= EXPORT_MIN_W:
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
+                _LOGGER.info(
+                    "Water heater: surplus detected — SoC=%.1f%%, export=%.0fW, "
+                    "waiting %ds sustained before turning on",
+                    soc, export_w, SUSTAIN_SECONDS,
+                )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
                 _LOGGER.info(
                     "Solar surplus detected: SoC=%.1f%%, export=%.0fW "
