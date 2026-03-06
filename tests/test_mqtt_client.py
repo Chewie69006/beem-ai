@@ -104,6 +104,31 @@ class TestHandleMessage:
         assert bat.cycle_count == 42
         assert bat.capacity_kwh == 13.4
 
+    def test_field_mapping_snake_case(self, mqtt_client, state_store):
+        """Snake_case MQTT keys are mapped correctly (actual streaming format)."""
+        payload = {
+            "soc": 80.0,
+            "solar_power": 2000,
+            "battery_power": 500,
+            "grid_power": -300,
+            "inverter_power": 1800,
+            "mppt1_power": 700,
+            "mppt2_power": 600,
+            "mppt3_power": 500,
+        }
+        msg = self._make_msg(payload)
+        mqtt_client._handle_message(msg)
+
+        bat = state_store.battery
+        assert bat.soc == 80.0
+        assert bat.solar_power_w == 2000
+        assert bat.battery_power_w == 500
+        assert bat.meter_power_w == -300
+        assert bat.inverter_power_w == 1800
+        assert bat.mppt1_w == 700
+        assert bat.mppt2_w == 600
+        assert bat.mppt3_w == 500
+
     def test_unknown_fields_ignored(self, mqtt_client, state_store):
         """Fields not in _FIELD_MAP are silently ignored."""
         msg = self._make_msg({"unknownField": 999, "soc": 60})
@@ -127,9 +152,13 @@ class TestHandleMessage:
 
 class TestFieldMap:
     def test_field_map_keys(self):
-        """Verify _FIELD_MAP contains expected API field names."""
+        """Verify _FIELD_MAP contains expected field names (snake_case + camelCase)."""
         expected_keys = {
-            "soc", "solarPower", "batteryPower", "meterPower",
+            # snake_case (MQTT streaming)
+            "soc", "solar_power", "battery_power", "grid_power",
+            "inverter_power", "mppt1_power", "mppt2_power", "mppt3_power",
+            # camelCase (REST/legacy)
+            "solarPower", "batteryPower", "meterPower",
             "inverterPower", "mppt1Power", "mppt2Power", "mppt3Power",
             "workingModeLabel", "globalSoh", "numberOfCycles", "capacityInKwh",
         }

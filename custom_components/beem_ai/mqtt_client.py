@@ -28,8 +28,20 @@ RECONNECT_MIN_SECONDS = 1
 RECONNECT_MAX_SECONDS = 60
 
 # Field mapping from Beem MQTT JSON to StateStore BatteryState attributes.
+# The MQTT payload uses snake_case keys (solar_power, battery_power, etc.)
+# while the REST API uses camelCase (solarPower, batteryPower, etc.).
+# We map both formats for robustness.
 _FIELD_MAP = {
+    # snake_case (MQTT streaming payload)
     "soc": "soc",
+    "solar_power": "solar_power_w",
+    "battery_power": "battery_power_w",
+    "grid_power": "meter_power_w",
+    "inverter_power": "inverter_power_w",
+    "mppt1_power": "mppt1_w",
+    "mppt2_power": "mppt2_w",
+    "mppt3_power": "mppt3_w",
+    # camelCase (REST API / legacy)
     "solarPower": "solar_power_w",
     "batteryPower": "battery_power_w",
     "meterPower": "meter_power_w",
