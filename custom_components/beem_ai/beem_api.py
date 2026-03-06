@@ -411,6 +411,31 @@ class BeemApiClient:
         return data_map
 
     # ------------------------------------------------------------------
+    # Data stream activation (MQTT keepalive)
+    # ------------------------------------------------------------------
+
+    async def activate_data_stream(self, client_id: str) -> bool:
+        """Activate MQTT streaming via POST /batteries/{id}/data-stream.
+
+        The Beem backend only publishes power data (solarPower, batteryPower,
+        meterPower, etc.) after this endpoint is called. Must be repeated
+        periodically (every ~2 min) as a keepalive.
+        """
+        url = (
+            f"{self._api_base}/batteries/{self._battery_id}/data-stream"
+            f"?clientId={client_id}"
+        )
+        log.info("REST: POST %s (activate data stream)", url)
+
+        resp = await self._request("POST", url)
+        if resp is None:
+            log.warning("REST: failed to activate data stream")
+            return False
+
+        log.info("REST: data stream activated for clientId=%s", client_id)
+        return True
+
+    # ------------------------------------------------------------------
     # Battery control parameters
     # ------------------------------------------------------------------
 

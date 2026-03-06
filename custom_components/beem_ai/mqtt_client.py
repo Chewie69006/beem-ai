@@ -20,6 +20,9 @@ MQTT_PATH = "/mqtt"
 # Token refresh interval (50 minutes, matching REST JWT cadence).
 TOKEN_REFRESH_SECONDS = 50 * 60
 
+# Data stream keepalive interval (2 minutes, matching reference integration).
+DATA_STREAM_KEEPALIVE_SECONDS = 2 * 60
+
 # Reconnection backoff parameters.
 RECONNECT_MIN_SECONDS = 1
 RECONNECT_MAX_SECONDS = 60
@@ -156,14 +159,25 @@ class BeemMqttClient:
                     await client.subscribe(self._topic)
                     log.info("MQTT: connected — subscribed to %s", self._topic)
 
+                    # Activate data stream so backend publishes power data
+                    await self._api_client.activate_data_stream(client_id)
+
                     refresh_task = asyncio.create_task(self._token_refresh_timer())
+                    keepalive_task = asyncio.create_task(
+                        self._data_stream_keepalive(client_id)
+                    )
                     try:
                         async for message in client.messages:
                             self._handle_message(message)
                     finally:
                         refresh_task.cancel()
+                        keepalive_task.cancel()
                         try:
                             await refresh_task
+                        except asyncio.CancelledError:
+                            pass
+                        try:
+                            await keepalive_task
                         except asyncio.CancelledError:
                             pass
 
@@ -222,6 +236,13 @@ class BeemMqttClient:
     # ------------------------------------------------------------------
     # Token refresh
     # ------------------------------------------------------------------
+
+    async def _data_stream_keepalive(self, client_id: str) -> None:
+        """Periodically re-activate the data stream to keep power data flowing."""
+        while True:
+            await asyncio.sleep(DATA_STREAM_KEEPALIVE_SECONDS)
+            log.debug("MQTT: data stream keepalive for clientId=%s", client_id)
+            await self._api_client.activate_data_stream(client_id)
 
     async def _token_refresh_timer(self) -> None:
         """Sleep then raise _TokenExpired to force reconnection with a new token."""
