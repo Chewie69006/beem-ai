@@ -76,7 +76,7 @@ class TestHandleMessage:
             "soc": 80.0,
             "solarPower": 2000,
             "batteryPower": 500,
-            "meterPower": -300,
+            "meterPower": 300,  # Beem: positive=export
             "inverterPower": 1800,
             "mppt1Power": 700,
             "mppt2Power": 600,
@@ -94,7 +94,7 @@ class TestHandleMessage:
         assert bat.soc == 80.0
         assert bat.solar_power_w == 2000
         assert bat.battery_power_w == 500
-        assert bat.meter_power_w == -300
+        assert bat.meter_power_w == -300  # negated: positive=import in state_store
         assert bat.inverter_power_w == 1800
         assert bat.mppt1_w == 700
         assert bat.mppt2_w == 600
@@ -110,7 +110,7 @@ class TestHandleMessage:
             "soc": 80.0,
             "solar_power": 2000,
             "battery_power": 500,
-            "grid_power": -300,
+            "grid_power": 700,  # Beem: positive=export (700W injected)
             "inverter_power": 1800,
             "mppt1_power": 700,
             "mppt2_power": 600,
@@ -123,7 +123,9 @@ class TestHandleMessage:
         assert bat.soc == 80.0
         assert bat.solar_power_w == 2000
         assert bat.battery_power_w == 500
-        assert bat.meter_power_w == -300
+        assert bat.meter_power_w == -700  # negated: state_store positive=import
+        assert bat.is_exporting is True
+        assert bat.export_power_w == 700
         assert bat.inverter_power_w == 1800
         assert bat.mppt1_w == 700
         assert bat.mppt2_w == 600

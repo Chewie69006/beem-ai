@@ -376,7 +376,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Evaluate water heater
         if self._water_heater:
             soc = self.state_store.battery.soc
-            export_w = -self.state_store.battery.meter_power_w  # negative = export
+            export_w = self.state_store.battery.export_power_w
             self.hass.async_create_task(self._water_heater.evaluate(soc, export_w))
         # Trigger entity updates (without logging noise)
         self.async_update_listeners()

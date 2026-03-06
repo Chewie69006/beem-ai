@@ -227,6 +227,11 @@ class BeemMqttClient:
             if api_field in payload:
                 updates[state_field] = payload[api_field]
 
+        # MQTT grid_power is positive=export, but state_store convention
+        # is positive=import. Negate at ingestion to keep everything consistent.
+        if "meter_power_w" in updates:
+            updates["meter_power_w"] = -updates["meter_power_w"]
+
         if not updates:
             log.debug("MQTT: message had no recognised battery fields")
             return
