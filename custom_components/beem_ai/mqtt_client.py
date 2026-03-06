@@ -206,6 +206,16 @@ class BeemMqttClient:
             return
 
         self._state_store.update_battery(**updates)
+
+        # Log live data on every MQTT update
+        b = self._state_store.battery
+        log.info(
+            "MQTT update: SoC=%.1f%% solar=%.0fW bat=%.0fW grid=%.0fW "
+            "consumption=%.0fW inverter=%.0fW SoH=%.1f%%",
+            b.soc, b.solar_power_w, b.battery_power_w, b.meter_power_w,
+            b.consumption_w, b.inverter_power_w, b.soh,
+        )
+
         if self._on_update:
             self._on_update()
 
