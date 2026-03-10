@@ -17,6 +17,8 @@ from custom_components.beem_ai.const import (
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
 )
@@ -297,44 +299,111 @@ async def test_step_water_heater_with_existing_values():
 
 
 @pytest.mark.asyncio
-async def test_step_water_heater_creates_entry():
-    """Water heater input stores entities and creates entry."""
+async def test_step_water_heater_proceeds_to_ev_charger():
+    """Water heater input stores entities and proceeds to ev_charger step."""
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
+    flow.async_step_ev_charger = AsyncMock(return_value="ev_charger_result")
 
     await flow.async_step_water_heater(user_input={
         OPT_WATER_HEATER_SWITCH: "switch.boiler",
         OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
     })
 
-    flow.async_create_entry.assert_called_once()
-    saved_data = flow.async_create_entry.call_args.kwargs["data"]
-    assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
-    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
+    flow.async_step_ev_charger.assert_called_once()
+    assert flow._options[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
+    assert flow._options[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
 
 
 @pytest.mark.asyncio
-async def test_step_water_heater_empty_creates_entry():
-    """Empty water heater input stores empty strings and creates entry."""
+async def test_step_water_heater_empty_proceeds_to_ev_charger():
+    """Empty water heater input stores empty strings and proceeds to ev_charger."""
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
+    flow.async_step_ev_charger = AsyncMock(return_value="ev_charger_result")
 
     await flow.async_step_water_heater(user_input={})
 
-    flow.async_create_entry.assert_called_once()
-    saved_data = flow.async_create_entry.call_args.kwargs["data"]
-    assert saved_data[OPT_WATER_HEATER_SWITCH] == ""
-    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == ""
+    flow.async_step_ev_charger.assert_called_once()
+    assert flow._options[OPT_WATER_HEATER_SWITCH] == ""
+    assert flow._options[OPT_WATER_HEATER_POWER_SENSOR] == ""
 
 
 # ------------------------------------------------------------------
-# Full flow: init -> solcast -> tariffs -> water_heater -> entry
+# async_step_ev_charger
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_step_ev_charger_shows_form():
+    """No input shows the EV charger form with entity pickers."""
+    flow = _make_flow()
+
+    await flow.async_step_ev_charger(user_input=None)
+
+    flow.async_show_form.assert_called_once()
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "ev_charger"
+
+
+@pytest.mark.asyncio
+async def test_step_ev_charger_with_existing_values():
+    """Existing entity IDs populate form defaults."""
+    existing_options = {
+        OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
+        OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
+    }
+    flow = _make_flow(options=existing_options)
+
+    await flow.async_step_ev_charger(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    for key_obj in schema.schema:
+        key_str = str(key_obj)
+        if key_str == OPT_EV_CHARGER_TOGGLE:
+            assert key_obj.default() == "switch.ev_charger"
+        elif key_str == OPT_EV_CHARGER_POWER:
+            assert key_obj.default() == "number.ev_charger_amps"
+
+
+@pytest.mark.asyncio
+async def test_step_ev_charger_creates_entry():
+    """EV charger input stores entities and creates entry."""
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_ev_charger(user_input={
+        OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
+        OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
+    })
+
+    flow.async_create_entry.assert_called_once()
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
+    assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
+
+
+@pytest.mark.asyncio
+async def test_step_ev_charger_empty_creates_entry():
+    """Empty EV charger input stores empty strings and creates entry."""
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_ev_charger(user_input={})
+
+    flow.async_create_entry.assert_called_once()
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved_data[OPT_EV_CHARGER_TOGGLE] == ""
+    assert saved_data[OPT_EV_CHARGER_POWER] == ""
+
+
+# ------------------------------------------------------------------
+# Full flow: init -> solcast -> tariffs -> water_heater -> ev_charger -> entry
 # ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_full_flow():
-    """End-to-end: init -> solcast -> tariffs -> water_heater -> create_entry."""
+    """End-to-end: init -> solcast -> tariffs -> water_heater -> ev_charger -> create_entry."""
     flow = _make_flow()
 
     # Step 1: init -> shows solcast form
@@ -367,11 +436,20 @@ async def test_full_flow():
     flow.async_show_form.assert_called_once()
     assert flow.async_show_form.call_args.kwargs["step_id"] == "water_heater"
 
-    # Step 4: water_heater -> creates entry
+    # Step 4: water_heater -> shows ev_charger form
     flow.async_show_form.reset_mock()
     await flow.async_step_water_heater(user_input={
         OPT_WATER_HEATER_SWITCH: "switch.boiler",
         OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
+    })
+    flow.async_show_form.assert_called_once()
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "ev_charger"
+
+    # Step 5: ev_charger -> creates entry
+    flow.async_show_form.reset_mock()
+    await flow.async_step_ev_charger(user_input={
+        OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
+        OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
     })
 
     # Should create entry
@@ -384,6 +462,8 @@ async def test_full_flow():
     assert OPT_SOLCAST_SITE_IDS_JSON in saved_data
     assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
     assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
+    assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
+    assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
 
     # Verify Solcast site IDs
     site_ids = json.loads(saved_data[OPT_SOLCAST_SITE_IDS_JSON])

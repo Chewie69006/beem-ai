@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Thresholds
 SOC_START_THRESHOLD = 95.0  # Start heating above this SoC
-SOC_STOP_THRESHOLD = 90.0   # Stop heating at or below this SoC
+SOC_STOP_THRESHOLD = 90.0   # Stop heating below this SoC
 EXPORT_MIN_W = 500           # Minimum export power (W)
 SUSTAIN_SECONDS = 30         # Export must be sustained for this long
 
@@ -94,7 +94,7 @@ class WaterHeaterController:
         # Accumulate energy
         self._accumulate_energy(now)
 
-        if soc <= SOC_STOP_THRESHOLD:
+        if soc < SOC_STOP_THRESHOLD:
             _LOGGER.info(
                 "Battery SoC dropped to %.1f%% — turning off water heater "
                 "(accumulated %.3f kWh)",

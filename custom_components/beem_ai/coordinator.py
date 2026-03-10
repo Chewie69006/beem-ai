@@ -31,6 +31,8 @@ from .const import (
     OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
 )
@@ -43,6 +45,7 @@ from .forecasting.solcast import SolcastSource
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
+from .ev_charger_controller import EvChargerController
 from .water_heater_controller import WaterHeaterController
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,6 +80,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._consumption: ConsumptionAnalyzer | None = None
         self._forecast_tracker: ForecastTracker | None = None
         self._water_heater: WaterHeaterController | None = None
+        self._ev_charger: EvChargerController | None = None
 
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
@@ -97,6 +101,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
     def water_heater(self) -> WaterHeaterController | None:
         """Return the water heater controller (if configured)."""
         return self._water_heater
+
+    @property
+    def ev_charger(self) -> EvChargerController | None:
+        """Return the EV charger controller (if configured)."""
+        return self._ev_charger
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -168,6 +177,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Water heater controller (optional)
         self._setup_water_heater(options)
+
+        # EV charger controller (optional, second-priority after water heater)
+        self._setup_ev_charger(options)
 
         # Start MQTT (connect() is synchronous — it creates a background task)
         _LOGGER.info("Starting MQTT client")
@@ -366,6 +378,23 @@ class BeemAICoordinator(DataUpdateCoordinator):
         else:
             self._water_heater = None
 
+    def _setup_ev_charger(self, options: dict) -> None:
+        """Create or destroy the EV charger controller based on options."""
+        toggle_id = options.get(OPT_EV_CHARGER_TOGGLE, "")
+        power_id = options.get(OPT_EV_CHARGER_POWER, "")
+        if toggle_id and power_id:
+            self._ev_charger = EvChargerController(
+                hass=self.hass,
+                toggle_entity_id=toggle_id,
+                power_entity_id=power_id,
+            )
+            _LOGGER.info(
+                "EV charger controller configured: toggle=%s, power=%s",
+                toggle_id, power_id,
+            )
+        else:
+            self._ev_charger = None
+
     def _on_battery_update(self):
         """Handle battery data update from MQTT."""
         # Record consumption
@@ -373,13 +402,27 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._consumption.record_consumption(
                 self.state_store.battery.consumption_w
             )
-        # Evaluate water heater
-        if self._water_heater:
+        # Evaluate surplus diverters (water heater first, then EV charger)
+        if self._water_heater or self._ev_charger:
             soc = self.state_store.battery.soc
             export_w = self.state_store.battery.export_power_w
-            self.hass.async_create_task(self._water_heater.evaluate(soc, export_w))
+            self.hass.async_create_task(
+                self._evaluate_surplus_diverters(soc, export_w)
+            )
         # Trigger entity updates (without logging noise)
         self.async_update_listeners()
+
+    async def _evaluate_surplus_diverters(
+        self, soc: float, export_w: float
+    ) -> None:
+        """Evaluate water heater then EV charger sequentially."""
+        if self._water_heater:
+            await self._water_heater.evaluate(soc, export_w)
+        if self._ev_charger:
+            wh_heating = (
+                self._water_heater.is_heating if self._water_heater else False
+            )
+            await self._ev_charger.evaluate(soc, export_w, wh_heating)
 
     # ---- Scheduled callbacks ----
 
@@ -547,8 +590,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._forecast:
             self._forecast.reconfigure(config)
 
-        # Reconfigure water heater controller
+        # Reconfigure water heater and EV charger controllers
         self._setup_water_heater(options)
+        self._setup_ev_charger(options)
 
     # ---- Enable/disable ----
 
@@ -653,6 +697,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
+
+        # Turn off EV charger if charging (before water heater)
+        if self._ev_charger and self._ev_charger.is_charging:
+            await self._ev_charger._turn_off()
 
         # Turn off water heater if heating
         if self._water_heater and self._water_heater.is_heating:

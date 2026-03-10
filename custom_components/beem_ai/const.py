@@ -25,6 +25,8 @@ OPT_TARIFF_PERIODS_JSON = "tariff_periods_json"
 OPT_TARIFF_PERIOD_COUNT = "tariff_period_count"
 OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
 OPT_WATER_HEATER_POWER_SENSOR = "water_heater_power_entity"
+OPT_EV_CHARGER_TOGGLE = "ev_charger_toggle_entity"
+OPT_EV_CHARGER_POWER = "ev_charger_power_entity"
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27

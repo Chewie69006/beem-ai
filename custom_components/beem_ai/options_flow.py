@@ -23,6 +23,8 @@ from .const import (
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
 )
@@ -193,7 +195,7 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_WATER_HEATER_POWER_SENSOR] = user_input.get(
                 OPT_WATER_HEATER_POWER_SENSOR, ""
             )
-            return self.async_create_entry(title="", data=self._options)
+            return await self.async_step_ev_charger()
 
         current = self.config_entry.options
 
@@ -212,5 +214,38 @@ class BeemAIOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="water_heater",
+            data_schema=schema,
+        )
+
+    async def async_step_ev_charger(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Fifth step — optional EV charger entity pickers."""
+        if user_input is not None:
+            self._options[OPT_EV_CHARGER_TOGGLE] = user_input.get(
+                OPT_EV_CHARGER_TOGGLE, ""
+            )
+            self._options[OPT_EV_CHARGER_POWER] = user_input.get(
+                OPT_EV_CHARGER_POWER, ""
+            )
+            return self.async_create_entry(title="", data=self._options)
+
+        current = self.config_entry.options
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    OPT_EV_CHARGER_TOGGLE,
+                    default=current.get(OPT_EV_CHARGER_TOGGLE, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="switch")),
+                vol.Optional(
+                    OPT_EV_CHARGER_POWER,
+                    default=current.get(OPT_EV_CHARGER_POWER, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="number")),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="ev_charger",
             data_schema=schema,
         )

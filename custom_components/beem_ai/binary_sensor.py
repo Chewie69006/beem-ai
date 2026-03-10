@@ -38,4 +38,13 @@ async def async_setup_entry(
             value_fn=lambda c: c.water_heater.is_heating if c.water_heater else False,
             device_type="system",
         ),
+        BeemAIBinarySensor(
+            coordinator, entry,
+            key="ev_charger_charging",
+            name="EV Charger",
+            icon="mdi:ev-station",
+            device_class=None,
+            value_fn=lambda c: c.ev_charger.is_charging if c.ev_charger else False,
+            device_type="system",
+        ),
     ])

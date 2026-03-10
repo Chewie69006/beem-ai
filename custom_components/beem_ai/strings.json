@@ -58,6 +58,30 @@
           "solcast_site_3_id": "Solcast resource ID for solar array 4 (optional)."
         }
       },
+      "water_heater": {
+        "title": "Water Heater",
+        "description": "Optionally configure a water heater as a solar surplus diverter.",
+        "data": {
+          "water_heater_switch_entity": "Water heater switch",
+          "water_heater_power_entity": "Water heater power sensor"
+        },
+        "data_description": {
+          "water_heater_switch_entity": "A switch entity to turn the water heater on/off.",
+          "water_heater_power_entity": "A sensor entity that measures water heater power consumption (W)."
+        }
+      },
+      "ev_charger": {
+        "title": "EV Charger",
+        "description": "Optionally configure an EV charger as a second-priority solar surplus diverter. Requires the water heater to be active first.",
+        "data": {
+          "ev_charger_toggle_entity": "EV charger start/stop switch",
+          "ev_charger_power_entity": "EV charger amperage control"
+        },
+        "data_description": {
+          "ev_charger_toggle_entity": "A switch entity that starts/stops EV charging.",
+          "ev_charger_power_entity": "A number entity (6-32A) that controls the wallbox charging amperage."
+        }
+      },
       "tariffs": {
         "title": "Tariff Periods",
         "description": "Configure your electricity tariff periods. Each period has a label, time range, and price.",

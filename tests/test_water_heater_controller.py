@@ -139,8 +139,8 @@ async def test_sustain_timer_resets_when_export_drops():
 
 
 @pytest.mark.asyncio
-async def test_stops_when_soc_drops_to_threshold():
-    """SoC drops to stop threshold → turns off heater."""
+async def test_stays_heating_at_exact_threshold():
+    """SoC exactly at stop threshold (90%) — stays HEATING (< required)."""
     ctrl, hass = _make_controller()
 
     # Get into HEATING state
@@ -151,9 +151,30 @@ async def test_stops_when_soc_drops_to_threshold():
     assert ctrl._state == HeaterState.HEATING
     hass.services.async_call.reset_mock()
 
-    # SoC drops to threshold
+    # SoC at threshold — stays HEATING
     with patch("time.monotonic", return_value=1100.0):
         await ctrl.evaluate(soc=SOC_STOP_THRESHOLD, export_w=0)
+
+    assert ctrl._state == HeaterState.HEATING
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stops_when_soc_drops_below_threshold():
+    """SoC drops below stop threshold → turns off heater."""
+    ctrl, hass = _make_controller()
+
+    # Get into HEATING state
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.evaluate(soc=96.0, export_w=600)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await ctrl.evaluate(soc=96.0, export_w=600)
+    assert ctrl._state == HeaterState.HEATING
+    hass.services.async_call.reset_mock()
+
+    # SoC drops below threshold
+    with patch("time.monotonic", return_value=1100.0):
+        await ctrl.evaluate(soc=SOC_STOP_THRESHOLD - 1, export_w=0)
 
     assert ctrl._state == HeaterState.IDLE
     assert ctrl.is_heating is False
