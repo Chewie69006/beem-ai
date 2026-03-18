@@ -27,6 +27,8 @@ async def async_setup_entry(
         BeemAIConsumptionForecastTomorrowNumber(coordinator, entry),
         BeemAIMinSocNumber(coordinator, entry),
         BeemAIMaxSocNumber(coordinator, entry),
+        BeemAIWaterHeaterSocThreshold(coordinator, entry),
+        BeemAIWaterHeaterChargePowerThreshold(coordinator, entry),
     ])
 
 
@@ -147,4 +149,74 @@ class BeemAIMaxSocNumber(CoordinatorEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set the maximum SoC."""
         await self.coordinator.async_set_battery_control(max_soc=int(value))
+        self.async_write_ha_state()
+
+
+class BeemAIWaterHeaterSocThreshold(CoordinatorEntity, NumberEntity):
+    """Water heater SoC threshold (%)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Water Heater SoC Threshold"
+    _attr_icon = "mdi:battery-check"
+    _attr_native_min_value = 50
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "wh_soc_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_wh_soc_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.water_heater is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.wh_soc_threshold
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.wh_soc_threshold = value
+        self.async_write_ha_state()
+
+
+class BeemAIWaterHeaterChargePowerThreshold(CoordinatorEntity, NumberEntity):
+    """Water heater charging power threshold (W)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Water Heater Charge Power Threshold"
+    _attr_icon = "mdi:lightning-bolt"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 5000
+    _attr_native_step = 50
+    _attr_native_unit_of_measurement = "W"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "wh_charge_power_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_wh_charge_power_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.water_heater is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.wh_charge_power_threshold
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.wh_charge_power_threshold = value
         self.async_write_ha_state()

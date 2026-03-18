@@ -10,11 +10,11 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
-# Thresholds
-SOC_START_THRESHOLD = 95.0  # Start heating above this SoC
-SOC_STOP_THRESHOLD = 90.0   # Stop heating below this SoC
-EXPORT_MIN_W = 500           # Minimum export power (W)
-SUSTAIN_SECONDS = 30         # Export must be sustained for this long
+# Rule 1: hardcoded "final boss" — always active
+EXPORT_SOC_THRESHOLD = 95.0  # SoC must be > this AND exporting
+
+SUSTAIN_SECONDS = 30  # Conditions must be sustained for this long
+HYSTERESIS_PCT = 5.0  # SoC hysteresis to prevent cycling
 
 
 class HeaterState(enum.Enum):
@@ -38,7 +38,8 @@ class WaterHeaterController:
         self._power_sensor_entity_id = power_sensor_entity_id
 
         self._state = HeaterState.IDLE
-        self._export_sustained_since: float | None = None
+        self._sustained_since: float | None = None
+        self._active_soc_threshold: float = EXPORT_SOC_THRESHOLD
         self._accumulated_kwh: float = 0.0
         self._last_accumulate_time: float | None = None
 
@@ -56,49 +57,92 @@ class WaterHeaterController:
 
     # -- Core evaluate (called on every MQTT update) --
 
-    async def evaluate(self, soc: float, export_w: float) -> None:
-        """Evaluate state machine and act."""
+    async def evaluate(
+        self,
+        soc: float,
+        export_w: float,
+        charge_power_w: float,
+        soc_threshold: float,
+        charge_power_threshold: float,
+    ) -> None:
+        """Evaluate state machine and act.
+
+        Two independent rules can start heating:
+          Rule 1 (hardcoded):     SoC > 95% AND exporting to grid
+          Rule 2 (configurable):  SoC > soc_threshold AND charge_power >= charge_power_threshold
+
+        Stop: SoC < (active rule's SoC threshold) - HYSTERESIS_PCT
+        """
         now = time.monotonic()
 
         if self._state == HeaterState.IDLE:
-            await self._evaluate_idle(soc, export_w, now)
+            await self._evaluate_idle(
+                soc, export_w, charge_power_w,
+                soc_threshold, charge_power_threshold, now,
+            )
         elif self._state == HeaterState.HEATING:
             await self._evaluate_heating(soc, now)
 
-    async def _evaluate_idle(self, soc: float, export_w: float, now: float) -> None:
-        """IDLE state: check if we should start heating."""
-        if soc > SOC_START_THRESHOLD and export_w >= EXPORT_MIN_W:
-            if self._export_sustained_since is None:
-                self._export_sustained_since = now
+    async def _evaluate_idle(
+        self,
+        soc: float,
+        export_w: float,
+        charge_power_w: float,
+        soc_threshold: float,
+        charge_power_threshold: float,
+        now: float,
+    ) -> None:
+        """IDLE state: check if either rule triggers."""
+        # Rule 1: hardcoded — SoC > 95% AND exporting
+        rule1 = soc > EXPORT_SOC_THRESHOLD and export_w > 0
+        # Rule 2: configurable — SoC > threshold AND charging above threshold
+        rule2 = soc > soc_threshold and charge_power_w >= charge_power_threshold
+
+        if rule1 or rule2:
+            # Pick the active SoC threshold (lowest wins — more permissive stop)
+            if rule1 and rule2:
+                active_soc = min(EXPORT_SOC_THRESHOLD, soc_threshold)
+            elif rule1:
+                active_soc = EXPORT_SOC_THRESHOLD
+            else:
+                active_soc = soc_threshold
+
+            reason = (
+                f"export={export_w:.0f}W" if rule1
+                else f"charge={charge_power_w:.0f}W"
+            )
+
+            if self._sustained_since is None:
+                self._sustained_since = now
                 _LOGGER.info(
-                    "Water heater: surplus detected — SoC=%.1f%%, export=%.0fW, "
+                    "Water heater: surplus detected — SoC=%.1f%%, %s, "
                     "waiting %ds sustained before turning on",
-                    soc, export_w, SUSTAIN_SECONDS,
+                    soc, reason, SUSTAIN_SECONDS,
                 )
-            elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
+            elif now - self._sustained_since >= SUSTAIN_SECONDS:
                 _LOGGER.info(
-                    "Solar surplus detected: SoC=%.1f%%, export=%.0fW "
+                    "Solar surplus detected: SoC=%.1f%%, %s "
                     "(sustained %.0fs) — turning on water heater",
-                    soc, export_w, now - self._export_sustained_since,
+                    soc, reason, now - self._sustained_since,
                 )
+                self._active_soc_threshold = active_soc
                 await self._turn_on()
                 self._state = HeaterState.HEATING
                 self._last_accumulate_time = now
-                self._export_sustained_since = None
+                self._sustained_since = None
         else:
-            # Reset sustain timer if conditions not met
-            self._export_sustained_since = None
+            self._sustained_since = None
 
     async def _evaluate_heating(self, soc: float, now: float) -> None:
         """HEATING state: accumulate energy, check if we should stop."""
-        # Accumulate energy
         self._accumulate_energy(now)
 
-        if soc < SOC_STOP_THRESHOLD:
+        stop_threshold = self._active_soc_threshold - HYSTERESIS_PCT
+        if soc < stop_threshold:
             _LOGGER.info(
-                "Battery SoC dropped to %.1f%% — turning off water heater "
-                "(accumulated %.3f kWh)",
-                soc, self._accumulated_kwh,
+                "Battery SoC dropped to %.1f%% (< %.1f%%) — turning off water "
+                "heater (accumulated %.3f kWh)",
+                soc, stop_threshold, self._accumulated_kwh,
             )
             await self._turn_off()
             self._state = HeaterState.IDLE

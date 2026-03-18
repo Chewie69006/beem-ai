@@ -71,20 +71,30 @@ class EvChargerController:
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
     async def evaluate(
-        self, soc: float, export_w: float, water_heater_heating: bool
+        self,
+        soc: float,
+        export_w: float,
+        solar_power_w: float,
+        consumption_w: float,
+        water_heater_heating: bool,
     ) -> None:
         """Evaluate state machine and act."""
         now = time.monotonic()
 
         if self._state == ChargerState.IDLE:
-            await self._evaluate_idle(soc, export_w, water_heater_heating, now)
+            await self._evaluate_idle(
+                soc, export_w, solar_power_w, consumption_w,
+                water_heater_heating, now,
+            )
         elif self._state == ChargerState.CHARGING:
-            await self._evaluate_charging(soc, export_w)
+            await self._evaluate_charging(soc, solar_power_w, consumption_w)
 
     async def _evaluate_idle(
         self,
         soc: float,
         export_w: float,
+        solar_power_w: float,
+        consumption_w: float,
         water_heater_heating: bool,
         now: float,
     ) -> None:
@@ -102,15 +112,15 @@ class EvChargerController:
                     soc, export_w, SUSTAIN_SECONDS,
                 )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
-                start_amps = max(
-                    MIN_CHARGE_AMPS,
-                    min(MAX_CHARGE_AMPS, int(export_w / WATTS_PER_AMP)),
+                # EV not drawing yet → consumption_w is home only
+                start_amps = self._compute_target_amps(
+                    solar_power_w, consumption_w, ev_drawing=False
                 )
                 _LOGGER.info(
                     "EV charger: surplus sustained %.0fs — SoC=%.1f%%, "
-                    "export=%.0fW — starting EV charging at %dA",
+                    "solar=%.0fW, consumption=%.0fW — starting at %dA",
                     now - self._export_sustained_since,
-                    soc, export_w, start_amps,
+                    soc, solar_power_w, consumption_w, start_amps,
                 )
                 self._current_amps = start_amps
                 await self._turn_on()
@@ -122,7 +132,8 @@ class EvChargerController:
     async def _evaluate_charging(
         self,
         soc: float,
-        export_w: float,
+        solar_power_w: float,
+        consumption_w: float,
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC."""
         if soc < SOC_STOP_THRESHOLD:
@@ -133,26 +144,44 @@ class EvChargerController:
             self._state = ChargerState.IDLE
             return
 
-        # Regulate amperage based on surplus
-        await self._regulate_amps(export_w)
+        # Regulate amperage based on solar surplus
+        await self._regulate_amps(solar_power_w, consumption_w)
 
-    async def _regulate_amps(self, export_w: float) -> None:
-        """Adjust charging amps to absorb export surplus without grid import.
+    async def _regulate_amps(
+        self, solar_power_w: float, consumption_w: float
+    ) -> None:
+        """Set charging amps to absorb solar surplus without grid draw.
 
-        - export_w > 0: surplus available → increase amps
-        - export_w < 0: importing from grid → decrease amps
+        Formula: target = floor(surplus / 230) + 1
+        The +1A buffer slightly over-draws so we use a tiny bit of battery
+        rather than exporting.
         """
-        delta_amps = int(export_w / WATTS_PER_AMP)
-        target_amps = self._current_amps + delta_amps
-        new_amps = max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, target_amps))
+        new_amps = self._compute_target_amps(
+            solar_power_w, consumption_w, ev_drawing=True
+        )
 
         if new_amps != self._current_amps:
             _LOGGER.info(
-                "EV charger: adjusting %dA → %dA (export=%.0fW, delta=%+dA)",
-                self._current_amps, new_amps, export_w, delta_amps,
+                "EV charger: adjusting %dA → %dA "
+                "(solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
+                self._current_amps, new_amps, solar_power_w, consumption_w,
+                solar_power_w - consumption_w + self._current_amps * WATTS_PER_AMP,
             )
             self._current_amps = new_amps
             await self._set_amps(new_amps)
+
+    def _compute_target_amps(
+        self, solar_power_w: float, consumption_w: float, *, ev_drawing: bool
+    ) -> int:
+        """Compute target amps from available solar surplus.
+
+        When ev_drawing=True, consumption_w includes EV power, so we add it
+        back to get the true home-only consumption.
+        """
+        ev_power_w = self._current_amps * WATTS_PER_AMP if ev_drawing else 0
+        surplus_w = solar_power_w - consumption_w + ev_power_w
+        target = int(surplus_w / WATTS_PER_AMP) + 1
+        return max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, target))
 
     # -- Switch control --
 
