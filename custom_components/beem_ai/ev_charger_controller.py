@@ -55,6 +55,7 @@ class EvChargerController:
         self._state = ChargerState.IDLE
         self._export_sustained_since: float | None = None
         self._current_amps: int = MIN_CHARGE_AMPS
+        self._saved_amps: int | None = None  # user's setting before we took over
 
     # -- Public properties --
 
@@ -122,7 +123,12 @@ class EvChargerController:
                     now - self._export_sustained_since,
                     soc, solar_power_w, consumption_w, start_amps,
                 )
+                self._saved_amps = self._read_current_amps()
                 self._current_amps = start_amps
+                _LOGGER.info(
+                    "EV charger: saved user amps=%s before taking over",
+                    self._saved_amps,
+                )
                 await self._turn_on()
                 self._state = ChargerState.CHARGING
                 self._export_sustained_since = None
@@ -195,12 +201,30 @@ class EvChargerController:
         )
 
     async def _turn_off(self) -> None:
-        """Stop EV charging."""
+        """Stop EV charging and restore the user's original amperage."""
         await self._hass.services.async_call(
             "homeassistant",
             "turn_off",
             {"entity_id": self._toggle_entity_id},
         )
+        if self._saved_amps is not None:
+            _LOGGER.info(
+                "EV charger: restoring user amps %dA → %dA",
+                self._current_amps, self._saved_amps,
+            )
+            await self._set_amps(self._saved_amps)
+            self._current_amps = self._saved_amps
+            self._saved_amps = None
+
+    def _read_current_amps(self) -> int | None:
+        """Read the current amperage from the HA number entity."""
+        state = self._hass.states.get(self._power_entity_id)
+        if state is None:
+            return None
+        try:
+            return int(float(state.state))
+        except (ValueError, TypeError):
+            return None
 
     async def _set_amps(self, amps: int) -> None:
         """Set the wallbox charging amperage."""

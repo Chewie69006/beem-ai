@@ -16,11 +16,20 @@ from custom_components.beem_ai.ev_charger_controller import (
 )
 
 
-def _make_controller():
-    """Create a controller with mocked hass."""
+def _make_controller(user_amps=32):
+    """Create a controller with mocked hass.
+
+    user_amps: the value currently set on the wallbox number entity
+    (i.e. the user's preferred amperage that we should restore on stop).
+    """
     hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
+
+    # Mock the number entity state so _read_current_amps works
+    amps_state = MagicMock()
+    amps_state.state = str(user_amps)
+    hass.states.get = MagicMock(return_value=amps_state)
 
     ctrl = EvChargerController(
         hass=hass,
@@ -348,16 +357,23 @@ async def test_stays_charging_at_exact_threshold():
 
 @pytest.mark.asyncio
 async def test_stops_when_soc_drops_below_threshold():
-    ctrl, hass = _make_controller()
+    ctrl, hass = _make_controller(user_amps=32)
     await _start_charging(ctrl, hass)
 
     await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
 
     assert ctrl._state == ChargerState.IDLE
     assert ctrl.is_charging is False
-    hass.services.async_call.assert_called_once_with(
+    # Should turn off AND restore user's 32A
+    calls = hass.services.async_call.call_args_list
+    assert calls[0] == call(
         "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"}
     )
+    assert calls[1] == call(
+        "number", "set_value",
+        {"entity_id": "number.ev_charger_amps", "value": 32},
+    )
+    assert ctrl.current_amps == 32
 
 
 @pytest.mark.asyncio
@@ -400,3 +416,80 @@ async def test_stops_below_stop_threshold():
 
     await _eval(ctrl, soc=85.0)
     assert ctrl._state == ChargerState.IDLE
+
+
+# ------------------------------------------------------------------
+# Save / restore user amps
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_saves_user_amps_on_start():
+    """Starting saves the user's current wallbox amps setting."""
+    ctrl, hass = _make_controller(user_amps=32)
+    assert ctrl._saved_amps is None
+
+    await _start_charging(ctrl, hass)
+
+    assert ctrl._saved_amps == 32
+
+
+@pytest.mark.asyncio
+async def test_restores_user_amps_on_stop():
+    """Stopping restores the user's original amps and clears saved."""
+    ctrl, hass = _make_controller(user_amps=25)
+    await _start_charging(ctrl, hass)
+    assert ctrl._saved_amps == 25
+
+    # Trigger stop
+    hass.services.async_call.reset_mock()
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+
+    assert ctrl._state == ChargerState.IDLE
+    assert ctrl.current_amps == 25
+    assert ctrl._saved_amps is None
+
+    calls = hass.services.async_call.call_args_list
+    # turn_off then restore amps
+    assert calls[1] == call(
+        "number", "set_value",
+        {"entity_id": "number.ev_charger_amps", "value": 25},
+    )
+
+
+@pytest.mark.asyncio
+async def test_restores_amps_on_shutdown_stop():
+    """Direct _turn_off (e.g. shutdown) also restores amps."""
+    ctrl, hass = _make_controller(user_amps=32)
+    await _start_charging(ctrl, hass)
+    # Reduce amps during charging
+    ctrl._current_amps = 8
+    hass.services.async_call.reset_mock()
+
+    await ctrl._turn_off()
+
+    assert ctrl.current_amps == 32
+    calls = hass.services.async_call.call_args_list
+    assert calls[1] == call(
+        "number", "set_value",
+        {"entity_id": "number.ev_charger_amps", "value": 32},
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_restore_if_entity_unavailable():
+    """If the entity was unavailable at start, saved_amps is None → no restore."""
+    ctrl, hass = _make_controller()
+    hass.states.get.return_value = None  # entity unavailable
+
+    await _start_charging(ctrl, hass)
+    assert ctrl._saved_amps is None
+
+    hass.services.async_call.reset_mock()
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+
+    # Only turn_off, no restore call
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_called_once_with(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"}
+    )
