@@ -14,7 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 EXPORT_SOC_THRESHOLD = 95.0  # SoC must be > this AND exporting
 
 SUSTAIN_SECONDS = 30  # Conditions must be sustained for this long
-HYSTERESIS_PCT = 5.0  # SoC hysteresis to prevent cycling
+HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
 
 
 class HeaterState(enum.Enum):
