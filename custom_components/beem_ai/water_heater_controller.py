@@ -15,6 +15,7 @@ EXPORT_SOC_THRESHOLD = 95.0  # SoC must be > this AND exporting
 
 SUSTAIN_SECONDS = 30  # Conditions must be sustained for this long
 HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
+MAX_CONSUMPTION_W = 7000  # Kill diverters if house exceeds this
 
 
 class HeaterState(enum.Enum):
@@ -62,6 +63,8 @@ class WaterHeaterController:
         soc: float,
         export_w: float,
         charge_power_w: float,
+        consumption_w: float,
+        import_w: float,
         soc_threshold: float,
         charge_power_threshold: float,
     ) -> None:
@@ -72,6 +75,7 @@ class WaterHeaterController:
           Rule 2 (configurable):  SoC > soc_threshold AND charge_power >= charge_power_threshold
 
         Stop: SoC < (active rule's SoC threshold) - HYSTERESIS_PCT
+              OR consumption >= 7kW AND importing from grid
         """
         now = time.monotonic()
 
@@ -81,7 +85,7 @@ class WaterHeaterController:
                 soc_threshold, charge_power_threshold, now,
             )
         elif self._state == HeaterState.HEATING:
-            await self._evaluate_heating(soc, now)
+            await self._evaluate_heating(soc, consumption_w, import_w, now)
 
     async def _evaluate_idle(
         self,
@@ -133,9 +137,24 @@ class WaterHeaterController:
         else:
             self._sustained_since = None
 
-    async def _evaluate_heating(self, soc: float, now: float) -> None:
+    async def _evaluate_heating(
+        self, soc: float, consumption_w: float, import_w: float, now: float
+    ) -> None:
         """HEATING state: accumulate energy, check if we should stop."""
         self._accumulate_energy(now)
+
+        # Overload protection: house consuming too much AND importing from grid
+        if consumption_w >= MAX_CONSUMPTION_W and import_w > 0:
+            _LOGGER.info(
+                "Water heater: consumption %.0fW >= %dW and importing %.0fW "
+                "— turning off to protect grid (accumulated %.3f kWh)",
+                consumption_w, MAX_CONSUMPTION_W, import_w,
+                self._accumulated_kwh,
+            )
+            await self._turn_off()
+            self._state = HeaterState.IDLE
+            self._last_accumulate_time = None
+            return
 
         stop_threshold = self._active_soc_threshold - HYSTERESIS_PCT
         if soc < stop_threshold:

@@ -420,12 +420,17 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self, soc: float, export_w: float
     ) -> None:
         """Evaluate water heater then EV charger sequentially."""
+        battery = self.state_store.battery
+        consumption_w = battery.consumption_w
+        import_w = battery.import_power_w
+
         if self._water_heater:
-            battery_power_w = self.state_store.battery.battery_power_w
             await self._water_heater.evaluate(
                 soc,
                 export_w=export_w,
-                charge_power_w=battery_power_w,
+                charge_power_w=battery.battery_power_w,
+                consumption_w=consumption_w,
+                import_w=import_w,
                 soc_threshold=self.wh_soc_threshold,
                 charge_power_threshold=self.wh_charge_power_threshold,
             )
@@ -433,10 +438,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
             wh_heating = (
                 self._water_heater.is_heating if self._water_heater else False
             )
-            solar_w = self.state_store.battery.solar_power_w
-            consumption_w = self.state_store.battery.consumption_w
             await self._ev_charger.evaluate(
-                soc, export_w, solar_w, consumption_w, wh_heating
+                soc, export_w, battery.solar_power_w, consumption_w,
+                wh_heating,
             )
 
     # ---- Scheduled callbacks ----

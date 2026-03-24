@@ -31,6 +31,13 @@ MAX_CHARGE_AMPS = 32
 # Watts per amp (single-phase 230 V)
 WATTS_PER_AMP = 230
 
+# Regulation throttle: skip update unless delta >= this OR time elapsed
+REGULATE_DELTA_W = 500  # ~2A worth of change
+REGULATE_INTERVAL_S = 30  # force update at least every 30s
+
+# Overload protection
+MAX_CONSUMPTION_W = 7000  # stop charging if house exceeds this
+
 
 class ChargerState(enum.Enum):
     """EV charger state machine states."""
@@ -56,6 +63,7 @@ class EvChargerController:
         self._export_sustained_since: float | None = None
         self._current_amps: int = MIN_CHARGE_AMPS
         self._saved_amps: int | None = None  # user's setting before we took over
+        self._last_regulate_time: float = 0.0  # last time we sent an amp update
 
     # -- Public properties --
 
@@ -88,7 +96,9 @@ class EvChargerController:
                 water_heater_heating, now,
             )
         elif self._state == ChargerState.CHARGING:
-            await self._evaluate_charging(soc, solar_power_w, consumption_w)
+            await self._evaluate_charging(
+                soc, solar_power_w, consumption_w, now
+            )
 
     async def _evaluate_idle(
         self,
@@ -125,6 +135,7 @@ class EvChargerController:
                 )
                 self._saved_amps = self._read_current_amps()
                 self._current_amps = start_amps
+                self._last_regulate_time = now
                 _LOGGER.info(
                     "EV charger: saved user amps=%s before taking over",
                     self._saved_amps,
@@ -140,8 +151,9 @@ class EvChargerController:
         soc: float,
         solar_power_w: float,
         consumption_w: float,
+        now: float,
     ) -> None:
-        """CHARGING state: regulate amps or stop on low SoC."""
+        """CHARGING state: regulate amps or stop on low SoC / overload."""
         if soc < SOC_STOP_THRESHOLD:
             _LOGGER.info(
                 "EV charger: SoC dropped to %.1f%% — stopping EV charging", soc
@@ -150,31 +162,70 @@ class EvChargerController:
             self._state = ChargerState.IDLE
             return
 
+        # Overload protection: house consuming too much — reduce immediately
+        if consumption_w >= MAX_CONSUMPTION_W:
+            excess_w = consumption_w - MAX_CONSUMPTION_W
+            reduce_amps = max(1, int(excess_w / WATTS_PER_AMP) + 1)
+            target = self._current_amps - reduce_amps
+
+            if target < MIN_CHARGE_AMPS:
+                _LOGGER.info(
+                    "EV charger: consumption %.0fW >= %dW and already at "
+                    "minimum — stopping EV charging",
+                    consumption_w, MAX_CONSUMPTION_W,
+                )
+                await self._turn_off()
+                self._state = ChargerState.IDLE
+                return
+
+            _LOGGER.info(
+                "EV charger: consumption %.0fW >= %dW — reducing "
+                "%dA → %dA (no throttle)",
+                consumption_w, MAX_CONSUMPTION_W,
+                self._current_amps, target,
+            )
+            self._current_amps = target
+            self._last_regulate_time = now
+            await self._set_amps(target)
+            return
+
         # Regulate amperage based on solar surplus
-        await self._regulate_amps(solar_power_w, consumption_w)
+        await self._regulate_amps(solar_power_w, consumption_w, now)
 
     async def _regulate_amps(
-        self, solar_power_w: float, consumption_w: float
+        self, solar_power_w: float, consumption_w: float, now: float
     ) -> None:
         """Set charging amps to absorb solar surplus without grid draw.
 
         Formula: target = floor(surplus / 230) + 1
         The +1A buffer slightly over-draws so we use a tiny bit of battery
         rather than exporting.
+
+        Throttled: only sends an update when delta >= 500W (~2A) or 30s
+        have elapsed since the last update.
         """
         new_amps = self._compute_target_amps(
             solar_power_w, consumption_w, ev_drawing=True
         )
 
-        if new_amps != self._current_amps:
-            _LOGGER.info(
-                "EV charger: adjusting %dA → %dA "
-                "(solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
-                self._current_amps, new_amps, solar_power_w, consumption_w,
-                solar_power_w - consumption_w + self._current_amps * WATTS_PER_AMP,
-            )
-            self._current_amps = new_amps
-            await self._set_amps(new_amps)
+        if new_amps == self._current_amps:
+            return
+
+        delta_w = abs(new_amps - self._current_amps) * WATTS_PER_AMP
+        elapsed = now - self._last_regulate_time
+
+        if delta_w < REGULATE_DELTA_W and elapsed < REGULATE_INTERVAL_S:
+            return
+
+        _LOGGER.info(
+            "EV charger: adjusting %dA → %dA "
+            "(solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
+            self._current_amps, new_amps, solar_power_w, consumption_w,
+            solar_power_w - consumption_w + self._current_amps * WATTS_PER_AMP,
+        )
+        self._current_amps = new_amps
+        self._last_regulate_time = now
+        await self._set_amps(new_amps)
 
     def _compute_target_amps(
         self, solar_power_w: float, consumption_w: float, *, ev_drawing: bool

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from custom_components.beem_ai.water_heater_controller import (
     EXPORT_SOC_THRESHOLD,
     HYSTERESIS_PCT,
+    MAX_CONSUMPTION_W,
     HeaterState,
     SUSTAIN_SECONDS,
     WaterHeaterController,
@@ -35,11 +36,12 @@ def _make_controller(power_value=2000.0):
 
 
 async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
+                    consumption_w=500.0, import_w=0.0,
                     soc_threshold=SOC_THRESHOLD,
                     charge_power_threshold=CHARGE_POWER_THRESHOLD):
     """Helper to call evaluate with default thresholds."""
-    await ctrl.evaluate(soc, export_w, charge_power_w, soc_threshold,
-                        charge_power_threshold)
+    await ctrl.evaluate(soc, export_w, charge_power_w, consumption_w,
+                        import_w, soc_threshold, charge_power_threshold)
 
 
 async def _heat_via_export(ctrl, hass, t0=1000.0):
@@ -353,3 +355,49 @@ def test_reconfigure_updates_entity_ids():
     ctrl.reconfigure("switch.new_heater", "sensor.new_power")
     assert ctrl._switch_entity_id == "switch.new_heater"
     assert ctrl._power_sensor_entity_id == "sensor.new_power"
+
+
+# ==================================================================
+# Overload protection: consumption >= 7kW AND importing
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_overload_stops_when_importing():
+    """Consumption >= 7kW AND importing → stop heating."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_export(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(ctrl, soc=92.0, consumption_w=8000, import_w=1000)
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_called_once_with(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_overload_if_not_importing():
+    """Consumption >= 7kW but NOT importing → keep heating."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_export(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(ctrl, soc=92.0, consumption_w=8000, import_w=0)
+
+    assert ctrl._state == HeaterState.HEATING
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_overload_below_threshold():
+    """Consumption < 7kW and importing → keep heating."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_export(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(ctrl, soc=92.0, consumption_w=6000, import_w=500)
+
+    assert ctrl._state == HeaterState.HEATING
+    hass.services.async_call.assert_not_called()
