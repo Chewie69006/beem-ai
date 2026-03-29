@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, OPT_WH_CHARGE_POWER_THRESHOLD, OPT_WH_SOC_THRESHOLD
 from .sensor import _battery_device_info, _system_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -184,6 +184,10 @@ class BeemAIWaterHeaterSocThreshold(CoordinatorEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self.coordinator.wh_soc_threshold = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_WH_SOC_THRESHOLD: value},
+        )
         self.async_write_ha_state()
 
 
@@ -219,4 +223,8 @@ class BeemAIWaterHeaterChargePowerThreshold(CoordinatorEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self.coordinator.wh_charge_power_threshold = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_WH_CHARGE_POWER_THRESHOLD: value},
+        )
         self.async_write_ha_state()

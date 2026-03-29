@@ -46,6 +46,13 @@ class ChargerState(enum.Enum):
     CHARGING = "charging"
 
 
+class StartMode(enum.Enum):
+    """Who initiated the current charging session."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
 class EvChargerController:
     """Controls an EV charger based on solar surplus (after water heater)."""
 
@@ -60,6 +67,7 @@ class EvChargerController:
         self._power_entity_id = power_entity_id
 
         self._state = ChargerState.IDLE
+        self._start_mode: StartMode | None = None
         self._export_sustained_since: float | None = None
         self._current_amps: int = MIN_CHARGE_AMPS
         self._saved_amps: int | None = None  # user's setting before we took over
@@ -76,6 +84,30 @@ class EvChargerController:
     def current_amps(self) -> int:
         """Return the current charging amperage."""
         return self._current_amps
+
+    # -- Manual control --
+
+    async def start_manual(self) -> None:
+        """Start charging manually at minimum amps."""
+        if self._state == ChargerState.CHARGING:
+            return
+        _LOGGER.info("EV charger: manual start requested")
+        self._saved_amps = self._read_current_amps()
+        self._current_amps = MIN_CHARGE_AMPS
+        self._last_regulate_time = time.monotonic()
+        self._start_mode = StartMode.MANUAL
+        await self._turn_on()
+        self._state = ChargerState.CHARGING
+        self._export_sustained_since = None
+
+    async def stop(self) -> None:
+        """Stop charging (from any mode)."""
+        if self._state == ChargerState.IDLE:
+            return
+        _LOGGER.info("EV charger: stop requested")
+        await self._turn_off()
+        self._state = ChargerState.IDLE
+        self._start_mode = None
 
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
@@ -112,7 +144,7 @@ class EvChargerController:
         """IDLE state: check if we should start charging."""
         if (
             water_heater_heating
-            and soc > SOC_START_THRESHOLD
+            and soc >= SOC_START_THRESHOLD
             and export_w >= EXPORT_MIN_W
         ):
             if self._export_sustained_since is None:
@@ -123,18 +155,14 @@ class EvChargerController:
                     soc, export_w, SUSTAIN_SECONDS,
                 )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
-                # EV not drawing yet → consumption_w is home only
-                start_amps = self._compute_target_amps(
-                    solar_power_w, consumption_w, ev_drawing=False
-                )
                 _LOGGER.info(
                     "EV charger: surplus sustained %.0fs — SoC=%.1f%%, "
                     "solar=%.0fW, consumption=%.0fW — starting at %dA",
                     now - self._export_sustained_since,
-                    soc, solar_power_w, consumption_w, start_amps,
+                    soc, solar_power_w, consumption_w, MIN_CHARGE_AMPS,
                 )
                 self._saved_amps = self._read_current_amps()
-                self._current_amps = start_amps
+                self._current_amps = MIN_CHARGE_AMPS
                 self._last_regulate_time = now
                 _LOGGER.info(
                     "EV charger: saved user amps=%s before taking over",
@@ -142,6 +170,7 @@ class EvChargerController:
                 )
                 await self._turn_on()
                 self._state = ChargerState.CHARGING
+                self._start_mode = StartMode.AUTO
                 self._export_sustained_since = None
         else:
             self._export_sustained_since = None
@@ -154,12 +183,14 @@ class EvChargerController:
         now: float,
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC / overload."""
-        if soc < SOC_STOP_THRESHOLD:
+        # SoC stop: only applies in AUTO mode
+        if self._start_mode == StartMode.AUTO and soc < SOC_STOP_THRESHOLD:
             _LOGGER.info(
                 "EV charger: SoC dropped to %.1f%% — stopping EV charging", soc
             )
             await self._turn_off()
             self._state = ChargerState.IDLE
+            self._start_mode = None
             return
 
         # Overload protection: house consuming too much — reduce immediately
@@ -169,6 +200,19 @@ class EvChargerController:
             target = self._current_amps - reduce_amps
 
             if target < MIN_CHARGE_AMPS:
+                if self._start_mode == StartMode.MANUAL:
+                    # Manual mode: clamp at minimum instead of stopping
+                    if self._current_amps != MIN_CHARGE_AMPS:
+                        _LOGGER.info(
+                            "EV charger: consumption %.0fW >= %dW — "
+                            "clamping at %dA (manual mode)",
+                            consumption_w, MAX_CONSUMPTION_W, MIN_CHARGE_AMPS,
+                        )
+                        self._current_amps = MIN_CHARGE_AMPS
+                        self._last_regulate_time = now
+                        await self._set_amps(MIN_CHARGE_AMPS)
+                    return
+
                 _LOGGER.info(
                     "EV charger: consumption %.0fW >= %dW and already at "
                     "minimum — stopping EV charging",
@@ -176,6 +220,7 @@ class EvChargerController:
                 )
                 await self._turn_off()
                 self._state = ChargerState.IDLE
+                self._start_mode = None
                 return
 
             _LOGGER.info(
@@ -253,6 +298,7 @@ class EvChargerController:
 
     async def _turn_off(self) -> None:
         """Stop EV charging and restore the user's original amperage."""
+        self._start_mode = None
         await self._hass.services.async_call(
             "homeassistant",
             "turn_off",

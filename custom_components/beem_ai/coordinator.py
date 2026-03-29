@@ -35,6 +35,8 @@ from .const import (
     OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
+    OPT_WH_CHARGE_POWER_THRESHOLD,
+    OPT_WH_SOC_THRESHOLD,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
 from .forecast_tracker import ForecastTracker
@@ -85,9 +87,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
 
-        # Water heater configurable thresholds (set via number entities)
-        self.wh_soc_threshold: float = 95.0
-        self.wh_charge_power_threshold: float = 500.0
+        # Water heater configurable thresholds (persisted via config entry options)
+        options = entry.options
+        self.wh_soc_threshold: float = float(
+            options.get(OPT_WH_SOC_THRESHOLD, 95.0)
+        )
+        self.wh_charge_power_threshold: float = float(
+            options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
+        )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
         self._consumption_tomorrow_override: float | None = None
@@ -613,6 +620,28 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._setup_water_heater(options)
         self._setup_ev_charger(options)
 
+        # Refresh persisted thresholds
+        self.wh_soc_threshold = float(
+            options.get(OPT_WH_SOC_THRESHOLD, 95.0)
+        )
+        self.wh_charge_power_threshold = float(
+            options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
+        )
+
+    # ---- EV charger manual control ----
+
+    async def async_start_ev_charger(self) -> None:
+        """Start EV charging manually."""
+        if self._ev_charger:
+            await self._ev_charger.start_manual()
+            self.async_update_listeners()
+
+    async def async_stop_ev_charger(self) -> None:
+        """Stop EV charging."""
+        if self._ev_charger:
+            await self._ev_charger.stop()
+            self.async_update_listeners()
+
     # ---- Enable/disable ----
 
     async def async_set_enabled(self, enabled: bool) -> None:
@@ -719,7 +748,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Turn off EV charger if charging (before water heater)
         if self._ev_charger and self._ev_charger.is_charging:
-            await self._ev_charger._turn_off()
+            await self._ev_charger.stop()
 
         # Turn off water heater if heating
         if self._water_heater and self._water_heater.is_heating:

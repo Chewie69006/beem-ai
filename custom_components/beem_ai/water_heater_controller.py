@@ -83,6 +83,7 @@ class WaterHeaterController:
             await self._evaluate_idle(
                 soc, export_w, charge_power_w,
                 soc_threshold, charge_power_threshold, now,
+                import_w=import_w,
             )
         elif self._state == HeaterState.HEATING:
             await self._evaluate_heating(soc, consumption_w, import_w, now)
@@ -95,12 +96,17 @@ class WaterHeaterController:
         soc_threshold: float,
         charge_power_threshold: float,
         now: float,
+        import_w: float = 0.0,
     ) -> None:
         """IDLE state: check if either rule triggers."""
         # Rule 1: hardcoded — SoC > 95% AND exporting
         rule1 = soc > EXPORT_SOC_THRESHOLD and export_w > 0
-        # Rule 2: configurable — SoC > threshold AND charging above threshold
-        rule2 = soc > soc_threshold and charge_power_w >= charge_power_threshold
+        # Rule 2: configurable — SoC > threshold AND charging from solar (not grid)
+        rule2 = (
+            soc > soc_threshold
+            and charge_power_w >= charge_power_threshold
+            and import_w <= 0
+        )
 
         if rule1 or rule2:
             # Pick the active SoC threshold (lowest wins — more permissive stop)

@@ -23,11 +23,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up BeemAI switches from a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
+    entities = [
         BeemAIEnabledSwitch(coordinator, entry),
         BeemAIAllowGridChargeSwitch(coordinator, entry),
         BeemAIPreventDischargeSwitch(coordinator, entry),
-    ])
+    ]
+    if coordinator.ev_charger is not None:
+        entities.append(BeemAIEvChargerSwitch(coordinator, entry))
+    async_add_entities(entities)
 
 
 class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity):
@@ -142,4 +145,40 @@ class BeemAIPreventDischargeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs) -> None:
         """Allow discharge."""
         await self.coordinator.async_set_battery_control(prevent_discharge=False)
+        self.async_write_ha_state()
+
+
+class BeemAIEvChargerSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to manually start/stop EV charging."""
+
+    _attr_has_entity_name = True
+    _attr_name = "EV Charger"
+    _attr_icon = "mdi:ev-station"
+    _attr_translation_key = "ev_charger"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_ev_charger"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info for grouping entities."""
+        return _system_device_info(self._entry)
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if EV charger is charging."""
+        ec = self.coordinator.ev_charger
+        return ec.is_charging if ec else False
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Start EV charging manually."""
+        await self.coordinator.async_start_ev_charger()
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Stop EV charging."""
+        await self.coordinator.async_stop_ev_charger()
         self.async_write_ha_state()

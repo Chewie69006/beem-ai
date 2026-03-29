@@ -27,6 +27,8 @@ OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
 OPT_WATER_HEATER_POWER_SENSOR = "water_heater_power_entity"
 OPT_EV_CHARGER_TOGGLE = "ev_charger_toggle_entity"
 OPT_EV_CHARGER_POWER = "ev_charger_power_entity"
+OPT_WH_SOC_THRESHOLD = "wh_soc_threshold"
+OPT_WH_CHARGE_POWER_THRESHOLD = "wh_charge_power_threshold"
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27
