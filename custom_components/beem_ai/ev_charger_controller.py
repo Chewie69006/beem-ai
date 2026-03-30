@@ -1,11 +1,11 @@
 """EV charger controller — second-priority solar surplus diverter.
 
-Starts at the best amperage calculated from current export surplus, then
-adjusts live each MQTT cycle.  If the house starts importing from the grid,
+Starts at 6A when solar surplus is sustained, then adjusts ±1A per MQTT
+cycle toward the target.  If the house starts importing from the grid,
 the amperage is reduced.  Goal: never draw from the grid for EV charging.
 
-The water heater must be ON to *start* charging, but once charging has
-begun the EV continues independently — only SoC ≤ 90% stops it.
+When a water heater is configured, the EV charger waits for it to be ON
+before starting.  Without a water heater, the EV starts on surplus alone.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class EvChargerController:
         export_w: float,
         solar_power_w: float,
         consumption_w: float,
-        water_heater_heating: bool,
+        water_heater_heating: bool | None,
     ) -> None:
         """Evaluate state machine and act."""
         now = time.monotonic()
@@ -138,12 +138,17 @@ class EvChargerController:
         export_w: float,
         solar_power_w: float,
         consumption_w: float,
-        water_heater_heating: bool,
+        water_heater_heating: bool | None,
         now: float,
     ) -> None:
-        """IDLE state: check if we should start charging."""
+        """IDLE state: check if we should start charging.
+
+        water_heater_heating is None when no water heater is configured,
+        which is treated as "prerequisite satisfied".
+        """
+        wh_ok = water_heater_heating is None or water_heater_heating
         if (
-            water_heater_heating
+            wh_ok
             and soc >= SOC_START_THRESHOLD
             and export_w >= EXPORT_MIN_W
         ):
@@ -151,8 +156,8 @@ class EvChargerController:
                 self._export_sustained_since = now
                 _LOGGER.info(
                     "EV charger: surplus detected — SoC=%.1f%%, export=%.0fW, "
-                    "water heater ON, waiting %ds sustained",
-                    soc, export_w, SUSTAIN_SECONDS,
+                    "wh=%s, waiting %ds sustained",
+                    soc, export_w, water_heater_heating, SUSTAIN_SECONDS,
                 )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
                 _LOGGER.info(
@@ -193,24 +198,13 @@ class EvChargerController:
             self._start_mode = None
             return
 
-        # Overload protection: house consuming too much — reduce immediately
+        # Overload protection: house consuming too much — reduce by 1A
         if consumption_w >= MAX_CONSUMPTION_W:
-            excess_w = consumption_w - MAX_CONSUMPTION_W
-            reduce_amps = max(1, int(excess_w / WATTS_PER_AMP) + 1)
-            target = self._current_amps - reduce_amps
+            target = self._current_amps - 1
 
             if target < MIN_CHARGE_AMPS:
                 if self._start_mode == StartMode.MANUAL:
-                    # Manual mode: clamp at minimum instead of stopping
-                    if self._current_amps != MIN_CHARGE_AMPS:
-                        _LOGGER.info(
-                            "EV charger: consumption %.0fW >= %dW — "
-                            "clamping at %dA (manual mode)",
-                            consumption_w, MAX_CONSUMPTION_W, MIN_CHARGE_AMPS,
-                        )
-                        self._current_amps = MIN_CHARGE_AMPS
-                        self._last_regulate_time = now
-                        await self._set_amps(MIN_CHARGE_AMPS)
+                    # Manual mode: stay at minimum instead of stopping
                     return
 
                 _LOGGER.info(
@@ -224,8 +218,8 @@ class EvChargerController:
                 return
 
             _LOGGER.info(
-                "EV charger: consumption %.0fW >= %dW — reducing "
-                "%dA → %dA (no throttle)",
+                "EV charger: overload %.0fW >= %dW — reducing "
+                "%dA → %dA",
                 consumption_w, MAX_CONSUMPTION_W,
                 self._current_amps, target,
             )
@@ -249,12 +243,17 @@ class EvChargerController:
         Throttled: only sends an update when delta >= 500W (~2A) or 30s
         have elapsed since the last update.
         """
-        new_amps = self._compute_target_amps(
+        target_amps = self._compute_target_amps(
             solar_power_w, consumption_w, ev_drawing=True
         )
 
-        if new_amps == self._current_amps:
-            return
+        # Ramp limit: move at most ±1A per regulation cycle
+        if target_amps > self._current_amps:
+            new_amps = self._current_amps + 1
+        elif target_amps < self._current_amps:
+            new_amps = self._current_amps - 1
+        else:
+            return  # already at target
 
         delta_w = abs(new_amps - self._current_amps) * WATTS_PER_AMP
         elapsed = now - self._last_regulate_time
@@ -263,9 +262,10 @@ class EvChargerController:
             return
 
         _LOGGER.info(
-            "EV charger: adjusting %dA → %dA "
-            "(solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
-            self._current_amps, new_amps, solar_power_w, consumption_w,
+            "EV charger: adjusting %dA → %dA (target=%dA, "
+            "solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
+            self._current_amps, new_amps, target_amps,
+            solar_power_w, consumption_w,
             solar_power_w - consumption_w + self._current_amps * WATTS_PER_AMP,
         )
         self._current_amps = new_amps

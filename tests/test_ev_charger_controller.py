@@ -209,102 +209,75 @@ async def test_sustain_timer_resets_when_water_heater_stops():
 
 
 @pytest.mark.asyncio
-async def test_regulate_amps_users_example():
-    """Starts at 6A, then regulates up to match surplus."""
+async def test_regulate_ramps_up_by_1a():
+    """Ramp limit: target is 14A from 6A, but only moves +1A per cycle."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
     assert ctrl.current_amps == MIN_CHARGE_AMPS
 
-    # After interval, regulate: surplus = 4000 - 1000 - 6*230 + 6*230 = 3000 → 14A
+    # surplus → target 14A, but ramp limits to 7A
     ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
     with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
         await _eval(ctrl, solar_power_w=4000, consumption_w=1000 + ev_draw)
 
-    assert ctrl.current_amps == 14
-
-
-@pytest.mark.asyncio
-async def test_regulate_large_delta_updates_immediately():
-    """Delta >= 500W (~2A+) → update without waiting for interval."""
-    ctrl, hass = _make_controller()
-    t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
-    assert ctrl.current_amps == MIN_CHARGE_AMPS
-
-    # surplus = 5000 - 1000 - 6*230 + 6*230 = 4000 → floor(4000/230)+1 = 18A
-    # delta = 12A = 2760W > 500W → immediate
-    ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
-    with patch("time.monotonic", return_value=t + 5):  # only 5s later
-        await _eval(ctrl, solar_power_w=5000, consumption_w=1000 + ev_draw)
-
-    assert ctrl.current_amps == 18
+    assert ctrl.current_amps == 7
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": "number.ev_charger_amps", "value": 18},
+        {"entity_id": "number.ev_charger_amps", "value": 7},
     )
 
 
 @pytest.mark.asyncio
-async def test_regulate_small_delta_throttled():
-    """Delta < 500W → throttled, no update until interval passes."""
+async def test_regulate_ramps_to_target_over_cycles():
+    """Multiple regulation cycles ramp toward target 1A at a time."""
+    ctrl, hass = _make_controller()
+    t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS  # 6A
+
+    ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
+    # Cycle 1: 6→7
+    with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
+        await _eval(ctrl, solar_power_w=4000, consumption_w=1000 + ev_draw)
+    assert ctrl.current_amps == 7
+
+    # Cycle 2: 7→8 (consumption adjusts with new ev_draw)
+    ev_draw = 7 * WATTS_PER_AMP
+    with patch("time.monotonic", return_value=t + 2 * REGULATE_INTERVAL_S):
+        await _eval(ctrl, solar_power_w=4000, consumption_w=1000 + ev_draw)
+    assert ctrl.current_amps == 8
+
+
+@pytest.mark.asyncio
+async def test_regulate_ramp_throttled():
+    """±1A = 230W < 500W delta → throttled unless interval elapsed."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
     assert ctrl.current_amps == MIN_CHARGE_AMPS
 
-    # First regulate up to a known state via large delta
     ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
+    # Only 5s later — 1A delta = 230W < 500W → throttled
     with patch("time.monotonic", return_value=t + 5):
-        await _eval(ctrl, solar_power_w=5000, consumption_w=1000 + ev_draw)
-    assert ctrl.current_amps == 18
-    hass.services.async_call.reset_mock()
+        await _eval(ctrl, solar_power_w=4000, consumption_w=1000 + ev_draw)
 
-    # Now small change: solar 5250 → surplus 4250 → 19A (delta = 1A = 230W < 500W)
-    ev_draw = 18 * WATTS_PER_AMP
-    with patch("time.monotonic", return_value=t + 10):  # only 5s since last
-        await _eval(ctrl, solar_power_w=5250, consumption_w=1000 + ev_draw)
-
-    assert ctrl.current_amps == 18  # throttled
+    assert ctrl.current_amps == MIN_CHARGE_AMPS  # throttled
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_regulate_small_delta_after_interval():
-    """Small delta but interval elapsed → update."""
+async def test_regulate_decrease_by_1a():
+    """Consumption increase → target drops, but ramp limits to -1A."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
-    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    ctrl._current_amps = 14  # simulate having ramped up
+    ctrl._last_regulate_time = t
 
-    # After interval, regulate: surplus = 4000 - 1000 - 6*230 + 6*230 = 3000 → 14A
-    ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
+    # surplus = 4000 - 3000 - 14*230 + 14*230 = 1000 → target 5 → clamped 6
+    # target 6 < 14 → ramp to 13
+    ev_draw = 14 * WATTS_PER_AMP
     with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
-        await _eval(ctrl, solar_power_w=4000, consumption_w=1000 + ev_draw)
+        await _eval(ctrl, solar_power_w=4000, consumption_w=3000 + ev_draw)
 
-    assert ctrl.current_amps == 14
-    hass.services.async_call.assert_called_once_with(
-        "number", "set_value",
-        {"entity_id": "number.ev_charger_amps", "value": 14},
-    )
-
-
-@pytest.mark.asyncio
-async def test_regulate_decrease_when_consumption_increases():
-    """Home consumption increases → big delta → immediate decrease."""
-    ctrl, hass = _make_controller()
-    t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
-    assert ctrl.current_amps == MIN_CHARGE_AMPS
-
-    # First regulate up via large delta
-    ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
-    with patch("time.monotonic", return_value=t + 5):
-        await _eval(ctrl, solar_power_w=5000, consumption_w=1000 + ev_draw)
-    assert ctrl.current_amps == 18
-
-    # Home jumps to 2000W: surplus = 5000 - 2000 - 18*230 + 18*230 = 3000 → 14A
-    # delta = 4A = 920W > 500W → immediate
-    ev_draw = 18 * WATTS_PER_AMP
-    with patch("time.monotonic", return_value=t + 10):
-        await _eval(ctrl, solar_power_w=5000, consumption_w=2000 + ev_draw)
-
-    assert ctrl.current_amps == 14
+    assert ctrl.current_amps == 13
 
 
 @pytest.mark.asyncio
@@ -322,12 +295,17 @@ async def test_regulate_clamped_at_min():
 
 @pytest.mark.asyncio
 async def test_regulate_clamped_at_max():
+    """Even with huge surplus, ramp limits to +1A per cycle."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
+    ctrl._current_amps = MAX_CHARGE_AMPS - 1  # 31A
+    ctrl._last_regulate_time = t
 
-    ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
-    with patch("time.monotonic", return_value=t + 5):
-        await _eval(ctrl, solar_power_w=10000, consumption_w=500 + ev_draw)
+    # consumption must stay below 7kW to avoid overload path
+    # home=200W + EV=31*230=7130W = 7330W > 7000 → use very low home consumption
+    # Actually EV draw is part of consumption_w, so keep total < 7000
+    with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
+        await _eval(ctrl, solar_power_w=10000, consumption_w=6900)
 
     assert ctrl.current_amps == MAX_CHARGE_AMPS
 
@@ -338,23 +316,21 @@ async def test_regulate_clamped_at_max():
 
 
 @pytest.mark.asyncio
-async def test_overload_reduces_amps_immediately():
-    """Consumption >= 7kW → reduce amps immediately (no throttle)."""
+async def test_overload_reduces_by_1a():
+    """Consumption >= 7kW → reduce by 1A immediately (no throttle)."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
-    # Manually set higher amps to test overload reduction
     ctrl._current_amps = 14
-
-    # consumption=7500 → excess=500 → reduce by floor(500/230)+1 = 3A → 14-3 = 11A
     hass.services.async_call.reset_mock()
+
     with patch("time.monotonic", return_value=t + 2):  # only 2s
         await _eval(ctrl, solar_power_w=4000, consumption_w=7500)
 
-    assert ctrl.current_amps == 11
+    assert ctrl.current_amps == 13
     assert ctrl._state == ChargerState.CHARGING
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": "number.ev_charger_amps", "value": 11},
+        {"entity_id": "number.ev_charger_amps", "value": 13},
     )
 
 
@@ -374,19 +350,19 @@ async def test_overload_stops_if_already_at_minimum():
 
 
 @pytest.mark.asyncio
-async def test_overload_reduces_proportionally():
-    """Large excess → reduce by more amps."""
+async def test_overload_reduces_one_at_a_time():
+    """Large excess still only reduces 1A per cycle."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
-    # Manually set higher amps to test proportional overload
     ctrl._current_amps = 14
+    hass.services.async_call.reset_mock()
 
-    # excess = 9000 - 7000 = 2000W → reduce by floor(2000/230)+1 = 9+1 = 10A → target = 4 < 6
-    # → stops
+    # Even with excess=2000W, only reduces by 1A
     with patch("time.monotonic", return_value=t + 2):
         await _eval(ctrl, solar_power_w=4000, consumption_w=9000)
 
-    assert ctrl._state == ChargerState.IDLE
+    assert ctrl._state == ChargerState.CHARGING
+    assert ctrl.current_amps == 13
 
 
 # ------------------------------------------------------------------
@@ -407,18 +383,18 @@ async def test_continues_charging_when_water_heater_stops():
 
 @pytest.mark.asyncio
 async def test_regulates_amps_when_water_heater_stops():
+    """After WH stops, regulation still works — ramps +1A toward target."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass, solar_power_w=4000, consumption_w=1000)
     assert ctrl.current_amps == MIN_CHARGE_AMPS
 
     ev_draw = MIN_CHARGE_AMPS * WATTS_PER_AMP
-    # Water heater stopped → wait for interval to allow regulation
-    # surplus = 4000 - 500 - 6*230 + 6*230 = 3500 → floor(3500/230)+1 = 16A
+    # target = 16A but ramp limits to 7A
     with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
         await _eval(ctrl, soc=92.0, solar_power_w=4000,
                     consumption_w=500 + ev_draw, water_heater_heating=False)
 
-    assert ctrl.current_amps == 16
+    assert ctrl.current_amps == 7
 
 
 # ------------------------------------------------------------------
@@ -653,22 +629,21 @@ async def test_manual_mode_overload_clamps_at_min():
 
 
 @pytest.mark.asyncio
-async def test_manual_mode_overload_reduces_to_min():
-    """Manual mode overload with higher amps: reduces to MIN, stays charging."""
+async def test_manual_mode_overload_reduces_by_1a():
+    """Manual mode overload with higher amps: reduces by 1A, stays charging."""
     ctrl, hass = _make_controller()
     await ctrl.start_manual()
     ctrl._current_amps = 14
     hass.services.async_call.reset_mock()
 
-    # excess = 9000 - 7000 = 2000W → reduce 10A → target 4 < 6 → clamp at 6A
     with patch("time.monotonic", return_value=2000.0):
         await _eval(ctrl, solar_power_w=4000, consumption_w=9000)
 
     assert ctrl._state == ChargerState.CHARGING
-    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    assert ctrl.current_amps == 13
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": "number.ev_charger_amps", "value": MIN_CHARGE_AMPS},
+        {"entity_id": "number.ev_charger_amps", "value": 13},
     )
 
 
@@ -690,3 +665,35 @@ async def test_auto_stop_clears_start_mode():
 
     assert ctrl._state == ChargerState.IDLE
     assert ctrl._start_mode is None
+
+
+# ------------------------------------------------------------------
+# Water heater prerequisite: None = no WH configured → OK to start
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_starts_without_water_heater():
+    """When water_heater_heating is None (no WH), EV starts on surplus alone."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, export_w=600, water_heater_heating=None)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl, export_w=600, water_heater_heating=None)
+
+    assert ctrl._state == ChargerState.CHARGING
+    assert ctrl._start_mode == StartMode.AUTO
+
+
+@pytest.mark.asyncio
+async def test_no_start_when_water_heater_off():
+    """When water_heater_heating is False (WH exists but off), EV doesn't start."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, export_w=600, water_heater_heating=False)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl, export_w=600, water_heater_heating=False)
+
+    assert ctrl._state == ChargerState.IDLE

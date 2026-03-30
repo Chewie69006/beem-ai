@@ -444,7 +444,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             )
         if self._ev_charger:
             wh_heating = (
-                self._water_heater.is_heating if self._water_heater else False
+                self._water_heater.is_heating if self._water_heater else None
             )
             await self._ev_charger.evaluate(
                 soc, export_w, battery.solar_power_w, consumption_w,
