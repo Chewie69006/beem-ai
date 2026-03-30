@@ -79,7 +79,7 @@ def test_initial_state():
 
 
 # ==================================================================
-# Rule 1: hardcoded — SoC > 95% AND exporting
+# Rule 1: hardcoded — SoC >= 95% AND exporting
 # ==================================================================
 
 
@@ -113,10 +113,23 @@ async def test_rule1_any_positive_export():
 
 
 @pytest.mark.asyncio
+async def test_rule1_soc_at_threshold_triggers():
+    """Rule 1: SoC == 95% — triggers (>= threshold)."""
+    ctrl, _ = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _evaluate(ctrl, soc=EXPORT_SOC_THRESHOLD, export_w=600)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _evaluate(ctrl, soc=EXPORT_SOC_THRESHOLD, export_w=600)
+
+    assert ctrl._state == HeaterState.HEATING
+
+
+@pytest.mark.asyncio
 async def test_rule1_soc_too_low():
-    """Rule 1: SoC <= 95% — doesn't trigger (even if exporting)."""
+    """Rule 1: SoC < 95% — doesn't trigger (even if exporting)."""
     ctrl, hass = _make_controller()
-    await _evaluate(ctrl, soc=95.0, export_w=600)
+    await _evaluate(ctrl, soc=94.9, export_w=600)
     assert ctrl._state == HeaterState.IDLE
     hass.services.async_call.assert_not_called()
 
@@ -201,9 +214,9 @@ async def test_rule2_triggers_on_charge_power():
 
 @pytest.mark.asyncio
 async def test_rule2_soc_too_low():
-    """Rule 2: SoC <= configurable threshold — doesn't trigger."""
+    """Rule 2: SoC < configurable threshold — doesn't trigger."""
     ctrl, hass = _make_controller()
-    await _evaluate(ctrl, soc=80.0, export_w=0, charge_power_w=600)
+    await _evaluate(ctrl, soc=79.9, export_w=0, charge_power_w=600)
     assert ctrl._state == HeaterState.IDLE
     hass.services.async_call.assert_not_called()
 

@@ -103,6 +103,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Schedule handles
         self._daily_reset_unsub = None
+        self._last_reset_date = None
 
         # Persistence directory (set in async_setup)
         self._data_dir: str | None = None
@@ -459,8 +460,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._data_dir:
             self.state_store.save_forecast(self._data_dir)
 
-    _last_reset_date = None
-
     async def _check_daily_reset(self, _now=None) -> None:
         """Check if it's the daily reset hour (start of cheapest tariff period, rounded up)."""
         from datetime import datetime
@@ -615,6 +614,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Rebuild forecast sources with new config
         if self._forecast:
             self._forecast.reconfigure(config)
+
+        # Stop active controllers before recreating them — otherwise the
+        # physical device stays on with no tracking (orphaned state).
+        if self._ev_charger and self._ev_charger.is_charging:
+            await self._ev_charger.stop()
+        if self._water_heater and self._water_heater.is_heating:
+            await self._water_heater._turn_off()
 
         # Reconfigure water heater and EV charger controllers
         self._setup_water_heater(options)

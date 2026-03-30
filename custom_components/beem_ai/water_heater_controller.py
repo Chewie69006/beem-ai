@@ -99,11 +99,11 @@ class WaterHeaterController:
         import_w: float = 0.0,
     ) -> None:
         """IDLE state: check if either rule triggers."""
-        # Rule 1: hardcoded — SoC > 95% AND exporting
-        rule1 = soc > EXPORT_SOC_THRESHOLD and export_w > 0
-        # Rule 2: configurable — SoC > threshold AND charging from solar (not grid)
+        # Rule 1: hardcoded — SoC >= 95% AND exporting
+        rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
+        # Rule 2: configurable — SoC >= threshold AND charging from solar (not grid)
         rule2 = (
-            soc > soc_threshold
+            soc >= soc_threshold
             and charge_power_w >= charge_power_threshold
             and import_w <= 0
         )
