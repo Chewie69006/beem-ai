@@ -150,21 +150,32 @@ class EvChargerController:
     ) -> None:
         """IDLE state: check if we should start charging.
 
+        Start condition uses *available solar surplus* (solar − consumption)
+        instead of grid export, because at mid-range SoC the battery
+        absorbs every watt of surplus and export_w stays at 0 — which
+        would never trigger a start with a user-lowered SoC threshold.
+
+        Once SoC is above the user's start threshold, a small slice of
+        solar is diverted from the battery to the EV (starting at 6 A).
+
         water_heater_heating is None when no water heater is configured,
         which is treated as "prerequisite satisfied".
         """
         wh_ok = water_heater_heating is None or water_heater_heating
+        solar_surplus_w = solar_power_w - consumption_w
         if (
             wh_ok
             and soc >= start_soc_threshold
-            and export_w >= EXPORT_MIN_W
+            and solar_surplus_w >= EXPORT_MIN_W
         ):
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
                 _LOGGER.info(
-                    "EV charger: surplus detected — SoC=%.1f%%, export=%.0fW, "
+                    "EV charger: surplus detected — SoC=%.1f%%, "
+                    "solar=%.0fW, consumption=%.0fW, surplus=%.0fW, "
                     "wh=%s, waiting %ds sustained",
-                    soc, export_w, water_heater_heating, SUSTAIN_SECONDS,
+                    soc, solar_power_w, consumption_w, solar_surplus_w,
+                    water_heater_heating, SUSTAIN_SECONDS,
                 )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
                 _LOGGER.info(
@@ -195,16 +206,35 @@ class EvChargerController:
         stop_soc_threshold: float,
         now: float,
     ) -> None:
-        """CHARGING state: regulate amps or stop on low SoC / overload."""
-        # SoC stop: only applies in AUTO mode
+        """CHARGING state: regulate amps or stop on low SoC / overload.
+
+        SoC-based stop (AUTO only) fires only when ALL of these are true:
+        - EV is already clamped at minimum amperage (6 A) — i.e. we
+          can't reduce draw any further.
+        - Solar is insufficient to sustain even 6 A on its own, so the
+          battery is being drained to keep the EV charging.
+        - Battery SoC has dropped below the user's stop threshold.
+
+        This mirrors the user-described semantic: stop once we're
+        pinned at minimum and solar can no longer cover it.
+        """
         if self._start_mode == StartMode.AUTO and soc < stop_soc_threshold:
-            _LOGGER.info(
-                "EV charger: SoC dropped to %.1f%% — stopping EV charging", soc
-            )
-            await self._turn_off()
-            self._state = ChargerState.IDLE
-            self._start_mode = None
-            return
+            at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
+            # consumption_w already includes EV draw, so solar < consumption
+            # means the battery (or grid) is covering the shortfall.
+            battery_draining = solar_power_w < consumption_w
+            if at_min_amps and battery_draining:
+                _LOGGER.info(
+                    "EV charger: pinned at %dA, solar=%.0fW < consumption="
+                    "%.0fW (battery draining), SoC=%.1f%% < %.1f%% — "
+                    "stopping EV charging",
+                    MIN_CHARGE_AMPS, solar_power_w, consumption_w,
+                    soc, stop_soc_threshold,
+                )
+                await self._turn_off()
+                self._state = ChargerState.IDLE
+                self._start_mode = None
+                return
 
         # Overload protection: house consuming too much — reduce by 1A
         if consumption_w >= MAX_CONSUMPTION_W:

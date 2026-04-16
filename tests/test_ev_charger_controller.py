@@ -102,11 +102,35 @@ async def test_no_transition_below_soc_threshold():
 
 
 @pytest.mark.asyncio
-async def test_no_transition_below_export_threshold():
+async def test_no_transition_below_surplus_threshold():
+    """Start uses solar-surplus (solar - consumption), not grid export."""
     ctrl, hass = _make_controller()
-    await _eval(ctrl, export_w=400)
+    # solar 900W, consumption 500W → surplus 400W < EXPORT_MIN_W (500)
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, solar_power_w=900, consumption_w=500)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl, solar_power_w=900, consumption_w=500)
     assert ctrl._state == ChargerState.IDLE
     hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_starts_at_lower_soc_when_battery_absorbing_all_solar():
+    """Regression: user sets start=75%.  At 75% SoC battery absorbs all
+    solar → grid export_w = 0.  Start must still trigger from the solar
+    surplus (solar − consumption), not grid export.
+    """
+    ctrl, hass = _make_controller()
+    # export_w = 0 (battery absorbing everything), but plenty of solar
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, soc=76.0, export_w=0.0,
+                    solar_power_w=4000, consumption_w=800,
+                    start_soc_threshold=75.0)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl, soc=76.0, export_w=0.0,
+                    solar_power_w=4000, consumption_w=800,
+                    start_soc_threshold=75.0)
+    assert ctrl._state == ChargerState.CHARGING
 
 
 @pytest.mark.asyncio
@@ -175,25 +199,26 @@ async def test_start_amps_always_min_even_with_high_surplus():
 
 
 @pytest.mark.asyncio
-async def test_sustain_timer_resets_when_export_drops():
+async def test_sustain_timer_resets_when_surplus_drops():
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
-        await _eval(ctrl, export_w=600)
+        await _eval(ctrl)  # default surplus = 3000W
     assert ctrl._export_sustained_since is not None
 
+    # Surplus drops to 200W (solar 1000 - consumption 800)
     with patch("time.monotonic", return_value=1015.0):
-        await _eval(ctrl, export_w=200)
+        await _eval(ctrl, solar_power_w=1000, consumption_w=800)
     assert ctrl._export_sustained_since is None
 
     with patch("time.monotonic", return_value=1020.0):
-        await _eval(ctrl, export_w=600)
+        await _eval(ctrl)
     with patch("time.monotonic", return_value=1040.0):
-        await _eval(ctrl, export_w=600)
+        await _eval(ctrl)
     assert ctrl._state == ChargerState.IDLE
 
     with patch("time.monotonic", return_value=1020.0 + SUSTAIN_SECONDS):
-        await _eval(ctrl, export_w=600)
+        await _eval(ctrl)
     assert ctrl._state == ChargerState.CHARGING
 
 
@@ -420,10 +445,14 @@ async def test_stays_charging_at_exact_threshold():
 
 @pytest.mark.asyncio
 async def test_stops_when_soc_drops_below_threshold():
+    """Stop fires only when pinned at 6A AND solar < consumption AND SoC low."""
     ctrl, hass = _make_controller(user_amps=32)
     await _start_charging(ctrl, hass)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS  # pinned at min after start
 
-    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+    # solar < consumption → battery draining to cover EV
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                solar_power_w=500, consumption_w=2000)
 
     assert ctrl._state == ChargerState.IDLE
     assert ctrl.is_charging is False
@@ -436,6 +465,34 @@ async def test_stops_when_soc_drops_below_threshold():
         {"entity_id": "number.ev_charger_amps", "value": 32},
     )
     assert ctrl.current_amps == 32
+
+
+@pytest.mark.asyncio
+async def test_does_not_stop_when_solar_still_covers_consumption():
+    """Below stop SoC, but solar still > consumption → keep charging."""
+    ctrl, hass = _make_controller()
+    await _start_charging(ctrl, hass)
+
+    # SoC dropped below threshold but solar still covers everything
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 5,
+                solar_power_w=3000, consumption_w=1500)
+    assert ctrl._state == ChargerState.CHARGING
+
+
+@pytest.mark.asyncio
+async def test_does_not_stop_when_not_at_min_amps():
+    """Below stop SoC with solar < consumption, but amps > 6A — keep going.
+
+    Amp regulation will reduce amperage first; stop only fires once we're
+    pinned at minimum.
+    """
+    ctrl, hass = _make_controller()
+    await _start_charging(ctrl, hass)
+    ctrl._current_amps = 12  # simulate having ramped up
+
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                solar_power_w=500, consumption_w=2000)
+    assert ctrl._state == ChargerState.CHARGING
 
 
 @pytest.mark.asyncio
@@ -477,7 +534,8 @@ async def test_stops_below_stop_threshold():
     ctrl, hass = _make_controller()
     await _start_charging(ctrl, hass)
 
-    await _eval(ctrl, soc=85.0)
+    # Pinned at 6A + solar < consumption + SoC below threshold
+    await _eval(ctrl, soc=85.0, solar_power_w=500, consumption_w=2000)
     assert ctrl._state == ChargerState.IDLE
 
 
@@ -501,7 +559,8 @@ async def test_restores_user_amps_on_stop():
     assert ctrl._saved_amps == 25
 
     hass.services.async_call.reset_mock()
-    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                solar_power_w=500, consumption_w=2000)
 
     assert ctrl._state == ChargerState.IDLE
     assert ctrl.current_amps == 25
@@ -540,7 +599,8 @@ async def test_no_restore_if_entity_unavailable():
     assert ctrl._saved_amps is None
 
     hass.services.async_call.reset_mock()
-    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                solar_power_w=500, consumption_w=2000)
 
     assert ctrl._state == ChargerState.IDLE
     hass.services.async_call.assert_called_once_with(
@@ -664,11 +724,12 @@ async def test_auto_mode_sets_start_mode():
 
 @pytest.mark.asyncio
 async def test_auto_stop_clears_start_mode():
-    """SoC drop in AUTO mode clears _start_mode."""
+    """SoC drop in AUTO mode (with solar < consumption) clears _start_mode."""
     ctrl, hass = _make_controller()
     await _start_charging(ctrl, hass)
 
-    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1)
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                solar_power_w=500, consumption_w=2000)
 
     assert ctrl._state == ChargerState.IDLE
     assert ctrl._start_mode is None
