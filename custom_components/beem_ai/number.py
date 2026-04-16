@@ -10,7 +10,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, OPT_WH_CHARGE_POWER_THRESHOLD, OPT_WH_SOC_THRESHOLD
+from .const import (
+    DOMAIN,
+    OPT_EV_START_SOC_THRESHOLD,
+    OPT_EV_STOP_SOC_THRESHOLD,
+    OPT_WH_CHARGE_POWER_THRESHOLD,
+    OPT_WH_SOC_THRESHOLD,
+)
 from .sensor import _battery_device_info, _system_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +35,8 @@ async def async_setup_entry(
         BeemAIMaxSocNumber(coordinator, entry),
         BeemAIWaterHeaterSocThreshold(coordinator, entry),
         BeemAIWaterHeaterChargePowerThreshold(coordinator, entry),
+        BeemAIEvStartSocThreshold(coordinator, entry),
+        BeemAIEvStopSocThreshold(coordinator, entry),
     ])
 
 
@@ -226,5 +234,92 @@ class BeemAIWaterHeaterChargePowerThreshold(CoordinatorEntity, NumberEntity):
         self.hass.config_entries.async_update_entry(
             self._entry,
             options={**self._entry.options, OPT_WH_CHARGE_POWER_THRESHOLD: value},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIEvStartSocThreshold(CoordinatorEntity, NumberEntity):
+    """EV charger start SoC threshold (%).
+
+    Charging begins once battery SoC reaches this level (and solar surplus
+    is sustained).
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "EV Charger Start SoC Threshold"
+    _attr_icon = "mdi:battery-charging-high"
+    _attr_native_min_value = 50
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "ev_start_soc_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_ev_start_soc_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.ev_charger is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.ev_start_soc_threshold
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.ev_start_soc_threshold = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_EV_START_SOC_THRESHOLD: value},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIEvStopSocThreshold(CoordinatorEntity, NumberEntity):
+    """EV charger stop / minimum SoC threshold (%).
+
+    When the EV is drawing its minimum amperage (6 A) and solar production
+    drops, charging stops once battery SoC falls below this level
+    (AUTO mode only — manual mode ignores it).
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "EV Charger Stop SoC Threshold"
+    _attr_icon = "mdi:battery-charging-low"
+    _attr_native_min_value = 40
+    _attr_native_max_value = 99
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "ev_stop_soc_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_ev_stop_soc_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.ev_charger is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.ev_stop_soc_threshold
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.ev_stop_soc_threshold = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_EV_STOP_SOC_THRESHOLD: value},
         )
         self.async_write_ha_state()

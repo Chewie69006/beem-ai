@@ -33,6 +33,8 @@ from .const import (
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
+    OPT_EV_START_SOC_THRESHOLD,
+    OPT_EV_STOP_SOC_THRESHOLD,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
@@ -87,13 +89,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
 
-        # Water heater configurable thresholds (persisted via config entry options)
+        # Water heater / EV charger configurable thresholds
+        # (persisted via config entry options)
         options = entry.options
         self.wh_soc_threshold: float = float(
             options.get(OPT_WH_SOC_THRESHOLD, 95.0)
         )
         self.wh_charge_power_threshold: float = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
+        )
+        self.ev_start_soc_threshold: float = float(
+            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        )
+        self.ev_stop_soc_threshold: float = float(
+            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
         )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
@@ -449,6 +458,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
             await self._ev_charger.evaluate(
                 soc, export_w, battery.solar_power_w, consumption_w,
                 wh_heating,
+                start_soc_threshold=self.ev_start_soc_threshold,
+                stop_soc_threshold=self.ev_stop_soc_threshold,
             )
 
     # ---- Scheduled callbacks ----
@@ -632,6 +643,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.wh_charge_power_threshold = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
+        )
+        self.ev_start_soc_threshold = float(
+            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        )
+        self.ev_stop_soc_threshold = float(
+            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
         )
 
     # ---- EV charger manual control ----

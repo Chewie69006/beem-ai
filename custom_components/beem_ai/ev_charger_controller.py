@@ -18,9 +18,9 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
-# Thresholds (same as water heater)
-SOC_START_THRESHOLD = 95.0
-SOC_STOP_THRESHOLD = 90.0
+# SoC thresholds are supplied per-call via evaluate() (user-configurable
+# Number entities, persisted in ConfigEntry options).  Defaults are defined
+# in coordinator.py to keep a single source of truth.
 EXPORT_MIN_W = 500
 SUSTAIN_SECONDS = 30
 
@@ -118,18 +118,24 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
+        start_soc_threshold: float,
+        stop_soc_threshold: float,
     ) -> None:
-        """Evaluate state machine and act."""
+        """Evaluate state machine and act.
+
+        start_soc_threshold / stop_soc_threshold are user-configurable
+        (see Number entities in number.py, persisted in ConfigEntry options).
+        """
         now = time.monotonic()
 
         if self._state == ChargerState.IDLE:
             await self._evaluate_idle(
                 soc, export_w, solar_power_w, consumption_w,
-                water_heater_heating, now,
+                water_heater_heating, start_soc_threshold, now,
             )
         elif self._state == ChargerState.CHARGING:
             await self._evaluate_charging(
-                soc, solar_power_w, consumption_w, now
+                soc, solar_power_w, consumption_w, stop_soc_threshold, now
             )
 
     async def _evaluate_idle(
@@ -139,6 +145,7 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
+        start_soc_threshold: float,
         now: float,
     ) -> None:
         """IDLE state: check if we should start charging.
@@ -149,7 +156,7 @@ class EvChargerController:
         wh_ok = water_heater_heating is None or water_heater_heating
         if (
             wh_ok
-            and soc >= SOC_START_THRESHOLD
+            and soc >= start_soc_threshold
             and export_w >= EXPORT_MIN_W
         ):
             if self._export_sustained_since is None:
@@ -185,11 +192,12 @@ class EvChargerController:
         soc: float,
         solar_power_w: float,
         consumption_w: float,
+        stop_soc_threshold: float,
         now: float,
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC / overload."""
         # SoC stop: only applies in AUTO mode
-        if self._start_mode == StartMode.AUTO and soc < SOC_STOP_THRESHOLD:
+        if self._start_mode == StartMode.AUTO and soc < stop_soc_threshold:
             _LOGGER.info(
                 "EV charger: SoC dropped to %.1f%% — stopping EV charging", soc
             )

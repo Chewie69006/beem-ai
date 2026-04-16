@@ -10,13 +10,16 @@ from custom_components.beem_ai.ev_charger_controller import (
     MIN_CHARGE_AMPS,
     REGULATE_DELTA_W,
     REGULATE_INTERVAL_S,
-    SOC_START_THRESHOLD,
-    SOC_STOP_THRESHOLD,
     SUSTAIN_SECONDS,
     StartMode,
     WATTS_PER_AMP,
     EvChargerController,
 )
+
+# Thresholds are now user-configurable (per-call).  Tests use fixed values
+# matching the original module-level defaults so existing assertions hold.
+SOC_START_THRESHOLD = 95.0
+SOC_STOP_THRESHOLD = 90.0
 
 
 def _make_controller(user_amps=32):
@@ -38,10 +41,14 @@ def _make_controller(user_amps=32):
 
 
 async def _eval(ctrl, soc=96.0, export_w=0.0, solar_power_w=4000.0,
-                consumption_w=1000.0, water_heater_heating=True):
+                consumption_w=1000.0, water_heater_heating=True,
+                start_soc_threshold=SOC_START_THRESHOLD,
+                stop_soc_threshold=SOC_STOP_THRESHOLD):
     """Helper with sensible defaults."""
     await ctrl.evaluate(soc, export_w, solar_power_w, consumption_w,
-                        water_heater_heating)
+                        water_heater_heating,
+                        start_soc_threshold=start_soc_threshold,
+                        stop_soc_threshold=stop_soc_threshold)
 
 
 async def _start_charging(ctrl, hass, export_w=600, solar_power_w=4000.0,
