@@ -243,13 +243,19 @@ class EvChargerController:
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC / overload.
 
-        SoC-based stop (AUTO only) fires when ALL of these are true:
+        SoC-based stop fires (in *both* AUTO and MANUAL modes) when ALL
+        of these are true:
           - EV is already clamped at minimum amperage (6 A)
           - Battery is discharging (``battery_power_w < 0``) — i.e. we're
             pulling from storage to keep the EV charging
           - SoC has dropped below the user's stop threshold
+
+        Rationale: the "EV Charger" switch looks like a simple on/off
+        toggle — users reasonably expect the SoC safeguard to protect
+        the battery whether charging was started automatically by
+        solar-surplus detection or manually via the switch.
         """
-        if self._start_mode == StartMode.AUTO and soc < stop_soc_threshold:
+        if soc < stop_soc_threshold:
             at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
             battery_draining = battery_power_w < 0
             if at_min_amps and battery_draining:

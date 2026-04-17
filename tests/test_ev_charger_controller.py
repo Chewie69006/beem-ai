@@ -749,16 +749,21 @@ async def test_stop_noop_if_idle():
 
 
 @pytest.mark.asyncio
-async def test_manual_mode_ignores_soc_drop():
-    """Manual mode should NOT stop on low SoC."""
-    ctrl, hass = _make_controller()
+async def test_manual_mode_honours_soc_drop():
+    """Manual mode *does* stop on low SoC when pinned at 6 A and battery
+    discharging — the "EV Charger" switch looks like a simple on/off to
+    users, so we must keep the safeguard active regardless of who
+    started charging.
+    """
+    ctrl, hass = _make_controller(user_amps=20)
     await ctrl.start_manual()
     hass.services.async_call.reset_mock()
 
     await _eval(ctrl, soc=50.0, meter_power_w=0, battery_power_w=-1500)
 
-    assert ctrl._state == ChargerState.CHARGING
-    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl._state == ChargerState.IDLE
+    assert ctrl._start_mode is None
+    assert ctrl.current_amps == 20  # restored
 
 
 @pytest.mark.asyncio
