@@ -47,6 +47,7 @@ WATTS_PER_AMP = 230
 # below this we'd start importing the moment the EV plugs in.
 START_HEADROOM_W = MIN_CHARGE_AMPS * WATTS_PER_AMP
 SUSTAIN_SECONDS = 30
+GRACE_SECONDS = 15  # Brief headroom dips under this don't reset the sustain timer
 
 # Regulation throttle: one ±1A adjustment per REGULATE_INTERVAL_S,
 # unless the emergency-shrink path fires.
@@ -90,6 +91,7 @@ class EvChargerController:
         self._state = ChargerState.IDLE
         self._start_mode: StartMode | None = None
         self._export_sustained_since: float | None = None
+        self._last_headroom_ok_at: float | None = None
         self._current_amps: int = MIN_CHARGE_AMPS
         self._saved_amps: int | None = None  # user's setting before we took over
         self._last_regulate_time: float = 0.0  # last time we sent an amp update
@@ -120,6 +122,7 @@ class EvChargerController:
         await self._turn_on()
         self._state = ChargerState.CHARGING
         self._export_sustained_since = None
+        self._last_headroom_ok_at = None
 
     async def stop(self) -> None:
         """Stop charging (from any mode)."""
@@ -199,6 +202,7 @@ class EvChargerController:
             and soc >= start_soc_threshold
             and headroom_w >= START_HEADROOM_W
         ):
+            self._last_headroom_ok_at = now
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
                 _LOGGER.info(
@@ -228,8 +232,18 @@ class EvChargerController:
                 self._state = ChargerState.CHARGING
                 self._start_mode = StartMode.AUTO
                 self._export_sustained_since = None
+                self._last_headroom_ok_at = None
         else:
-            self._export_sustained_since = None
+            # Grace period: brief headroom dips (oscillating grid/consumption)
+            # don't reset the sustain timer — only reset if conditions have
+            # been false continuously for GRACE_SECONDS.
+            if (
+                self._export_sustained_since is not None
+                and self._last_headroom_ok_at is not None
+                and now - self._last_headroom_ok_at >= GRACE_SECONDS
+            ):
+                self._export_sustained_since = None
+                self._last_headroom_ok_at = None
 
     async def _evaluate_charging(
         self,

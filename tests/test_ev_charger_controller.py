@@ -247,6 +247,32 @@ async def test_sustain_timer_resets_when_headroom_drops():
 
 
 @pytest.mark.asyncio
+async def test_oscillating_headroom_does_not_reset_within_grace():
+    """Brief headroom dips (< GRACE_SECONDS) must NOT reset the sustain timer."""
+    ctrl, _ = _make_controller()
+
+    # t=1000: headroom OK → sustain starts
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl)
+    assert ctrl._export_sustained_since == 1000.0
+
+    # t=1005: brief dip (5s < grace=15s) → timer must NOT reset
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, meter_power_w=-200, battery_power_w=0)
+    assert ctrl._export_sustained_since == 1000.0
+
+    # t=1010: headroom back
+    with patch("time.monotonic", return_value=1010.0):
+        await _eval(ctrl)
+    assert ctrl._export_sustained_since == 1000.0
+
+    # t=1030: >= 30s since sustain start + currently OK → starts charging
+    with patch("time.monotonic", return_value=1030.0):
+        await _eval(ctrl)
+    assert ctrl._state == ChargerState.CHARGING
+
+
+@pytest.mark.asyncio
 async def test_sustain_timer_resets_when_water_heater_stops():
     ctrl, _ = _make_controller()
 

@@ -245,6 +245,36 @@ async def test_rule2_sustain_resets_when_power_drops():
 
 
 @pytest.mark.asyncio
+async def test_oscillating_conditions_do_not_reset_sustain_within_grace():
+    """Brief condition dips (< GRACE_SECONDS) must NOT reset the sustain timer.
+
+    Reproduces the oscillating-grid scenario where a single failing MQTT
+    update between successful ones was wiping the 30s timer.
+    """
+    ctrl, hass = _make_controller()
+
+    # t=1000: conditions met → sustain starts
+    with patch("time.monotonic", return_value=1000.0):
+        await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
+    assert ctrl._sustained_since == 1000.0
+
+    # t=1005: brief dip (5s < grace=15s) → timer must NOT reset
+    with patch("time.monotonic", return_value=1005.0):
+        await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=200)
+    assert ctrl._sustained_since == 1000.0
+
+    # t=1010: conditions back → still same timer
+    with patch("time.monotonic", return_value=1010.0):
+        await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
+    assert ctrl._sustained_since == 1000.0
+
+    # t=1030: >= 30s since sustain start + currently OK → turns on
+    with patch("time.monotonic", return_value=1030.0):
+        await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
+    assert ctrl._state == HeaterState.HEATING
+
+
+@pytest.mark.asyncio
 async def test_rule2_stop_hysteresis():
     """Rule 2: stops at SoC < 75% (80% - 5% hysteresis)."""
     ctrl, hass = _make_controller()

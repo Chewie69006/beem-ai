@@ -14,6 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 EXPORT_SOC_THRESHOLD = 95.0  # SoC must be > this AND exporting
 
 SUSTAIN_SECONDS = 30  # Conditions must be sustained for this long
+GRACE_SECONDS = 15  # Brief condition dips under this don't reset the sustain timer
 HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
 MAX_CONSUMPTION_W = 7000  # Kill diverters if house exceeds this
 
@@ -40,6 +41,7 @@ class WaterHeaterController:
 
         self._state = HeaterState.IDLE
         self._sustained_since: float | None = None
+        self._last_ok_at: float | None = None
         self._active_soc_threshold: float = EXPORT_SOC_THRESHOLD
         self._accumulated_kwh: float = 0.0
         self._last_accumulate_time: float | None = None
@@ -122,6 +124,7 @@ class WaterHeaterController:
                 else f"charge={charge_power_w:.0f}W"
             )
 
+            self._last_ok_at = now
             if self._sustained_since is None:
                 self._sustained_since = now
                 _LOGGER.info(
@@ -140,8 +143,18 @@ class WaterHeaterController:
                 self._state = HeaterState.HEATING
                 self._last_accumulate_time = now
                 self._sustained_since = None
+                self._last_ok_at = None
         else:
-            self._sustained_since = None
+            # Grace period: brief dips (e.g. oscillating grid) don't reset
+            # the sustain timer — only reset if conditions have been false
+            # continuously for GRACE_SECONDS.
+            if (
+                self._sustained_since is not None
+                and self._last_ok_at is not None
+                and now - self._last_ok_at >= GRACE_SECONDS
+            ):
+                self._sustained_since = None
+                self._last_ok_at = None
 
     async def _evaluate_heating(
         self, soc: float, consumption_w: float, import_w: float, now: float
