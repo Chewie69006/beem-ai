@@ -198,9 +198,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Water heater controller (optional)
         self._setup_water_heater(options)
+        if self._water_heater:
+            self._water_heater.resync_state(self.wh_soc_threshold)
 
         # EV charger controller (optional, second-priority after water heater)
         self._setup_ev_charger(options)
+        if self._ev_charger:
+            self._ev_charger.resync_state()
 
         # Start MQTT (connect() is synchronous — it creates a background task)
         _LOGGER.info("Starting MQTT client")

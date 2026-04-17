@@ -231,6 +231,30 @@ class WaterHeaterController:
 
     # -- Lifecycle --
 
+    def resync_state(self, soc_threshold: float) -> None:
+        """Sync internal state to the actual HA switch state.
+
+        Called once at integration startup so that if HA restarts while the
+        heater is physically ON, we resume in the HEATING state and the
+        SoC/overload stop checks can still fire.  Without this, the
+        controller would think it's IDLE and the switch would stay on
+        indefinitely regardless of SoC.
+
+        We don't know which rule started the session, so use the lower of
+        the two SoC thresholds — more permissive stop, safer for battery.
+        """
+        state = self._hass.states.get(self._switch_entity_id)
+        if state is None or state.state != "on":
+            return
+        self._state = HeaterState.HEATING
+        self._active_soc_threshold = min(EXPORT_SOC_THRESHOLD, soc_threshold)
+        self._last_accumulate_time = time.monotonic()
+        _LOGGER.info(
+            "Water heater: resynced to HEATING (switch is on) — "
+            "stop at SoC < %.1f%%",
+            self._active_soc_threshold - HYSTERESIS_PCT,
+        )
+
     def reset_daily(self) -> None:
         """Reset daily accumulated energy."""
         if self._accumulated_kwh > 0:

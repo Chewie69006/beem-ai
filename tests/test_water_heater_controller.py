@@ -444,3 +444,56 @@ async def test_no_overload_below_threshold():
 
     assert ctrl._state == HeaterState.HEATING
     hass.services.async_call.assert_not_called()
+
+
+# ==================================================================
+# Startup resync
+# ==================================================================
+
+
+def _set_switch_state(hass, value: str) -> None:
+    """Make hass.states.get return a switch entity in the given state."""
+    state_obj = MagicMock()
+    state_obj.state = value
+    hass.states.get = MagicMock(return_value=state_obj)
+
+
+@pytest.mark.asyncio
+async def test_resync_switch_on_sets_heating():
+    """Switch physically ON at startup → controller resyncs to HEATING."""
+    ctrl, hass = _make_controller()
+    _set_switch_state(hass, "on")
+
+    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
+
+    assert ctrl._state == HeaterState.HEATING
+    # active threshold = min(95, 80) = 80 → stop at 70%
+    assert ctrl._active_soc_threshold == SOC_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_resync_switch_off_stays_idle():
+    """Switch OFF at startup → controller stays IDLE."""
+    ctrl, hass = _make_controller()
+    _set_switch_state(hass, "off")
+
+    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
+
+    assert ctrl._state == HeaterState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_resync_then_soc_drop_turns_off():
+    """After resync to HEATING, a SoC drop below hysteresis must stop it."""
+    ctrl, hass = _make_controller()
+    _set_switch_state(hass, "on")
+    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
+
+    # SoC drops below SOC_THRESHOLD - HYSTERESIS = 70%
+    with patch("time.monotonic", return_value=2000.0):
+        await _evaluate(ctrl, soc=69.0)
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_called_once_with(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+    )

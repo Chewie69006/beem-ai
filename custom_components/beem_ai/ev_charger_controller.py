@@ -423,6 +423,31 @@ class EvChargerController:
 
     # -- Lifecycle --
 
+    def resync_state(self) -> None:
+        """Sync internal state to the actual HA toggle state.
+
+        Called once at integration startup so that if HA restarts while the
+        EV is physically charging, we resume in the CHARGING state and the
+        SoC/overload stop checks can still fire.  Start mode is set to
+        MANUAL conservatively (we can't know who started the session, and
+        MANUAL keeps the charger at minimum on overload instead of stopping
+        outright — user still has the switch to stop manually).
+        """
+        state = self._hass.states.get(self._toggle_entity_id)
+        if state is None or state.state != "on":
+            return
+        self._state = ChargerState.CHARGING
+        self._start_mode = StartMode.MANUAL
+        current = self._read_current_amps()
+        if current is not None:
+            self._current_amps = max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, current))
+        self._last_regulate_time = time.monotonic()
+        _LOGGER.info(
+            "EV charger: resynced to CHARGING (toggle is on) — "
+            "current=%dA, mode=MANUAL",
+            self._current_amps,
+        )
+
     def reconfigure(self, toggle_entity_id: str, power_entity_id: str) -> None:
         """Update entity IDs from options."""
         self._toggle_entity_id = toggle_entity_id

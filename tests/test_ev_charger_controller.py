@@ -878,3 +878,65 @@ async def test_no_start_when_water_heater_off():
         await _eval(ctrl, water_heater_heating=False)
 
     assert ctrl._state == ChargerState.IDLE
+
+
+# ==================================================================
+# Startup resync
+# ==================================================================
+
+
+def _set_ev_states(hass, toggle_state: str, amps: int = 10) -> None:
+    """Mock hass.states.get to return toggle + amps entities correctly."""
+    def _get(entity_id):
+        m = MagicMock()
+        if entity_id == "switch.ev_charger":
+            m.state = toggle_state
+        elif entity_id == "number.ev_charger_amps":
+            m.state = str(amps)
+        else:
+            m.state = "unknown"
+        return m
+    hass.states.get = MagicMock(side_effect=_get)
+
+
+@pytest.mark.asyncio
+async def test_resync_toggle_on_sets_charging():
+    """Toggle physically ON at startup → controller resyncs to CHARGING (MANUAL)."""
+    ctrl, hass = _make_controller()
+    _set_ev_states(hass, "on", amps=16)
+
+    ctrl.resync_state()
+
+    assert ctrl._state == ChargerState.CHARGING
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl._current_amps == 16
+
+
+@pytest.mark.asyncio
+async def test_resync_toggle_off_stays_idle():
+    """Toggle OFF at startup → controller stays IDLE."""
+    ctrl, hass = _make_controller()
+    _set_ev_states(hass, "off")
+
+    ctrl.resync_state()
+
+    assert ctrl._state == ChargerState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_resync_then_soc_drop_stops_charging():
+    """After resync to CHARGING, SoC drop + battery draining + min amps → stop."""
+    ctrl, hass = _make_controller()
+    _set_ev_states(hass, "on", amps=MIN_CHARGE_AMPS)
+    ctrl.resync_state()
+
+    # SoC below stop threshold, battery draining, at min amps → stops
+    with patch("time.monotonic", return_value=2000.0):
+        await _eval(
+            ctrl,
+            soc=SOC_STOP_THRESHOLD - 1,
+            battery_power_w=-500,  # draining
+            meter_power_w=0,
+        )
+
+    assert ctrl._state == ChargerState.IDLE
