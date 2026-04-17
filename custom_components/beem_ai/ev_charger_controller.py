@@ -1,8 +1,26 @@
 """EV charger controller — second-priority solar surplus diverter.
 
-Starts at 6A when solar surplus is sustained, then adjusts ±1A per MQTT
-cycle toward the target.  If the house starts importing from the grid,
-the amperage is reduced.  Goal: never draw from the grid for EV charging.
+Starts at 6A when real surplus is sustained, then adjusts ±1A per MQTT
+cycle toward the target.  Surplus is computed directly from the grid
+meter and battery power signals (not from ``consumption_w``), so we
+avoid the phantom-surplus feedback loop that happens when the
+consumption sensor does not include EV draw.
+
+Headroom model
+--------------
+Sign conventions:
+  - ``meter_power_w``  : + import  / - export
+  - ``battery_power_w``: + charging / - discharging
+
+The available headroom we can divert to the EV is::
+
+    headroom_w = -meter_power_w + battery_power_w
+
+That is, every watt of export we're currently throwing away plus every
+watt of solar we're currently stashing in the battery.  Once the EV is
+drawing N amps, the next MQTT cycle reflects that draw in ``meter_power_w``
+and/or ``battery_power_w`` — the regulation is self-correcting and no
+longer depends on how ``consumption_w`` accounts for the EV.
 
 When a water heater is configured, the EV charger waits for it to be ON
 before starting.  Without a water heater, the EV starts on surplus alone.
@@ -18,12 +36,6 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
-# SoC thresholds are supplied per-call via evaluate() (user-configurable
-# Number entities, persisted in ConfigEntry options).  Defaults are defined
-# in coordinator.py to keep a single source of truth.
-EXPORT_MIN_W = 500
-SUSTAIN_SECONDS = 30
-
 # Amperage limits
 MIN_CHARGE_AMPS = 6
 MAX_CHARGE_AMPS = 32
@@ -31,9 +43,18 @@ MAX_CHARGE_AMPS = 32
 # Watts per amp (single-phase 230 V)
 WATTS_PER_AMP = 230
 
-# Regulation throttle: skip update unless delta >= this OR time elapsed
-REGULATE_DELTA_W = 500  # ~2A worth of change
-REGULATE_INTERVAL_S = 30  # force update at least every 30s
+# Minimum sustained headroom before we start at 6 A.  6 A × 230 V = 1380 W:
+# below this we'd start importing the moment the EV plugs in.
+START_HEADROOM_W = MIN_CHARGE_AMPS * WATTS_PER_AMP
+SUSTAIN_SECONDS = 30
+
+# Regulation throttle: one ±1A adjustment per REGULATE_INTERVAL_S,
+# unless the emergency-shrink path fires.
+REGULATE_INTERVAL_S = 30
+
+# Emergency-shrink threshold: when we're drawing this much more than
+# available, bypass the throttle and shrink immediately.
+EMERGENCY_SHRINK_W = 500
 
 # Overload protection
 MAX_CONSUMPTION_W = 7000  # stop charging if house exceeds this
@@ -54,7 +75,7 @@ class StartMode(enum.Enum):
 
 
 class EvChargerController:
-    """Controls an EV charger based on solar surplus (after water heater)."""
+    """Controls an EV charger based on real grid + battery headroom."""
 
     def __init__(
         self,
@@ -114,7 +135,8 @@ class EvChargerController:
     async def evaluate(
         self,
         soc: float,
-        export_w: float,
+        meter_power_w: float,
+        battery_power_w: float,
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
@@ -123,25 +145,36 @@ class EvChargerController:
     ) -> None:
         """Evaluate state machine and act.
 
-        start_soc_threshold / stop_soc_threshold are user-configurable
-        (see Number entities in number.py, persisted in ConfigEntry options).
+        ``meter_power_w`` uses +import/-export, ``battery_power_w`` uses
+        +charge/-discharge.  Both are read directly from MQTT telemetry
+        (``BatteryState``) so they correctly reflect the true headroom.
+
+        ``solar_power_w`` and ``consumption_w`` are used only for logging
+        and the overload safety (``MAX_CONSUMPTION_W``).
+
+        ``start_soc_threshold`` / ``stop_soc_threshold`` are
+        user-configurable (see Number entities in ``number.py``, persisted
+        in ``ConfigEntry`` options).
         """
         now = time.monotonic()
+        headroom_w = -meter_power_w + battery_power_w
 
         if self._state == ChargerState.IDLE:
             await self._evaluate_idle(
-                soc, export_w, solar_power_w, consumption_w,
+                soc, headroom_w, solar_power_w, consumption_w,
                 water_heater_heating, start_soc_threshold, now,
             )
         elif self._state == ChargerState.CHARGING:
             await self._evaluate_charging(
-                soc, solar_power_w, consumption_w, stop_soc_threshold, now
+                soc, headroom_w, battery_power_w,
+                solar_power_w, consumption_w,
+                stop_soc_threshold, now,
             )
 
     async def _evaluate_idle(
         self,
         soc: float,
-        export_w: float,
+        headroom_w: float,
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
@@ -150,39 +183,39 @@ class EvChargerController:
     ) -> None:
         """IDLE state: check if we should start charging.
 
-        Start condition uses *available solar surplus* (solar − consumption)
-        instead of grid export, because at mid-range SoC the battery
-        absorbs every watt of surplus and export_w stays at 0 — which
-        would never trigger a start with a user-lowered SoC threshold.
+        Start requires:
+          - Water heater prerequisite met (or no WH configured)
+          - SoC ≥ user's start threshold
+          - ``headroom_w`` (export + battery-charge) sustained above
+            ``START_HEADROOM_W`` for ``SUSTAIN_SECONDS``.  This guarantees
+            we can absorb at least 6 A without importing from the grid.
 
-        Once SoC is above the user's start threshold, a small slice of
-        solar is diverted from the battery to the EV (starting at 6 A).
-
-        water_heater_heating is None when no water heater is configured,
-        which is treated as "prerequisite satisfied".
+        ``water_heater_heating`` is ``None`` when no water heater is
+        configured, which is treated as "prerequisite satisfied".
         """
         wh_ok = water_heater_heating is None or water_heater_heating
-        solar_surplus_w = solar_power_w - consumption_w
         if (
             wh_ok
             and soc >= start_soc_threshold
-            and solar_surplus_w >= EXPORT_MIN_W
+            and headroom_w >= START_HEADROOM_W
         ):
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
                 _LOGGER.info(
-                    "EV charger: surplus detected — SoC=%.1f%%, "
-                    "solar=%.0fW, consumption=%.0fW, surplus=%.0fW, "
+                    "EV charger: headroom detected — SoC=%.1f%%, "
+                    "solar=%.0fW, consumption=%.0fW, headroom=%.0fW, "
                     "wh=%s, waiting %ds sustained",
-                    soc, solar_power_w, consumption_w, solar_surplus_w,
+                    soc, solar_power_w, consumption_w, headroom_w,
                     water_heater_heating, SUSTAIN_SECONDS,
                 )
             elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
                 _LOGGER.info(
-                    "EV charger: surplus sustained %.0fs — SoC=%.1f%%, "
-                    "solar=%.0fW, consumption=%.0fW — starting at %dA",
+                    "EV charger: headroom sustained %.0fs — SoC=%.1f%%, "
+                    "solar=%.0fW, consumption=%.0fW, headroom=%.0fW — "
+                    "starting at %dA",
                     now - self._export_sustained_since,
-                    soc, solar_power_w, consumption_w, MIN_CHARGE_AMPS,
+                    soc, solar_power_w, consumption_w, headroom_w,
+                    MIN_CHARGE_AMPS,
                 )
                 self._saved_amps = self._read_current_amps()
                 self._current_amps = MIN_CHARGE_AMPS
@@ -201,6 +234,8 @@ class EvChargerController:
     async def _evaluate_charging(
         self,
         soc: float,
+        headroom_w: float,
+        battery_power_w: float,
         solar_power_w: float,
         consumption_w: float,
         stop_soc_threshold: float,
@@ -208,27 +243,20 @@ class EvChargerController:
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC / overload.
 
-        SoC-based stop (AUTO only) fires only when ALL of these are true:
-        - EV is already clamped at minimum amperage (6 A) — i.e. we
-          can't reduce draw any further.
-        - Solar is insufficient to sustain even 6 A on its own, so the
-          battery is being drained to keep the EV charging.
-        - Battery SoC has dropped below the user's stop threshold.
-
-        This mirrors the user-described semantic: stop once we're
-        pinned at minimum and solar can no longer cover it.
+        SoC-based stop (AUTO only) fires when ALL of these are true:
+          - EV is already clamped at minimum amperage (6 A)
+          - Battery is discharging (``battery_power_w < 0``) — i.e. we're
+            pulling from storage to keep the EV charging
+          - SoC has dropped below the user's stop threshold
         """
         if self._start_mode == StartMode.AUTO and soc < stop_soc_threshold:
             at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
-            # consumption_w already includes EV draw, so solar < consumption
-            # means the battery (or grid) is covering the shortfall.
-            battery_draining = solar_power_w < consumption_w
+            battery_draining = battery_power_w < 0
             if at_min_amps and battery_draining:
                 _LOGGER.info(
-                    "EV charger: pinned at %dA, solar=%.0fW < consumption="
-                    "%.0fW (battery draining), SoC=%.1f%% < %.1f%% — "
-                    "stopping EV charging",
-                    MIN_CHARGE_AMPS, solar_power_w, consumption_w,
+                    "EV charger: pinned at %dA, battery=%.0fW (draining), "
+                    "SoC=%.1f%% < %.1f%% — stopping EV charging",
+                    MIN_CHARGE_AMPS, battery_power_w,
                     soc, stop_soc_threshold,
                 )
                 await self._turn_off()
@@ -256,8 +284,7 @@ class EvChargerController:
                 return
 
             _LOGGER.info(
-                "EV charger: overload %.0fW >= %dW — reducing "
-                "%dA → %dA",
+                "EV charger: overload %.0fW >= %dW — reducing %dA → %dA",
                 consumption_w, MAX_CONSUMPTION_W,
                 self._current_amps, target,
             )
@@ -266,23 +293,36 @@ class EvChargerController:
             await self._set_amps(target)
             return
 
-        # Regulate amperage based on solar surplus
-        await self._regulate_amps(solar_power_w, consumption_w, now)
+        # Regulate amperage based on real headroom
+        await self._regulate_amps(
+            headroom_w, solar_power_w, consumption_w, now
+        )
 
     async def _regulate_amps(
-        self, solar_power_w: float, consumption_w: float, now: float
+        self,
+        headroom_w: float,
+        solar_power_w: float,
+        consumption_w: float,
+        now: float,
     ) -> None:
-        """Set charging amps to absorb solar surplus without grid draw.
+        """Adjust charging amps to track real headroom.
 
-        Formula: target = floor(surplus / 230) + 1
-        The +1A buffer slightly over-draws so we use a tiny bit of battery
-        rather than exporting.
+        ``headroom_w`` already reflects the current EV draw (it's derived
+        from grid + battery telemetry), so the target is simply::
 
-        Throttled: only sends an update when delta >= 500W (~2A) or 30s
-        have elapsed since the last update.
+            target = current_amps + floor(headroom_w / 230)
+
+        Positive headroom → we can grow.  Negative → we must shrink.
+
+        Throttled: only sends an update when delta ≥ 500 W (~2 A) or 30 s
+        have elapsed — except for *emergency shrink* (headroom
+        ≤ -EMERGENCY_SHRINK_W) which bypasses the throttle so we respond
+        fast to a sudden import spike.
         """
-        target_amps = self._compute_target_amps(
-            solar_power_w, consumption_w, ev_drawing=True
+        delta_amps = int(headroom_w // WATTS_PER_AMP)
+        target_amps = max(
+            MIN_CHARGE_AMPS,
+            min(MAX_CHARGE_AMPS, self._current_amps + delta_amps),
         )
 
         # Ramp limit: move at most ±1A per regulation cycle
@@ -293,35 +333,27 @@ class EvChargerController:
         else:
             return  # already at target
 
-        delta_w = abs(new_amps - self._current_amps) * WATTS_PER_AMP
         elapsed = now - self._last_regulate_time
-
-        if delta_w < REGULATE_DELTA_W and elapsed < REGULATE_INTERVAL_S:
+        emergency_shrink = (
+            new_amps < self._current_amps
+            and headroom_w <= -EMERGENCY_SHRINK_W
+        )
+        # A single ±1A step is only 230 W (< REGULATE_DELTA_W), so in
+        # practice we wait for the interval unless this is an emergency
+        # shrink.
+        if elapsed < REGULATE_INTERVAL_S and not emergency_shrink:
             return
 
         _LOGGER.info(
             "EV charger: adjusting %dA → %dA (target=%dA, "
-            "solar=%.0fW, consumption=%.0fW, surplus=%.0fW)",
+            "solar=%.0fW, consumption=%.0fW, headroom=%.0fW%s)",
             self._current_amps, new_amps, target_amps,
-            solar_power_w, consumption_w,
-            solar_power_w - consumption_w + self._current_amps * WATTS_PER_AMP,
+            solar_power_w, consumption_w, headroom_w,
+            ", emergency" if emergency_shrink else "",
         )
         self._current_amps = new_amps
         self._last_regulate_time = now
         await self._set_amps(new_amps)
-
-    def _compute_target_amps(
-        self, solar_power_w: float, consumption_w: float, *, ev_drawing: bool
-    ) -> int:
-        """Compute target amps from available solar surplus.
-
-        When ev_drawing=True, consumption_w includes EV power, so we add it
-        back to get the true home-only consumption.
-        """
-        ev_power_w = self._current_amps * WATTS_PER_AMP if ev_drawing else 0
-        surplus_w = solar_power_w - consumption_w + ev_power_w
-        target = int(surplus_w / WATTS_PER_AMP) + 1
-        return max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, target))
 
     # -- Switch control --
 

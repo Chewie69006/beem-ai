@@ -1,29 +1,42 @@
-# Task: Configurable EV Charger Start/Stop SoC Thresholds
+# Task: Fix EV Charger Phantom-Surplus Feedback Loop
 
-## Goal
-Replicate the water heater threshold pattern for the EV charger:
-- **Start threshold** (default **90%**): SoC must reach this to begin charging
-- **Stop/minimum threshold** (default **85%**): when EV is at minimum amps (6A) and solar is low, charging stops once SoC drops below this
-- Both values exposed as HA Number entities, persisted to `ConfigEntry.options` (reboot-persistent)
+## Problem
+Overnight bug: EV charger ramped from 6 A → 32 A despite real solar ≈ 700 W,
+consumption ≈ 500 W. Logs showed "surplus=6874W" — pure phantom.
+
+Root cause: `_compute_target_amps` used
+`surplus_w = solar - consumption + ev_power_w`
+assuming `consumption_w` *included* EV draw. The user's telemetry reports
+consumption *excluding* EV draw, so every 1 A ramp added 230 W of fake
+surplus, creating a positive feedback loop until MAX_CHARGE_AMPS.
+
+Also: SoC-stop never fired because stop required `at_min_amps`, and we
+were never at min due to the runaway ramp.
+
+## Fix: headroom model
+
+Drive regulation from raw grid + battery telemetry only:
+
+    headroom_w = -meter_power_w + battery_power_w
+    delta_amps = floor(headroom_w / 230)
+    target    = current_amps + delta_amps
+
+Because `meter_power_w` and `battery_power_w` already reflect the
+current EV draw, the loop is self-correcting regardless of how
+`consumption_w` accounts for the EV.
 
 ## Changes
+- [x] `ev_charger_controller.py`
+  - `evaluate()`: replace `export_w` with `meter_power_w` + `battery_power_w`
+  - Start gate: `headroom_w >= START_HEADROOM_W` (= 6 A × 230 V = 1380 W)
+  - Stop gate: `battery_power_w < 0` instead of `solar < consumption`
+  - Regulation: `_regulate_amps(headroom_w, ...)` using `current + delta`
+  - New `EMERGENCY_SHRINK_W = 500` bypasses throttle on heavy import
+- [x] `coordinator.py` — pass `battery.meter_power_w` / `battery.battery_power_w`
+- [x] `tests/test_ev_charger_controller.py` — full rewrite of `_eval` helper
+  and every scenario to use explicit meter/battery values; added two
+  phantom-surplus regression tests
 
-- [x] `const.py` — add `OPT_EV_START_SOC_THRESHOLD` and `OPT_EV_STOP_SOC_THRESHOLD`
-- [x] `coordinator.py` — initialize `ev_start_soc_threshold` / `ev_stop_soc_threshold` from options (ctor + options-update handler), pass to `_ev_charger.evaluate(...)`
-- [x] `ev_charger_controller.py` — remove module-level `SOC_START_THRESHOLD` / `SOC_STOP_THRESHOLD` constants, accept thresholds via `evaluate()` → `_evaluate_idle()` / `_evaluate_charging()`
-- [x] `number.py` — add `BeemAIEvStartSocThreshold` + `BeemAIEvStopSocThreshold` classes, register in `async_setup_entry`
-- [x] `tests/test_ev_charger_controller.py` — update imports & calls to pass thresholds
-- [x] Run tests via venv: all 320 tests pass
-
-## Review
-
-### Changes
-- **Defaults**: start = 90 %, stop = 85 % (was hard-coded 95 / 90).
-- **Persistence**: both values are written to `ConfigEntry.options` on every change via `hass.config_entries.async_update_entry(...)`. Home Assistant persists those to `core.config_entries` on disk automatically, so the values survive a reboot.
-- **UI**: two new Number entities on the "System" device, bounds 50–100 (start) and 40–99 (stop), step 1 %, mode BOX — same UX as the water heater thresholds.
-- **Controller**: thresholds are now supplied per call (`evaluate(... start_soc_threshold=..., stop_soc_threshold=...)`), so runtime edits take effect on the next MQTT tick without a restart.
-- **Availability**: the Number entities show as unavailable when the EV charger is not configured (mirrors the water-heater threshold pattern).
-
-### Test results
-- 42 / 42 EV-charger tests pass
-- 320 / 320 total tests pass
+## Test results
+- 47 / 47 EV-charger tests pass
+- 325 / 325 total tests pass

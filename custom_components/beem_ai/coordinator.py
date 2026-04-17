@@ -456,8 +456,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 self._water_heater.is_heating if self._water_heater else None
             )
             await self._ev_charger.evaluate(
-                soc, export_w, battery.solar_power_w, consumption_w,
-                wh_heating,
+                soc,
+                meter_power_w=battery.meter_power_w,
+                battery_power_w=battery.battery_power_w,
+                solar_power_w=battery.solar_power_w,
+                consumption_w=consumption_w,
+                water_heater_heating=wh_heating,
                 start_soc_threshold=self.ev_start_soc_threshold,
                 stop_soc_threshold=self.ev_stop_soc_threshold,
             )
