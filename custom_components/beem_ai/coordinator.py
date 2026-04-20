@@ -31,6 +31,7 @@ from .const import (
     OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
+    OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_START_SOC_THRESHOLD,
@@ -38,7 +39,12 @@ from .const import (
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
+    OPT_WH_MIN_DURATION_S,
     OPT_WH_SOC_THRESHOLD,
+    OPT_WH_SUSTAIN_S,
+    DEFAULT_EV_CHARGER_MODE,
+    DEFAULT_WH_MIN_DURATION_S,
+    DEFAULT_WH_SUSTAIN_S,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
 from .forecast_tracker import ForecastTracker
@@ -103,6 +109,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.ev_stop_soc_threshold: float = float(
             options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
+        )
+        self.ev_charger_mode: str = str(
+            options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)
+        )
+        self.wh_min_duration_s: int = int(
+            options.get(OPT_WH_MIN_DURATION_S, DEFAULT_WH_MIN_DURATION_S)
+        )
+        self.wh_sustain_s: int = int(
+            options.get(OPT_WH_SUSTAIN_S, DEFAULT_WH_SUSTAIN_S)
         )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
@@ -454,6 +469,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 import_w=import_w,
                 soc_threshold=self.wh_soc_threshold,
                 charge_power_threshold=self.wh_charge_power_threshold,
+                sustain_seconds=self.wh_sustain_s,
+                min_duration_s=self.wh_min_duration_s,
             )
         if self._ev_charger:
             wh_heating = (
@@ -468,6 +485,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 water_heater_heating=wh_heating,
                 start_soc_threshold=self.ev_start_soc_threshold,
                 stop_soc_threshold=self.ev_stop_soc_threshold,
+                mode=self.ev_charger_mode,
             )
 
     # ---- Scheduled callbacks ----
@@ -658,19 +676,23 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.ev_stop_soc_threshold = float(
             options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
         )
+        self.ev_charger_mode = str(
+            options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)
+        )
+        self.wh_min_duration_s = int(
+            options.get(OPT_WH_MIN_DURATION_S, DEFAULT_WH_MIN_DURATION_S)
+        )
+        self.wh_sustain_s = int(
+            options.get(OPT_WH_SUSTAIN_S, DEFAULT_WH_SUSTAIN_S)
+        )
 
-    # ---- EV charger manual control ----
+    # ---- EV charger mode control ----
 
-    async def async_start_ev_charger(self) -> None:
-        """Start EV charging manually."""
+    async def async_set_ev_charger_mode(self, mode: str) -> None:
+        """Change the EV charger mode and apply the immediate side effects."""
+        self.ev_charger_mode = mode
         if self._ev_charger:
-            await self._ev_charger.start_manual()
-            self.async_update_listeners()
-
-    async def async_stop_ev_charger(self) -> None:
-        """Stop EV charging."""
-        if self._ev_charger:
-            await self._ev_charger.stop()
+            await self._ev_charger.handle_mode_change(mode)
             self.async_update_listeners()
 
     # ---- Enable/disable ----

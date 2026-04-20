@@ -31,6 +31,30 @@ OPT_WH_SOC_THRESHOLD = "wh_soc_threshold"
 OPT_WH_CHARGE_POWER_THRESHOLD = "wh_charge_power_threshold"
 OPT_EV_START_SOC_THRESHOLD = "ev_start_soc_threshold"
 OPT_EV_STOP_SOC_THRESHOLD = "ev_stop_soc_threshold"
+OPT_EV_CHARGER_MODE = "ev_charger_mode"
+OPT_WH_MIN_DURATION_S = "wh_min_duration_s"
+OPT_WH_SUSTAIN_S = "wh_sustain_s"
+
+# --- EV charger modes ---
+EV_MODE_DISABLED = "Disabled"
+EV_MODE_AUTO = "Auto"
+EV_MODE_MANUAL = "Manual"
+EV_MODES = [EV_MODE_DISABLED, EV_MODE_AUTO, EV_MODE_MANUAL]
+DEFAULT_EV_CHARGER_MODE = EV_MODE_AUTO
+
+# --- Water heater durations ---
+# Minimum heating duration options (seconds), 15m → 2h in 15m steps
+WH_MIN_DURATION_OPTIONS_S = [
+    15 * 60, 30 * 60, 45 * 60, 60 * 60,
+    75 * 60, 90 * 60, 105 * 60, 120 * 60,
+]
+DEFAULT_WH_MIN_DURATION_S = 15 * 60
+
+# Sustain stepper bounds (seconds)
+WH_SUSTAIN_MIN_S = 5
+WH_SUSTAIN_MAX_S = 120
+WH_SUSTAIN_STEP_S = 5
+DEFAULT_WH_SUSTAIN_S = 30
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27

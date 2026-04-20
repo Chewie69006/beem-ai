@@ -71,6 +71,7 @@ async def _eval(
     water_heater_heating=True,
     start_soc_threshold=SOC_START_THRESHOLD,
     stop_soc_threshold=SOC_STOP_THRESHOLD,
+    mode="Auto",
 ):
     """Helper with sensible defaults."""
     await ctrl.evaluate(
@@ -82,6 +83,7 @@ async def _eval(
         water_heater_heating=water_heater_heating,
         start_soc_threshold=start_soc_threshold,
         stop_soc_threshold=stop_soc_threshold,
+        mode=mode,
     )
 
 
@@ -793,19 +795,17 @@ async def test_manual_mode_honours_soc_drop():
 
 
 @pytest.mark.asyncio
-async def test_manual_mode_overload_clamps_at_min():
-    """Manual mode overload: clamp at MIN_CHARGE_AMPS instead of stopping."""
+async def test_manual_mode_overload_stops():
+    """Manual mode: overload ≥ 7 kW is a hard stop (safety override)."""
     ctrl, hass = _make_controller()
     await ctrl.start_manual()
     ctrl._current_amps = MIN_CHARGE_AMPS
     hass.services.async_call.reset_mock()
 
     with patch("time.monotonic", return_value=2000.0):
-        await _eval(ctrl, consumption_w=8000)
+        await _eval(ctrl, consumption_w=8000, mode="Manual")
 
-    assert ctrl._state == ChargerState.CHARGING
-    assert ctrl._start_mode == StartMode.MANUAL
-    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    assert ctrl._state == ChargerState.IDLE
 
 
 @pytest.mark.asyncio
@@ -940,3 +940,150 @@ async def test_resync_then_soc_drop_stops_charging():
         )
 
     assert ctrl._state == ChargerState.IDLE
+
+
+# ==================================================================
+# Mode control: Disabled / Auto / Manual
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_disabled_stops_when_charging():
+    """Mode → Disabled while CHARGING must stop the charger."""
+    ctrl, hass = _make_controller()
+    await _start_charging(ctrl, hass)
+
+    await ctrl.handle_mode_change("Disabled")
+
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_disabled_noop_when_idle():
+    """Mode → Disabled while IDLE is a no-op (no switch toggled)."""
+    ctrl, hass = _make_controller()
+    await ctrl.handle_mode_change("Disabled")
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_manual_starts_at_min_when_idle():
+    """Mode → Manual while IDLE starts immediately at 6A (no sustain wait)."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+
+    assert ctrl._state == ChargerState.CHARGING
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    calls = hass.services.async_call.call_args_list
+    # Sets amps to MIN then turns on
+    assert calls[0] == call(
+        "number", "set_value",
+        {"entity_id": "number.ev_charger_amps", "value": MIN_CHARGE_AMPS},
+    )
+    assert calls[1] == call(
+        "homeassistant", "turn_on", {"entity_id": "switch.ev_charger"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_manual_noop_when_already_charging():
+    """Mode → Manual while already CHARGING leaves session alone."""
+    ctrl, hass = _make_controller()
+    await _start_charging(ctrl, hass)
+
+    await ctrl.handle_mode_change("Manual")
+
+    # Still charging, no extra turn_on
+    assert ctrl._state == ChargerState.CHARGING
+    for c in hass.services.async_call.call_args_list:
+        assert c != call(
+            "homeassistant", "turn_on", {"entity_id": "switch.ev_charger"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_disabled_mode_stops_charging():
+    """evaluate(mode=Disabled) while CHARGING must stop."""
+    ctrl, hass = _make_controller()
+    t = await _start_charging(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 10):
+        await _eval(ctrl, mode="Disabled")
+
+    assert ctrl._state == ChargerState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_evaluate_disabled_mode_idle_noop():
+    """evaluate(mode=Disabled) while IDLE is a no-op — doesn't auto-start."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, mode="Disabled")
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl, mode="Disabled")
+
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_ignores_soc_stop():
+    """Manual mode: SoC below stop + pinned at 6A + battery draining → KEEPS charging.
+
+    (Auto would stop in this scenario — see test_resync_then_soc_drop_stops_charging.)
+    """
+    ctrl, hass = _make_controller()
+
+    # Start in Manual
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+    assert ctrl._state == ChargerState.CHARGING
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    hass.services.async_call.reset_mock()
+
+    # SoC below stop, battery draining, at min amps — Auto would stop here.
+    with patch("time.monotonic", return_value=2000.0):
+        await _eval(
+            ctrl,
+            soc=SOC_STOP_THRESHOLD - 1,
+            battery_power_w=-500,
+            meter_power_w=0,
+            mode="Manual",
+        )
+
+    assert ctrl._state == ChargerState.CHARGING
+    # No turn_off was sent
+    for c in hass.services.async_call.call_args_list:
+        assert c != call(
+            "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_overload_hard_stops():
+    """Manual mode: consumption ≥ 7kW → hard stop (safety override)."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+    hass.services.async_call.reset_mock()
+
+    with patch("time.monotonic", return_value=2000.0):
+        await _eval(
+            ctrl,
+            consumption_w=MAX_CONSUMPTION_W + 100,
+            mode="Manual",
+        )
+
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+    )

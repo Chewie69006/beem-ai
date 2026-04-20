@@ -38,10 +38,21 @@ def _make_controller(power_value=2000.0):
 async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
                     consumption_w=500.0, import_w=0.0,
                     soc_threshold=SOC_THRESHOLD,
-                    charge_power_threshold=CHARGE_POWER_THRESHOLD):
-    """Helper to call evaluate with default thresholds."""
-    await ctrl.evaluate(soc, export_w, charge_power_w, consumption_w,
-                        import_w, soc_threshold, charge_power_threshold)
+                    charge_power_threshold=CHARGE_POWER_THRESHOLD,
+                    sustain_seconds=SUSTAIN_SECONDS,
+                    min_duration_s=0):
+    """Helper to call evaluate with default thresholds.
+
+    ``min_duration_s`` defaults to 0 so legacy SoC-stop tests still
+    fire immediately; pass a non-zero value to exercise the new
+    minimum-duration behavior explicitly.
+    """
+    await ctrl.evaluate(
+        soc, export_w, charge_power_w, consumption_w,
+        import_w, soc_threshold, charge_power_threshold,
+        sustain_seconds=sustain_seconds,
+        min_duration_s=min_duration_s,
+    )
 
 
 async def _heat_via_export(ctrl, hass, t0=1000.0):
@@ -487,9 +498,11 @@ async def test_resync_then_soc_drop_turns_off():
     """After resync to HEATING, a SoC drop below hysteresis must stop it."""
     ctrl, hass = _make_controller()
     _set_switch_state(hass, "on")
-    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
+    with patch("time.monotonic", return_value=1000.0):
+        ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
 
-    # SoC drops below SOC_THRESHOLD - HYSTERESIS = 70%
+    # SoC drops below SOC_THRESHOLD - HYSTERESIS = 70%; min_duration=0 so
+    # the stop fires immediately (helper default).
     with patch("time.monotonic", return_value=2000.0):
         await _evaluate(ctrl, soc=69.0)
 
@@ -497,3 +510,73 @@ async def test_resync_then_soc_drop_turns_off():
     hass.services.async_call.assert_called_once_with(
         "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
     )
+
+
+# ==================================================================
+# Minimum heating duration + configurable sustain
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_min_duration_defers_soc_stop():
+    """SoC drop during min duration → heater stays on."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)  # active threshold = 80 → stop at 70
+
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
+
+    assert ctrl._state == HeaterState.HEATING
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_min_duration_elapsed_allows_soc_stop():
+    """SoC drop after min duration elapsed → heater stops."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 30 * 60 + 10):
+        await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_overload_overrides_min_duration():
+    """Overload (≥7kW + importing) fires even during min duration."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(
+            ctrl, soc=81.0,
+            consumption_w=MAX_CONSUMPTION_W + 100,
+            import_w=500,
+            min_duration_s=30 * 60,
+        )
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_custom_sustain_seconds_used_for_turn_on():
+    """sustain_seconds=60 → heater only turns on after 60s sustained."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
+
+    with patch("time.monotonic", return_value=1030.0):
+        await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
+    assert ctrl._state == HeaterState.IDLE
+
+    with patch("time.monotonic", return_value=1060.0):
+        await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
+    assert ctrl._state == HeaterState.HEATING

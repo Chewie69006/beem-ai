@@ -16,6 +16,10 @@ from .const import (
     OPT_EV_STOP_SOC_THRESHOLD,
     OPT_WH_CHARGE_POWER_THRESHOLD,
     OPT_WH_SOC_THRESHOLD,
+    OPT_WH_SUSTAIN_S,
+    WH_SUSTAIN_MAX_S,
+    WH_SUSTAIN_MIN_S,
+    WH_SUSTAIN_STEP_S,
 )
 from .sensor import _battery_device_info, _system_device_info
 
@@ -35,6 +39,7 @@ async def async_setup_entry(
         BeemAIMaxSocNumber(coordinator, entry),
         BeemAIWaterHeaterSocThreshold(coordinator, entry),
         BeemAIWaterHeaterChargePowerThreshold(coordinator, entry),
+        BeemAIWaterHeaterSustainDuration(coordinator, entry),
         BeemAIEvStartSocThreshold(coordinator, entry),
         BeemAIEvStopSocThreshold(coordinator, entry),
     ])
@@ -234,6 +239,50 @@ class BeemAIWaterHeaterChargePowerThreshold(CoordinatorEntity, NumberEntity):
         self.hass.config_entries.async_update_entry(
             self._entry,
             options={**self._entry.options, OPT_WH_CHARGE_POWER_THRESHOLD: value},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIWaterHeaterSustainDuration(CoordinatorEntity, NumberEntity):
+    """Water heater sustain duration (seconds) — up/down stepper.
+
+    Replaces the old hardcoded 30s.  How long the start conditions must
+    be continuously satisfied before the heater turns on.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Water Heater Sustain Duration"
+    _attr_icon = "mdi:timer-sync-outline"
+    _attr_native_min_value = WH_SUSTAIN_MIN_S
+    _attr_native_max_value = WH_SUSTAIN_MAX_S
+    _attr_native_step = WH_SUSTAIN_STEP_S
+    _attr_native_unit_of_measurement = "s"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "wh_sustain_duration"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_wh_sustain_duration"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.water_heater is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return float(self.coordinator.wh_sustain_s)
+
+    async def async_set_native_value(self, value: float) -> None:
+        seconds = int(value)
+        self.coordinator.wh_sustain_s = seconds
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_WH_SUSTAIN_S: seconds},
         )
         self.async_write_ha_state()
 

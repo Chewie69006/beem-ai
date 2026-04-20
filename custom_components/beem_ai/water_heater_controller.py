@@ -13,10 +13,12 @@ _LOGGER = logging.getLogger(__name__)
 # Rule 1: hardcoded "final boss" — always active
 EXPORT_SOC_THRESHOLD = 95.0  # SoC must be > this AND exporting
 
-SUSTAIN_SECONDS = 30  # Conditions must be sustained for this long
+DEFAULT_SUSTAIN_SECONDS = 30  # Default sustain window (user-configurable)
+SUSTAIN_SECONDS = DEFAULT_SUSTAIN_SECONDS  # Back-compat alias for existing imports
 GRACE_SECONDS = 15  # Brief condition dips under this don't reset the sustain timer
 HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
 MAX_CONSUMPTION_W = 7000  # Kill diverters if house exceeds this
+DEFAULT_MIN_DURATION_S = 15 * 60  # Default minimum heating duration (user-configurable)
 
 
 class HeaterState(enum.Enum):
@@ -45,6 +47,7 @@ class WaterHeaterController:
         self._active_soc_threshold: float = EXPORT_SOC_THRESHOLD
         self._accumulated_kwh: float = 0.0
         self._last_accumulate_time: float | None = None
+        self._heating_started_at: float | None = None
 
     # -- Public properties --
 
@@ -69,6 +72,8 @@ class WaterHeaterController:
         import_w: float,
         soc_threshold: float,
         charge_power_threshold: float,
+        sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
+        min_duration_s: int = DEFAULT_MIN_DURATION_S,
     ) -> None:
         """Evaluate state machine and act.
 
@@ -76,8 +81,13 @@ class WaterHeaterController:
           Rule 1 (hardcoded):     SoC > 95% AND exporting to grid
           Rule 2 (configurable):  SoC > soc_threshold AND charge_power >= charge_power_threshold
 
-        Stop: SoC < (active rule's SoC threshold) - HYSTERESIS_PCT
-              OR consumption >= 7kW AND importing from grid
+        Stop: SoC < (active rule's SoC threshold) - HYSTERESIS_PCT — but
+        only once the heater has been on for ``min_duration_s``.  Overload
+        (consumption >= 7kW AND importing) is a safety override and fires
+        regardless of minimum duration.
+
+        ``sustain_seconds`` replaces the old hardcoded 30s sustain window
+        and is user-configurable (WH Sustain Duration number entity).
         """
         now = time.monotonic()
 
@@ -86,9 +96,12 @@ class WaterHeaterController:
                 soc, export_w, charge_power_w,
                 soc_threshold, charge_power_threshold, now,
                 import_w=import_w,
+                sustain_seconds=sustain_seconds,
             )
         elif self._state == HeaterState.HEATING:
-            await self._evaluate_heating(soc, consumption_w, import_w, now)
+            await self._evaluate_heating(
+                soc, consumption_w, import_w, now, min_duration_s,
+            )
 
     async def _evaluate_idle(
         self,
@@ -99,8 +112,13 @@ class WaterHeaterController:
         charge_power_threshold: float,
         now: float,
         import_w: float = 0.0,
+        sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
     ) -> None:
         """IDLE state: check if either rule triggers."""
+        # Grace period never exceeds half the sustain window — otherwise a
+        # condition that's been false for longer than sustain would never
+        # reset the timer.
+        grace_s = min(GRACE_SECONDS, max(1, sustain_seconds // 2))
         # Rule 1: hardcoded — SoC >= 95% AND exporting
         rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
         # Rule 2: configurable — SoC >= threshold AND charging from solar (not grid)
@@ -130,9 +148,9 @@ class WaterHeaterController:
                 _LOGGER.info(
                     "Water heater: surplus detected — SoC=%.1f%%, %s, "
                     "waiting %ds sustained before turning on",
-                    soc, reason, SUSTAIN_SECONDS,
+                    soc, reason, sustain_seconds,
                 )
-            elif now - self._sustained_since >= SUSTAIN_SECONDS:
+            elif now - self._sustained_since >= sustain_seconds:
                 _LOGGER.info(
                     "Solar surplus detected: SoC=%.1f%%, %s "
                     "(sustained %.0fs) — turning on water heater",
@@ -142,24 +160,35 @@ class WaterHeaterController:
                 await self._turn_on()
                 self._state = HeaterState.HEATING
                 self._last_accumulate_time = now
+                self._heating_started_at = now
                 self._sustained_since = None
                 self._last_ok_at = None
         else:
             # Grace period: brief dips (e.g. oscillating grid) don't reset
             # the sustain timer — only reset if conditions have been false
-            # continuously for GRACE_SECONDS.
+            # continuously for grace_s seconds.
             if (
                 self._sustained_since is not None
                 and self._last_ok_at is not None
-                and now - self._last_ok_at >= GRACE_SECONDS
+                and now - self._last_ok_at >= grace_s
             ):
                 self._sustained_since = None
                 self._last_ok_at = None
 
     async def _evaluate_heating(
-        self, soc: float, consumption_w: float, import_w: float, now: float
+        self,
+        soc: float,
+        consumption_w: float,
+        import_w: float,
+        now: float,
+        min_duration_s: int,
     ) -> None:
-        """HEATING state: accumulate energy, check if we should stop."""
+        """HEATING state: accumulate energy, check if we should stop.
+
+        Overload (house ≥ 7 kW AND importing) is a safety override and
+        fires regardless of minimum duration.  SoC-drop stop is deferred
+        until the heater has been running for at least ``min_duration_s``.
+        """
         self._accumulate_energy(now)
 
         # Overload protection: house consuming too much AND importing from grid
@@ -173,10 +202,26 @@ class WaterHeaterController:
             await self._turn_off()
             self._state = HeaterState.IDLE
             self._last_accumulate_time = None
+            self._heating_started_at = None
             return
 
         stop_threshold = self._active_soc_threshold - HYSTERESIS_PCT
         if soc < stop_threshold:
+            # Respect minimum heating duration — user asked that once
+            # we've started heating, we run for at least ``min_duration_s``
+            # before honouring the SoC-drop stop.
+            if (
+                self._heating_started_at is not None
+                and now - self._heating_started_at < min_duration_s
+            ):
+                remaining = min_duration_s - (now - self._heating_started_at)
+                _LOGGER.debug(
+                    "Water heater: SoC=%.1f%% below stop=%.1f%% but min "
+                    "duration not met (%.0fs remaining) — keeping on",
+                    soc, stop_threshold, remaining,
+                )
+                return
+
             _LOGGER.info(
                 "Battery SoC dropped to %.1f%% (< %.1f%%) — turning off water "
                 "heater (accumulated %.3f kWh)",
@@ -185,6 +230,7 @@ class WaterHeaterController:
             await self._turn_off()
             self._state = HeaterState.IDLE
             self._last_accumulate_time = None
+            self._heating_started_at = None
 
     def _accumulate_energy(self, now: float) -> None:
         """Read power sensor and accumulate energy (kWh)."""
@@ -248,7 +294,9 @@ class WaterHeaterController:
             return
         self._state = HeaterState.HEATING
         self._active_soc_threshold = min(EXPORT_SOC_THRESHOLD, soc_threshold)
-        self._last_accumulate_time = time.monotonic()
+        now = time.monotonic()
+        self._last_accumulate_time = now
+        self._heating_started_at = now
         _LOGGER.info(
             "Water heater: resynced to HEATING (switch is on) — "
             "stop at SoC < %.1f%%",

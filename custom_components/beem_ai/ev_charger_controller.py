@@ -68,11 +68,32 @@ class ChargerState(enum.Enum):
     CHARGING = "charging"
 
 
+class EvMode(enum.Enum):
+    """User-selected controller mode (from the BeemAI select entity)."""
+
+    DISABLED = "Disabled"
+    AUTO = "Auto"
+    MANUAL = "Manual"
+
+
+# Legacy alias kept for any external imports; StartMode values now map
+# 1:1 to the user-facing EvMode (except Disabled, which is not a running
+# session).  Manual/Auto here == the mode that was active when the
+# session started and still governs how overload and low-surplus are
+# handled.
 class StartMode(enum.Enum):
-    """Who initiated the current charging session."""
+    """Who / which mode initiated the current charging session."""
 
     AUTO = "auto"
     MANUAL = "manual"
+
+
+def _mode_from_str(mode: str) -> EvMode:
+    """Parse a user-facing mode string into the enum; default to AUTO."""
+    try:
+        return EvMode(mode)
+    except ValueError:
+        return EvMode.AUTO
 
 
 class EvChargerController:
@@ -108,7 +129,7 @@ class EvChargerController:
         """Return the current charging amperage."""
         return self._current_amps
 
-    # -- Manual control --
+    # -- Manual / mode control --
 
     async def start_manual(self) -> None:
         """Start charging manually at minimum amps."""
@@ -133,6 +154,25 @@ class EvChargerController:
         self._state = ChargerState.IDLE
         self._start_mode = None
 
+    async def handle_mode_change(self, mode: str) -> None:
+        """React to a user-driven mode change from the select entity.
+
+        - ``Disabled``: stop immediately if charging.
+        - ``Manual``:   start immediately at 6A if idle (no sustain wait).
+        - ``Auto``:     no immediate action; ``evaluate()`` will take over.
+        """
+        ev_mode = _mode_from_str(mode)
+        if ev_mode == EvMode.DISABLED:
+            if self._state == ChargerState.CHARGING:
+                _LOGGER.info("EV charger: mode set to Disabled — stopping")
+                await self.stop()
+        elif ev_mode == EvMode.MANUAL:
+            if self._state == ChargerState.IDLE:
+                _LOGGER.info("EV charger: mode set to Manual — starting at %dA", MIN_CHARGE_AMPS)
+                await self.start_manual()
+            # If already charging, keep running; mode will drive behavior in evaluate.
+        # Auto: nothing to do here.
+
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
     async def evaluate(
@@ -145,8 +185,16 @@ class EvChargerController:
         water_heater_heating: bool | None,
         start_soc_threshold: float,
         stop_soc_threshold: float,
+        mode: str = EvMode.AUTO.value,
     ) -> None:
         """Evaluate state machine and act.
+
+        ``mode`` is the user-selected operating mode:
+          - ``Disabled``: no-op; if charging, stop.
+          - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
+          - ``Manual``:   no auto-start; on overload ≥7 kW → stop; SoC-stop
+            is disabled (user explicitly asked for the charger to keep
+            running at 6A until they change mode or overload trips).
 
         ``meter_power_w`` uses +import/-export, ``battery_power_w`` uses
         +charge/-discharge.  Both are read directly from MQTT telemetry
@@ -161,17 +209,26 @@ class EvChargerController:
         """
         now = time.monotonic()
         headroom_w = -meter_power_w + battery_power_w
+        ev_mode = _mode_from_str(mode)
+
+        if ev_mode == EvMode.DISABLED:
+            if self._state == ChargerState.CHARGING:
+                _LOGGER.info("EV charger: mode is Disabled — stopping")
+                await self.stop()
+            return
 
         if self._state == ChargerState.IDLE:
-            await self._evaluate_idle(
-                soc, headroom_w, solar_power_w, consumption_w,
-                water_heater_heating, start_soc_threshold, now,
-            )
+            if ev_mode == EvMode.AUTO:
+                await self._evaluate_idle(
+                    soc, headroom_w, solar_power_w, consumption_w,
+                    water_heater_heating, start_soc_threshold, now,
+                )
+            # Manual + IDLE: start is user-driven via handle_mode_change.
         elif self._state == ChargerState.CHARGING:
             await self._evaluate_charging(
                 soc, headroom_w, battery_power_w,
                 solar_power_w, consumption_w,
-                stop_soc_threshold, now,
+                stop_soc_threshold, now, ev_mode,
             )
 
     async def _evaluate_idle(
@@ -254,22 +311,20 @@ class EvChargerController:
         consumption_w: float,
         stop_soc_threshold: float,
         now: float,
+        ev_mode: EvMode,
     ) -> None:
         """CHARGING state: regulate amps or stop on low SoC / overload.
 
-        SoC-based stop fires (in *both* AUTO and MANUAL modes) when ALL
-        of these are true:
-          - EV is already clamped at minimum amperage (6 A)
-          - Battery is discharging (``battery_power_w < 0``) — i.e. we're
-            pulling from storage to keep the EV charging
-          - SoC has dropped below the user's stop threshold
-
-        Rationale: the "EV Charger" switch looks like a simple on/off
-        toggle — users reasonably expect the SoC safeguard to protect
-        the battery whether charging was started automatically by
-        solar-surplus detection or manually via the switch.
+        Mode-dependent stop behavior:
+          - ``Auto``: SoC-stop fires when pinned at 6A, battery draining,
+            and SoC has dropped below the user's stop threshold.  Overload
+            (≥ 7 kW) first shrinks amps; if already at min, stops.
+          - ``Manual``: SoC-stop disabled (user explicitly wants to keep
+            charging at 6A if surplus collapses).  Overload (≥ 7 kW)
+            still stops unconditionally — the safety override.
         """
-        if soc < stop_soc_threshold:
+        # SoC-stop: Auto mode only
+        if ev_mode == EvMode.AUTO and soc < stop_soc_threshold:
             at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
             battery_draining = battery_power_w < 0
             if at_min_amps and battery_draining:
@@ -284,15 +339,23 @@ class EvChargerController:
                 self._start_mode = None
                 return
 
-        # Overload protection: house consuming too much — reduce by 1A
+        # Overload protection: house consuming too much.
         if consumption_w >= MAX_CONSUMPTION_W:
+            if ev_mode == EvMode.MANUAL:
+                # Manual: overload ≥ 7 kW → hard stop (the safety
+                # override the user explicitly asked for).
+                _LOGGER.info(
+                    "EV charger (Manual): consumption %.0fW >= %dW — "
+                    "stopping EV charging (safety override)",
+                    consumption_w, MAX_CONSUMPTION_W,
+                )
+                await self._turn_off()
+                self._state = ChargerState.IDLE
+                self._start_mode = None
+                return
+
             target = self._current_amps - 1
-
             if target < MIN_CHARGE_AMPS:
-                if self._start_mode == StartMode.MANUAL:
-                    # Manual mode: stay at minimum instead of stopping
-                    return
-
                 _LOGGER.info(
                     "EV charger: consumption %.0fW >= %dW and already at "
                     "minimum — stopping EV charging",
@@ -313,7 +376,7 @@ class EvChargerController:
             await self._set_amps(target)
             return
 
-        # Regulate amperage based on real headroom
+        # Regulate amperage based on real headroom (both modes).
         await self._regulate_amps(
             headroom_w, solar_power_w, consumption_w, now
         )
