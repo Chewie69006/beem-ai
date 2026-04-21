@@ -1068,6 +1068,42 @@ async def test_manual_mode_ignores_soc_stop():
 
 
 @pytest.mark.asyncio
+async def test_disabled_force_off_even_when_state_stale_idle():
+    """Disabled must turn off the switch even if internal state is IDLE.
+
+    Reproduces the bug where an options reload recreates the controller
+    (fresh IDLE) while the physical switch is still ON — without a
+    force-off, selecting Disabled would no-op and the car keeps charging.
+    """
+    ctrl, hass = _make_controller()
+    # Simulate: fresh controller (IDLE) but physical switch is on.
+    _set_ev_states(hass, "on", amps=10)
+    assert ctrl._state == ChargerState.IDLE
+
+    await ctrl.handle_mode_change("Disabled")
+
+    # Must have issued turn_off to the physical switch.
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+    )
+    assert ctrl._state == ChargerState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_evaluate_disabled_force_off_when_state_stale_idle():
+    """evaluate(mode=Disabled) also force-offs when physical switch is stuck on."""
+    ctrl, hass = _make_controller()
+    _set_ev_states(hass, "on", amps=10)
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, mode="Disabled")
+
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_manual_mode_overload_hard_stops():
     """Manual mode: consumption ≥ 7kW → hard stop (safety override)."""
     ctrl, hass = _make_controller()

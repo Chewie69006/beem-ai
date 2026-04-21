@@ -154,18 +154,37 @@ class EvChargerController:
         self._state = ChargerState.IDLE
         self._start_mode = None
 
+    async def _force_off(self) -> None:
+        """Unconditionally turn the physical switch off and reset state.
+
+        Used when we want "off" to mean "off" regardless of what the
+        controller thinks — e.g. on Disabled, the controller may have
+        just been rebuilt by an options reload and its in-memory state
+        is IDLE even though the physical switch is still on.
+        """
+        state = self._hass.states.get(self._toggle_entity_id)
+        physically_on = state is not None and state.state == "on"
+        if self._state == ChargerState.CHARGING or physically_on:
+            await self._turn_off()
+        self._state = ChargerState.IDLE
+        self._start_mode = None
+        self._export_sustained_since = None
+        self._last_headroom_ok_at = None
+
     async def handle_mode_change(self, mode: str) -> None:
         """React to a user-driven mode change from the select entity.
 
-        - ``Disabled``: stop immediately if charging.
+        - ``Disabled``: stop immediately (unconditionally turn the switch
+          off, even if our internal state says IDLE — it may be stale
+          after an options-reload recreates the controller while the
+          physical switch is still on).
         - ``Manual``:   start immediately at 6A if idle (no sustain wait).
         - ``Auto``:     no immediate action; ``evaluate()`` will take over.
         """
         ev_mode = _mode_from_str(mode)
         if ev_mode == EvMode.DISABLED:
-            if self._state == ChargerState.CHARGING:
-                _LOGGER.info("EV charger: mode set to Disabled — stopping")
-                await self.stop()
+            _LOGGER.info("EV charger: mode set to Disabled — stopping")
+            await self._force_off()
         elif ev_mode == EvMode.MANUAL:
             if self._state == ChargerState.IDLE:
                 _LOGGER.info("EV charger: mode set to Manual — starting at %dA", MIN_CHARGE_AMPS)
@@ -212,9 +231,10 @@ class EvChargerController:
         ev_mode = _mode_from_str(mode)
 
         if ev_mode == EvMode.DISABLED:
-            if self._state == ChargerState.CHARGING:
-                _LOGGER.info("EV charger: mode is Disabled — stopping")
-                await self.stop()
+            # Force-off even if _state == IDLE: the physical switch may
+            # still be on (e.g. controller was just rebuilt by an options
+            # reload) and we want Disabled to unambiguously mean "off".
+            await self._force_off()
             return
 
         if self._state == ChargerState.IDLE:

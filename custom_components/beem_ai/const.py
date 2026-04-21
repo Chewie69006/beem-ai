@@ -32,8 +32,11 @@ OPT_WH_CHARGE_POWER_THRESHOLD = "wh_charge_power_threshold"
 OPT_EV_START_SOC_THRESHOLD = "ev_start_soc_threshold"
 OPT_EV_STOP_SOC_THRESHOLD = "ev_stop_soc_threshold"
 OPT_EV_CHARGER_MODE = "ev_charger_mode"
+OPT_EV_REQUIRE_WATER_HEATER = "ev_require_water_heater"
 OPT_WH_MIN_DURATION_S = "wh_min_duration_s"
 OPT_WH_SUSTAIN_S = "wh_sustain_s"
+
+DEFAULT_EV_REQUIRE_WATER_HEATER = True
 
 # --- EV charger modes ---
 EV_MODE_DISABLED = "Disabled"

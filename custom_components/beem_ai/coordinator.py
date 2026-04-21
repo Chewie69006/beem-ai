@@ -34,6 +34,7 @@ from .const import (
     OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
+    OPT_EV_REQUIRE_WATER_HEATER,
     OPT_EV_START_SOC_THRESHOLD,
     OPT_EV_STOP_SOC_THRESHOLD,
     OPT_WATER_HEATER_POWER_SENSOR,
@@ -43,6 +44,7 @@ from .const import (
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
     DEFAULT_EV_CHARGER_MODE,
+    DEFAULT_EV_REQUIRE_WATER_HEATER,
     DEFAULT_WH_MIN_DURATION_S,
     DEFAULT_WH_SUSTAIN_S,
 )
@@ -118,6 +120,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.wh_sustain_s: int = int(
             options.get(OPT_WH_SUSTAIN_S, DEFAULT_WH_SUSTAIN_S)
+        )
+        self.ev_require_water_heater: bool = bool(
+            options.get(
+                OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
+            )
         )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
@@ -473,9 +480,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 min_duration_s=self.wh_min_duration_s,
             )
         if self._ev_charger:
-            wh_heating = (
-                self._water_heater.is_heating if self._water_heater else None
-            )
+            # wh_heating=None means "no prerequisite".  When the user has
+            # disabled the WH-prerequisite option (or no WH is
+            # configured), pass None so the EV evaluates on surplus alone.
+            if self._water_heater and self.ev_require_water_heater:
+                wh_heating = self._water_heater.is_heating
+            else:
+                wh_heating = None
             await self._ev_charger.evaluate(
                 soc,
                 meter_power_w=battery.meter_power_w,
@@ -652,16 +663,22 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._forecast:
             self._forecast.reconfigure(config)
 
-        # Stop active controllers before recreating them — otherwise the
-        # physical device stays on with no tracking (orphaned state).
-        if self._ev_charger and self._ev_charger.is_charging:
-            await self._ev_charger.stop()
-        if self._water_heater and self._water_heater.is_heating:
-            await self._water_heater._turn_off()
-
-        # Reconfigure water heater and EV charger controllers
+        # Reconfigure water heater and EV charger controllers.  Setup
+        # recreates the controller, so resync_state() is essential: the
+        # physical switch may be on (user toggled it, or the prior
+        # controller was mid-session) and without resync the new
+        # controller would think IDLE and subsequent mode changes (e.g.
+        # Disabled) would no-op.
         self._setup_water_heater(options)
+        if self._water_heater:
+            self._water_heater.resync_state(
+                soc_threshold=float(
+                    options.get(OPT_WH_SOC_THRESHOLD, 95.0)
+                ),
+            )
         self._setup_ev_charger(options)
+        if self._ev_charger:
+            self._ev_charger.resync_state()
 
         # Refresh persisted thresholds
         self.wh_soc_threshold = float(
@@ -684,6 +701,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.wh_sustain_s = int(
             options.get(OPT_WH_SUSTAIN_S, DEFAULT_WH_SUSTAIN_S)
+        )
+        self.ev_require_water_heater = bool(
+            options.get(
+                OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
+            )
         )
 
     # ---- EV charger mode control ----
