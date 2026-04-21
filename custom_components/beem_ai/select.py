@@ -14,8 +14,10 @@ from .const import (
     DOMAIN,
     EV_MODES,
     OPT_EV_CHARGER_MODE,
+    OPT_WATER_HEATER_MODE,
     OPT_WH_MIN_DURATION_S,
     WH_MIN_DURATION_OPTIONS_S,
+    WH_MODES,
 )
 from .sensor import _battery_device_info, _system_device_info
 
@@ -54,6 +56,7 @@ async def async_setup_entry(
     if coordinator.ev_charger is not None:
         entities.append(BeemAIEvChargerModeSelect(coordinator, entry))
     if coordinator.water_heater is not None:
+        entities.append(BeemAIWaterHeaterModeSelect(coordinator, entry))
         entities.append(BeemAIWaterHeaterMinDurationSelect(coordinator, entry))
     async_add_entities(entities)
 
@@ -164,6 +167,41 @@ class BeemAIEvChargerModeSelect(CoordinatorEntity, SelectEntity):
         self.hass.config_entries.async_update_entry(
             self._entry,
             options={**self._entry.options, OPT_EV_CHARGER_MODE: option},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIWaterHeaterModeSelect(CoordinatorEntity, SelectEntity):
+    """Select entity for water heater mode: Disabled / Auto."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Water Heater Mode"
+    _attr_icon = "mdi:water-boiler"
+    _attr_options = WH_MODES
+    _attr_translation_key = "water_heater_mode"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_water_heater_mode"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.water_heater is not None
+
+    @property
+    def current_option(self) -> str | None:
+        return self.coordinator.water_heater_mode
+
+    async def async_select_option(self, option: str) -> None:
+        await self.coordinator.async_set_water_heater_mode(option)
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_WATER_HEATER_MODE: option},
         )
         self.async_write_ha_state()
 

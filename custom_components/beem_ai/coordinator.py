@@ -40,11 +40,13 @@ from .const import (
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
+    OPT_WATER_HEATER_MODE,
     OPT_WH_MIN_DURATION_S,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
     DEFAULT_EV_CHARGER_MODE,
     DEFAULT_EV_REQUIRE_WATER_HEATER,
+    DEFAULT_WATER_HEATER_MODE,
     DEFAULT_WH_MIN_DURATION_S,
     DEFAULT_WH_SUSTAIN_S,
 )
@@ -125,6 +127,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
             options.get(
                 OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
             )
+        )
+        self.water_heater_mode: str = str(
+            options.get(OPT_WATER_HEATER_MODE, DEFAULT_WATER_HEATER_MODE)
         )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
@@ -478,6 +483,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 charge_power_threshold=self.wh_charge_power_threshold,
                 sustain_seconds=self.wh_sustain_s,
                 min_duration_s=self.wh_min_duration_s,
+                mode=self.water_heater_mode,
             )
         if self._ev_charger:
             # wh_heating=None means "no prerequisite".  When the user has
@@ -707,6 +713,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
             )
         )
+        self.water_heater_mode = str(
+            options.get(OPT_WATER_HEATER_MODE, DEFAULT_WATER_HEATER_MODE)
+        )
 
     # ---- EV charger mode control ----
 
@@ -715,6 +724,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.ev_charger_mode = mode
         if self._ev_charger:
             await self._ev_charger.handle_mode_change(mode)
+            self.async_update_listeners()
+
+    # ---- Water heater mode control ----
+
+    async def async_set_water_heater_mode(self, mode: str) -> None:
+        """Change the water heater mode and apply the immediate side effects."""
+        self.water_heater_mode = mode
+        if self._water_heater:
+            await self._water_heater.handle_mode_change(mode)
             self.async_update_listeners()
 
     # ---- Enable/disable ----

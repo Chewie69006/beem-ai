@@ -40,7 +40,8 @@ async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
                     soc_threshold=SOC_THRESHOLD,
                     charge_power_threshold=CHARGE_POWER_THRESHOLD,
                     sustain_seconds=SUSTAIN_SECONDS,
-                    min_duration_s=0):
+                    min_duration_s=0,
+                    mode="Auto"):
     """Helper to call evaluate with default thresholds.
 
     ``min_duration_s`` defaults to 0 so legacy SoC-stop tests still
@@ -52,6 +53,7 @@ async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
         import_w, soc_threshold, charge_power_threshold,
         sustain_seconds=sustain_seconds,
         min_duration_s=min_duration_s,
+        mode=mode,
     )
 
 
@@ -580,3 +582,69 @@ async def test_custom_sustain_seconds_used_for_turn_on():
     with patch("time.monotonic", return_value=1060.0):
         await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
     assert ctrl._state == HeaterState.HEATING
+
+
+# ==================================================================
+# Mode control: Disabled / Auto
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_disabled_stops_when_heating():
+    """Mode → Disabled while HEATING must stop the heater."""
+    ctrl, hass = _make_controller()
+    await _heat_via_export(ctrl, hass)
+
+    await ctrl.handle_mode_change("Disabled")
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_mode_change_disabled_force_off_when_state_stale_idle():
+    """Disabled must force-off even if internal state is IDLE but switch is on."""
+    ctrl, hass = _make_controller()
+    _set_switch_state(hass, "on")  # physical ON, controller fresh IDLE
+
+    await ctrl.handle_mode_change("Disabled")
+
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_disabled_mode_does_not_start():
+    """evaluate(mode=Disabled): even with perfect surplus conditions, no start."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
+
+    assert ctrl._state == HeaterState.IDLE
+    # Only turn_off (from _force_off check) may have been called, not turn_on.
+    for c in hass.services.async_call.call_args_list:
+        assert c != (
+            ("homeassistant", "turn_on"),
+            {"entity_id": "switch.water_heater"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_disabled_mode_stops_heating():
+    """evaluate(mode=Disabled) while HEATING must stop."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_export(ctrl, hass)
+
+    with patch("time.monotonic", return_value=t + 10):
+        await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
+
+    assert ctrl._state == HeaterState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+    )

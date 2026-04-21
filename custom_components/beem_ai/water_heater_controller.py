@@ -28,6 +28,21 @@ class HeaterState(enum.Enum):
     HEATING = "heating"
 
 
+class WhMode(enum.Enum):
+    """User-selected controller mode (from the BeemAI select entity)."""
+
+    DISABLED = "Disabled"
+    AUTO = "Auto"
+
+
+def _mode_from_str(mode: str) -> WhMode:
+    """Parse a user-facing mode string into the enum; default to AUTO."""
+    try:
+        return WhMode(mode)
+    except ValueError:
+        return WhMode.AUTO
+
+
 class WaterHeaterController:
     """Controls a water heater switch based on solar surplus."""
 
@@ -74,10 +89,15 @@ class WaterHeaterController:
         charge_power_threshold: float,
         sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
         min_duration_s: int = DEFAULT_MIN_DURATION_S,
+        mode: str = WhMode.AUTO.value,
     ) -> None:
         """Evaluate state machine and act.
 
-        Two independent rules can start heating:
+        ``mode`` is the user-selected operating mode:
+          - ``Disabled``: no-op; if heating, force-off.
+          - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
+
+        Two independent rules can start heating in Auto:
           Rule 1 (hardcoded):     SoC > 95% AND exporting to grid
           Rule 2 (configurable):  SoC > soc_threshold AND charge_power >= charge_power_threshold
 
@@ -90,6 +110,14 @@ class WaterHeaterController:
         and is user-configurable (WH Sustain Duration number entity).
         """
         now = time.monotonic()
+        wh_mode = _mode_from_str(mode)
+
+        if wh_mode == WhMode.DISABLED:
+            # Force-off even if _state == IDLE: the physical switch may
+            # still be on (e.g. controller was just rebuilt by an options
+            # reload, or user toggled the switch directly).
+            await self._force_off()
+            return
 
         if self._state == HeaterState.IDLE:
             await self._evaluate_idle(
@@ -274,6 +302,37 @@ class WaterHeaterController:
             "turn_off",
             {"entity_id": self._switch_entity_id},
         )
+
+    async def _force_off(self) -> None:
+        """Unconditionally turn the switch off and reset internal state.
+
+        Used for mode=Disabled: even if the controller thinks IDLE, the
+        physical switch may still be on (e.g. user toggled it directly,
+        or options reload recreated the controller).
+        """
+        state = self._hass.states.get(self._switch_entity_id)
+        physically_on = state is not None and state.state == "on"
+        if self._state == HeaterState.HEATING or physically_on:
+            await self._turn_off()
+        self._state = HeaterState.IDLE
+        self._sustained_since = None
+        self._last_ok_at = None
+        self._last_accumulate_time = None
+        self._heating_started_at = None
+
+    # -- Mode control --
+
+    async def handle_mode_change(self, mode: str) -> None:
+        """React to a user-driven mode change from the select entity.
+
+        - ``Disabled``: force the switch off (even if state is stale
+          IDLE — same pattern as EvChargerController).
+        - ``Auto``:     no immediate action; ``evaluate()`` will take over.
+        """
+        wh_mode = _mode_from_str(mode)
+        if wh_mode == WhMode.DISABLED:
+            _LOGGER.info("Water heater: mode set to Disabled — stopping")
+            await self._force_off()
 
     # -- Lifecycle --
 
