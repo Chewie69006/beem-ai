@@ -41,6 +41,7 @@ from .const import (
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
     OPT_WATER_HEATER_MODE,
+    WH_MODE_DISABLED,
     OPT_WH_MIN_DURATION_S,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
@@ -486,10 +487,18 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 mode=self.water_heater_mode,
             )
         if self._ev_charger:
-            # wh_heating=None means "no prerequisite".  When the user has
-            # disabled the WH-prerequisite option (or no WH is
-            # configured), pass None so the EV evaluates on surplus alone.
-            if self._water_heater and self.ev_require_water_heater:
+            # wh_heating=None means "no prerequisite".  Pass None when:
+            #   - no WH configured, or
+            #   - the Require-WH option is off, or
+            #   - WH mode is Disabled (the user explicitly told the WH
+            #     not to run — forcing the EV to wait on it would
+            #     deadlock the whole diverter chain).
+            wh_disabled = self.water_heater_mode == WH_MODE_DISABLED
+            if (
+                self._water_heater
+                and self.ev_require_water_heater
+                and not wh_disabled
+            ):
                 wh_heating = self._water_heater.is_heating
             else:
                 wh_heating = None
