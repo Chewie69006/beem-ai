@@ -12,8 +12,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
-    OPT_EV_START_SOC_THRESHOLD,
-    OPT_EV_STOP_SOC_THRESHOLD,
+    OPT_EV_TARGET_SOC,
+    OPT_EV_SOC_HYSTERESIS,
     OPT_WH_CHARGE_POWER_THRESHOLD,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
@@ -40,8 +40,8 @@ async def async_setup_entry(
         BeemAIWaterHeaterSocThreshold(coordinator, entry),
         BeemAIWaterHeaterChargePowerThreshold(coordinator, entry),
         BeemAIWaterHeaterSustainDuration(coordinator, entry),
-        BeemAIEvStartSocThreshold(coordinator, entry),
-        BeemAIEvStopSocThreshold(coordinator, entry),
+        BeemAIEvTargetSoc(coordinator, entry),
+        BeemAIEvSocHysteresis(coordinator, entry),
     ])
 
 
@@ -287,26 +287,28 @@ class BeemAIWaterHeaterSustainDuration(CoordinatorEntity, NumberEntity):
         self.async_write_ha_state()
 
 
-class BeemAIEvStartSocThreshold(CoordinatorEntity, NumberEntity):
-    """EV charger start SoC threshold (%).
+class BeemAIEvTargetSoc(CoordinatorEntity, NumberEntity):
+    """EV charger target SoC (%).
 
-    Charging begins once battery SoC reaches this level (and solar surplus
-    is sustained).
+    The closed-loop SoC level the controller tries to hold while charging
+    the EV from solar surplus.  When SoC is above target the regulator
+    biases EV draw up by 1 A (drain battery toward target); when below
+    target it biases down by 1 A (preserve battery).
     """
 
     _attr_has_entity_name = True
-    _attr_name = "EV Charger Start SoC Threshold"
+    _attr_name = "EV Charger Target SoC"
     _attr_icon = "mdi:battery-charging-high"
     _attr_native_min_value = 50
     _attr_native_max_value = 100
     _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
     _attr_mode = NumberMode.BOX
-    _attr_translation_key = "ev_start_soc_threshold"
+    _attr_translation_key = "ev_target_soc"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_ev_start_soc_threshold"
+        self._attr_unique_id = f"{entry.entry_id}_ev_target_soc"
         self._entry = entry
 
     @property
@@ -319,38 +321,38 @@ class BeemAIEvStartSocThreshold(CoordinatorEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.ev_start_soc_threshold
+        return self.coordinator.ev_target_soc
 
     async def async_set_native_value(self, value: float) -> None:
-        self.coordinator.ev_start_soc_threshold = value
+        self.coordinator.ev_target_soc = value
         self.hass.config_entries.async_update_entry(
             self._entry,
-            options={**self._entry.options, OPT_EV_START_SOC_THRESHOLD: value},
+            options={**self._entry.options, OPT_EV_TARGET_SOC: value},
         )
         self.async_write_ha_state()
 
 
-class BeemAIEvStopSocThreshold(CoordinatorEntity, NumberEntity):
-    """EV charger stop / minimum SoC threshold (%).
+class BeemAIEvSocHysteresis(CoordinatorEntity, NumberEntity):
+    """EV charger SoC hysteresis (%).
 
-    When the EV is drawing its minimum amperage (6 A) and solar production
-    drops, charging stops once battery SoC falls below this level
-    (AUTO mode only — manual mode ignores it).
+    Width of the band below ``target_soc`` before the AUTO-mode SoC-floor
+    stop fires.  When EV is pinned at 6 A and SoC drops to
+    ``target − hysteresis`` the charger turns off (AUTO mode only).
     """
 
     _attr_has_entity_name = True
-    _attr_name = "EV Charger Stop SoC Threshold"
+    _attr_name = "EV Charger SoC Hysteresis"
     _attr_icon = "mdi:battery-charging-low"
-    _attr_native_min_value = 40
-    _attr_native_max_value = 99
+    _attr_native_min_value = 1
+    _attr_native_max_value = 20
     _attr_native_step = 1
     _attr_native_unit_of_measurement = "%"
     _attr_mode = NumberMode.BOX
-    _attr_translation_key = "ev_stop_soc_threshold"
+    _attr_translation_key = "ev_soc_hysteresis"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_ev_stop_soc_threshold"
+        self._attr_unique_id = f"{entry.entry_id}_ev_soc_hysteresis"
         self._entry = entry
 
     @property
@@ -363,12 +365,12 @@ class BeemAIEvStopSocThreshold(CoordinatorEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.ev_stop_soc_threshold
+        return self.coordinator.ev_soc_hysteresis
 
     async def async_set_native_value(self, value: float) -> None:
-        self.coordinator.ev_stop_soc_threshold = value
+        self.coordinator.ev_soc_hysteresis = value
         self.hass.config_entries.async_update_entry(
             self._entry,
-            options={**self._entry.options, OPT_EV_STOP_SOC_THRESHOLD: value},
+            options={**self._entry.options, OPT_EV_SOC_HYSTERESIS: value},
         )
         self.async_write_ha_state()

@@ -35,8 +35,8 @@ from .const import (
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
-    OPT_EV_START_SOC_THRESHOLD,
-    OPT_EV_STOP_SOC_THRESHOLD,
+    OPT_EV_TARGET_SOC,
+    OPT_EV_SOC_HYSTERESIS,
     OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
@@ -109,11 +109,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.wh_charge_power_threshold: float = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
         )
-        self.ev_start_soc_threshold: float = float(
-            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        self.ev_target_soc: float = float(
+            options.get(OPT_EV_TARGET_SOC, 95.0)
         )
-        self.ev_stop_soc_threshold: float = float(
-            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
+        self.ev_soc_hysteresis: float = float(
+            options.get(OPT_EV_SOC_HYSTERESIS, 5.0)
         )
         self.ev_charger_mode: str = str(
             options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)
@@ -509,8 +509,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 solar_power_w=battery.solar_power_w,
                 consumption_w=consumption_w,
                 water_heater_heating=wh_heating,
-                start_soc_threshold=self.ev_start_soc_threshold,
-                stop_soc_threshold=self.ev_stop_soc_threshold,
+                target_soc=self.ev_target_soc,
+                soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
 
@@ -702,11 +702,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.wh_charge_power_threshold = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
         )
-        self.ev_start_soc_threshold = float(
-            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        self.ev_target_soc = float(
+            options.get(OPT_EV_TARGET_SOC, 95.0)
         )
-        self.ev_stop_soc_threshold = float(
-            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
+        self.ev_soc_hysteresis = float(
+            options.get(OPT_EV_SOC_HYSTERESIS, 5.0)
         )
         self.ev_charger_mode = str(
             options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)

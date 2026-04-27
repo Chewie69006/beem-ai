@@ -33,9 +33,12 @@ from custom_components.beem_ai.ev_charger_controller import (
 )
 
 # Thresholds are user-configurable (per-call).  Tests use fixed values
-# matching the original module-level defaults so existing assertions hold.
-SOC_START_THRESHOLD = 95.0
-SOC_STOP_THRESHOLD = 90.0
+# so existing assertions hold.  TARGET_SOC=95, hysteresis=5 → stop at 90.
+TARGET_SOC = 95.0
+SOC_HYSTERESIS = 5.0
+# Back-compat names used by tests below — derived from the closed-loop API.
+SOC_START_THRESHOLD = TARGET_SOC
+SOC_STOP_THRESHOLD = TARGET_SOC - SOC_HYSTERESIS
 
 # Default plenty-of-headroom values for "starting" scenarios (2000 W
 # export → well above START_HEADROOM_W = 1380 W).
@@ -63,17 +66,22 @@ def _make_controller(user_amps=32):
 
 async def _eval(
     ctrl,
-    soc=96.0,
+    soc=TARGET_SOC,
     meter_power_w=DEFAULT_START_METER_W,
     battery_power_w=DEFAULT_START_BATTERY_W,
     solar_power_w=4000.0,
     consumption_w=1000.0,
     water_heater_heating=True,
-    start_soc_threshold=SOC_START_THRESHOLD,
-    stop_soc_threshold=SOC_STOP_THRESHOLD,
+    target_soc=TARGET_SOC,
+    soc_hysteresis=SOC_HYSTERESIS,
     mode="Auto",
 ):
-    """Helper with sensible defaults."""
+    """Helper with sensible defaults.
+
+    Default ``soc == target_soc`` keeps the SoC bias at 0 so the older
+    headroom-only regulation tests stay valid; bias-specific tests pass
+    explicit ``soc`` values to cross the deadband.
+    """
     await ctrl.evaluate(
         soc,
         meter_power_w=meter_power_w,
@@ -81,8 +89,8 @@ async def _eval(
         solar_power_w=solar_power_w,
         consumption_w=consumption_w,
         water_heater_heating=water_heater_heating,
-        start_soc_threshold=start_soc_threshold,
-        stop_soc_threshold=stop_soc_threshold,
+        target_soc=target_soc,
+        soc_hysteresis=soc_hysteresis,
         mode=mode,
     )
 
@@ -164,11 +172,11 @@ async def test_starts_at_lower_soc_when_battery_absorbing_all_solar():
     with patch("time.monotonic", return_value=1000.0):
         await _eval(ctrl, soc=76.0,
                     meter_power_w=0.0, battery_power_w=2000.0,
-                    start_soc_threshold=75.0)
+                    target_soc=75.0)
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _eval(ctrl, soc=76.0,
                     meter_power_w=0.0, battery_power_w=2000.0,
-                    start_soc_threshold=75.0)
+                    target_soc=75.0)
     assert ctrl._state == ChargerState.CHARGING
 
 
@@ -532,18 +540,6 @@ async def test_stops_when_soc_drops_below_threshold():
         {"entity_id": "number.ev_charger_amps", "value": 32},
     )
     assert ctrl.current_amps == 32
-
-
-@pytest.mark.asyncio
-async def test_does_not_stop_when_battery_still_charging():
-    """Below stop SoC, but battery still charging (+) → keep charging."""
-    ctrl, hass = _make_controller()
-    await _start_charging(ctrl, hass)
-
-    # SoC dropped below threshold but battery is still charging
-    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 5,
-                meter_power_w=-500, battery_power_w=+500)
-    assert ctrl._state == ChargerState.CHARGING
 
 
 @pytest.mark.asyncio
@@ -1101,6 +1097,105 @@ async def test_evaluate_disabled_force_off_when_state_stale_idle():
     hass.services.async_call.assert_any_call(
         "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
     )
+
+
+# ==================================================================
+# Closed-loop SoC bias + solar<consumption stop (Auto)
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_auto_soc_bias_above_target_grows():
+    """Auto mode: SoC above target adds +1 A bias on top of headroom."""
+    ctrl, hass = _make_controller()
+    t = await _start_charging(ctrl, hass)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+
+    # Headroom = 0, soc above target → bias +1, ramp +1 to 7 A
+    with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
+        await _eval(ctrl, soc=TARGET_SOC + 2.0,
+                    meter_power_w=0, battery_power_w=0)
+    assert ctrl.current_amps == 7
+
+
+@pytest.mark.asyncio
+async def test_auto_soc_bias_below_target_shrinks():
+    """Auto mode: SoC below target adds -1 A bias to preserve battery."""
+    ctrl, hass = _make_controller()
+    t = await _start_charging(ctrl, hass)
+    ctrl._current_amps = 12
+    ctrl._last_regulate_time = t
+
+    # Headroom = 0, soc below target → bias -1, ramp -1 to 11 A
+    with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
+        await _eval(ctrl, soc=TARGET_SOC - 2.0,
+                    meter_power_w=0, battery_power_w=0)
+    assert ctrl.current_amps == 11
+
+
+@pytest.mark.asyncio
+async def test_auto_soc_bias_within_deadband_holds():
+    """Auto mode: SoC within deadband around target → no bias, no change."""
+    ctrl, hass = _make_controller()
+    t = await _start_charging(ctrl, hass)
+    ctrl._current_amps = 10
+    ctrl._last_regulate_time = t
+
+    # Soc exactly at target, headroom near zero → bias 0, no change
+    with patch("time.monotonic", return_value=t + REGULATE_INTERVAL_S):
+        await _eval(ctrl, soc=TARGET_SOC,
+                    meter_power_w=0, battery_power_w=0)
+    assert ctrl.current_amps == 10
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_no_soc_bias():
+    """Manual mode: SoC bias is disabled regardless of SoC offset."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+    ctrl._current_amps = 10
+    ctrl._last_regulate_time = 1000.0
+    hass.services.async_call.reset_mock()
+
+    # SoC well above target — Auto would bias +1, Manual must not
+    with patch("time.monotonic", return_value=1000.0 + REGULATE_INTERVAL_S):
+        await _eval(ctrl, soc=TARGET_SOC + 5.0,
+                    meter_power_w=0, battery_power_w=0,
+                    mode="Manual")
+    assert ctrl.current_amps == 10
+
+
+@pytest.mark.asyncio
+async def test_auto_stops_when_solar_below_consumption():
+    """Auto mode: solar production below house consumption → stop."""
+    ctrl, hass = _make_controller(user_amps=20)
+    await _start_charging(ctrl, hass)
+
+    await _eval(ctrl, soc=TARGET_SOC,
+                solar_power_w=500.0, consumption_w=900.0)
+
+    assert ctrl._state == ChargerState.IDLE
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_does_not_stop_when_solar_below_consumption():
+    """Manual mode: solar<consumption is not a stop trigger."""
+    ctrl, hass = _make_controller()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+    hass.services.async_call.reset_mock()
+
+    with patch("time.monotonic", return_value=2000.0):
+        await _eval(ctrl, soc=TARGET_SOC,
+                    solar_power_w=500.0, consumption_w=900.0,
+                    mode="Manual")
+    assert ctrl._state == ChargerState.CHARGING
 
 
 @pytest.mark.asyncio

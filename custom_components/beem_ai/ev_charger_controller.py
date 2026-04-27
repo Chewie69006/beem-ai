@@ -60,6 +60,17 @@ EMERGENCY_SHRINK_W = 500
 # Overload protection
 MAX_CONSUMPTION_W = 7000  # stop charging if house exceeds this
 
+# SoC tracking bias: when SoC is off-target we add this many amps on top
+# of the no-net-export equilibrium.  Combined with the ±1 A ramp limit
+# this gives a 1 A / 30 s drift toward target — slow enough to avoid
+# overshoot, fast enough to noticeably move SoC over the course of an
+# afternoon.
+#   SoC > target → +SOC_BIAS_AMPS  (drain the battery toward target)
+#   SoC < target → -SOC_BIAS_AMPS  (preserve battery so it can recover)
+# A small deadband around target avoids 1-amp flutter from MQTT jitter.
+SOC_BIAS_AMPS = 1
+SOC_DEADBAND_PCT = 0.5
+
 
 class ChargerState(enum.Enum):
     """EV charger state machine states."""
@@ -202,54 +213,74 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
-        start_soc_threshold: float,
-        stop_soc_threshold: float,
+        target_soc: float,
+        soc_hysteresis: float,
         mode: str = EvMode.AUTO.value,
     ) -> None:
         """Evaluate state machine and act.
 
         ``mode`` is the user-selected operating mode:
           - ``Disabled``: no-op; if charging, stop.
-          - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
-          - ``Manual``:   no auto-start; on overload ≥7 kW → stop; SoC-stop
-            is disabled (user explicitly asked for the charger to keep
-            running at 6A until they change mode or overload trips).
+          - ``Auto``:     closed-loop SoC regulation around ``target_soc``.
+            Starts when SoC reaches target with sustained surplus; biases
+            ±1 A to drift SoC back toward target; stops when pinned at 6 A
+            and SoC has dropped to ``target_soc - soc_hysteresis`` OR when
+            solar can't even cover the house consumption.
+          - ``Manual``:   no auto-start; on overload ≥7 kW → stop.  No SoC
+            stop and no SoC bias — user explicitly asked the charger to
+            keep running at the headroom equilibrium until they change
+            mode or overload trips.
 
         ``meter_power_w`` uses +import/-export, ``battery_power_w`` uses
         +charge/-discharge.  Both are read directly from MQTT telemetry
         (``BatteryState``) so they correctly reflect the true headroom.
 
-        ``solar_power_w`` and ``consumption_w`` are used only for logging
-        and the overload safety (``MAX_CONSUMPTION_W``).
+        ``solar_power_w`` is used to detect "no real surplus" (Auto stop)
+        and (with ``consumption_w``) the overload safety
+        (``MAX_CONSUMPTION_W``).
 
-        ``start_soc_threshold`` / ``stop_soc_threshold`` are
-        user-configurable (see Number entities in ``number.py``, persisted
-        in ``ConfigEntry`` options).
+        ``target_soc`` / ``soc_hysteresis`` are user-configurable (see
+        Number entities in ``number.py``, persisted in ``ConfigEntry``
+        options).
         """
         now = time.monotonic()
         headroom_w = -meter_power_w + battery_power_w
         ev_mode = _mode_from_str(mode)
+        prev_state = self._state
+        prev_amps = self._current_amps
 
         if ev_mode == EvMode.DISABLED:
             # Force-off even if _state == IDLE: the physical switch may
             # still be on (e.g. controller was just rebuilt by an options
             # reload) and we want Disabled to unambiguously mean "off".
             await self._force_off()
-            return
-
-        if self._state == ChargerState.IDLE:
+            decision = "disabled: force-off"
+        elif self._state == ChargerState.IDLE:
             if ev_mode == EvMode.AUTO:
-                await self._evaluate_idle(
+                decision = await self._evaluate_idle(
                     soc, headroom_w, solar_power_w, consumption_w,
-                    water_heater_heating, start_soc_threshold, now,
+                    water_heater_heating, target_soc, now,
                 )
-            # Manual + IDLE: start is user-driven via handle_mode_change.
-        elif self._state == ChargerState.CHARGING:
-            await self._evaluate_charging(
+            else:
+                decision = "idle: Manual mode — waiting for user start"
+        else:
+            decision = await self._evaluate_charging(
                 soc, headroom_w, battery_power_w,
                 solar_power_w, consumption_w,
-                stop_soc_threshold, now, ev_mode,
+                target_soc, soc_hysteresis, now, ev_mode,
             )
+
+        _LOGGER.debug(
+            "EV eval: mode=%s state=%s→%s amps=%d→%d soc=%.1f%% "
+            "target=%.1f%% hyst=%.1f%% meter=%+.0fW batt=%+.0fW "
+            "headroom=%+.0fW solar=%.0fW cons=%.0fW wh=%s → %s",
+            ev_mode.value, prev_state.value, self._state.value,
+            prev_amps, self._current_amps,
+            soc, target_soc, soc_hysteresis,
+            meter_power_w, battery_power_w, headroom_w,
+            solar_power_w, consumption_w, water_heater_heating,
+            decision,
+        )
 
     async def _evaluate_idle(
         self,
@@ -258,27 +289,31 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
-        start_soc_threshold: float,
+        target_soc: float,
         now: float,
-    ) -> None:
+    ) -> str:
         """IDLE state: check if we should start charging.
 
-        Start requires:
+        Start requires (Auto mode):
           - Water heater prerequisite met (or no WH configured)
-          - SoC ≥ user's start threshold
+          - SoC ≥ ``target_soc`` — we only divert once the battery has
+            reached the level the user wants to hold
           - ``headroom_w`` (export + battery-charge) sustained above
             ``START_HEADROOM_W`` for ``SUSTAIN_SECONDS``.  This guarantees
             we can absorb at least 6 A without importing from the grid.
 
         ``water_heater_heating`` is ``None`` when no water heater is
-        configured, which is treated as "prerequisite satisfied".
+        configured (or the prerequisite is disabled), treated as
+        "prerequisite satisfied".
         """
         wh_ok = water_heater_heating is None or water_heater_heating
-        if (
+        conditions_met = (
             wh_ok
-            and soc >= start_soc_threshold
+            and soc >= target_soc
             and headroom_w >= START_HEADROOM_W
-        ):
+        )
+
+        if conditions_met:
             self._last_headroom_ok_at = now
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
@@ -289,38 +324,47 @@ class EvChargerController:
                     soc, solar_power_w, consumption_w, headroom_w,
                     water_heater_heating, SUSTAIN_SECONDS,
                 )
-            elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
-                _LOGGER.info(
-                    "EV charger: headroom sustained %.0fs — SoC=%.1f%%, "
-                    "solar=%.0fW, consumption=%.0fW, headroom=%.0fW — "
-                    "starting at %dA",
-                    now - self._export_sustained_since,
-                    soc, solar_power_w, consumption_w, headroom_w,
-                    MIN_CHARGE_AMPS,
-                )
-                self._saved_amps = self._read_current_amps()
-                self._current_amps = MIN_CHARGE_AMPS
-                self._last_regulate_time = now
-                _LOGGER.info(
-                    "EV charger: saved user amps=%s before taking over",
-                    self._saved_amps,
-                )
-                await self._turn_on()
-                self._state = ChargerState.CHARGING
-                self._start_mode = StartMode.AUTO
-                self._export_sustained_since = None
-                self._last_headroom_ok_at = None
-        else:
-            # Grace period: brief headroom dips (oscillating grid/consumption)
-            # don't reset the sustain timer — only reset if conditions have
-            # been false continuously for GRACE_SECONDS.
-            if (
-                self._export_sustained_since is not None
-                and self._last_headroom_ok_at is not None
-                and now - self._last_headroom_ok_at >= GRACE_SECONDS
-            ):
-                self._export_sustained_since = None
-                self._last_headroom_ok_at = None
+                return f"idle: arming sustain timer ({SUSTAIN_SECONDS}s)"
+
+            sustained = now - self._export_sustained_since
+            if sustained < SUSTAIN_SECONDS:
+                return f"idle: sustaining {sustained:.0f}s/{SUSTAIN_SECONDS}s"
+
+            _LOGGER.info(
+                "EV charger: headroom sustained %.0fs — SoC=%.1f%%, "
+                "solar=%.0fW, consumption=%.0fW, headroom=%.0fW — "
+                "starting at %dA",
+                sustained, soc, solar_power_w, consumption_w, headroom_w,
+                MIN_CHARGE_AMPS,
+            )
+            self._saved_amps = self._read_current_amps()
+            self._current_amps = MIN_CHARGE_AMPS
+            self._last_regulate_time = now
+            _LOGGER.info(
+                "EV charger: saved user amps=%s before taking over",
+                self._saved_amps,
+            )
+            await self._turn_on()
+            self._state = ChargerState.CHARGING
+            self._start_mode = StartMode.AUTO
+            self._export_sustained_since = None
+            self._last_headroom_ok_at = None
+            return f"start AUTO at {MIN_CHARGE_AMPS}A"
+
+        # Grace period: brief dips don't reset the sustain timer
+        if (
+            self._export_sustained_since is not None
+            and self._last_headroom_ok_at is not None
+            and now - self._last_headroom_ok_at >= GRACE_SECONDS
+        ):
+            self._export_sustained_since = None
+            self._last_headroom_ok_at = None
+
+        if not wh_ok:
+            return "idle: water heater prerequisite not met"
+        if soc < target_soc:
+            return f"idle: SoC {soc:.1f}% < target {target_soc:.1f}%"
+        return f"idle: headroom {headroom_w:.0f}W < {START_HEADROOM_W}W"
 
     async def _evaluate_charging(
         self,
@@ -329,41 +373,30 @@ class EvChargerController:
         battery_power_w: float,
         solar_power_w: float,
         consumption_w: float,
-        stop_soc_threshold: float,
+        target_soc: float,
+        soc_hysteresis: float,
         now: float,
         ev_mode: EvMode,
-    ) -> None:
+    ) -> str:
         """CHARGING state: regulate amps or stop on low SoC / overload.
 
         Mode-dependent stop behavior:
-          - ``Auto``: SoC-stop fires when pinned at 6A, battery draining,
-            and SoC has dropped below the user's stop threshold.  Overload
-            (≥ 7 kW) first shrinks amps; if already at min, stops.
-          - ``Manual``: SoC-stop disabled (user explicitly wants to keep
-            charging at 6A if surplus collapses).  Overload (≥ 7 kW)
-            still stops unconditionally — the safety override.
+          - ``Auto``: SoC-floor stop fires when pinned at 6 A and SoC has
+            dropped to ``target_soc - soc_hysteresis``.  Also stops when
+            solar production can't even cover the house consumption (no
+            real surplus left to divert).  Overload (≥ 7 kW) first shrinks
+            amps; if already at min, stops.
+          - ``Manual``: no SoC stop and no "no surplus" stop (user
+            explicitly wants to keep charging at 6 A if surplus collapses).
+            Overload (≥ 7 kW) still stops unconditionally — the safety
+            override.
         """
-        # SoC-stop: Auto mode only
-        if ev_mode == EvMode.AUTO and soc < stop_soc_threshold:
-            at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
-            battery_draining = battery_power_w < 0
-            if at_min_amps and battery_draining:
-                _LOGGER.info(
-                    "EV charger: pinned at %dA, battery=%.0fW (draining), "
-                    "SoC=%.1f%% < %.1f%% — stopping EV charging",
-                    MIN_CHARGE_AMPS, battery_power_w,
-                    soc, stop_soc_threshold,
-                )
-                await self._turn_off()
-                self._state = ChargerState.IDLE
-                self._start_mode = None
-                return
+        stop_soc = target_soc - soc_hysteresis
 
-        # Overload protection: house consuming too much.
+        # Overload protection runs first — it's a safety override for both
+        # modes and must take precedence over surplus-based stops.
         if consumption_w >= MAX_CONSUMPTION_W:
             if ev_mode == EvMode.MANUAL:
-                # Manual: overload ≥ 7 kW → hard stop (the safety
-                # override the user explicitly asked for).
                 _LOGGER.info(
                     "EV charger (Manual): consumption %.0fW >= %dW — "
                     "stopping EV charging (safety override)",
@@ -372,7 +405,7 @@ class EvChargerController:
                 await self._turn_off()
                 self._state = ChargerState.IDLE
                 self._start_mode = None
-                return
+                return f"stop: Manual overload (cons {consumption_w:.0f}W)"
 
             target = self._current_amps - 1
             if target < MIN_CHARGE_AMPS:
@@ -384,7 +417,7 @@ class EvChargerController:
                 await self._turn_off()
                 self._state = ChargerState.IDLE
                 self._start_mode = None
-                return
+                return f"stop: overload at min (cons {consumption_w:.0f}W)"
 
             _LOGGER.info(
                 "EV charger: overload %.0fW >= %dW — reducing %dA → %dA",
@@ -394,38 +427,90 @@ class EvChargerController:
             self._current_amps = target
             self._last_regulate_time = now
             await self._set_amps(target)
-            return
+            return f"overload: cons {consumption_w:.0f}W → {target}A"
 
-        # Regulate amperage based on real headroom (both modes).
-        await self._regulate_amps(
-            headroom_w, solar_power_w, consumption_w, now
+        # Auto-only surplus stops (after overload, before regulation):
+        if ev_mode == EvMode.AUTO:
+            if (
+                self._current_amps <= MIN_CHARGE_AMPS
+                and soc < stop_soc
+            ):
+                _LOGGER.info(
+                    "EV charger: pinned at %dA, SoC=%.1f%% < %.1f%% "
+                    "(target %.1f%% − hysteresis %.1f%%) — stopping",
+                    MIN_CHARGE_AMPS, soc, stop_soc,
+                    target_soc, soc_hysteresis,
+                )
+                await self._turn_off()
+                self._state = ChargerState.IDLE
+                self._start_mode = None
+                return f"stop: SoC floor (SoC {soc:.1f}% < {stop_soc:.1f}%)"
+
+            if solar_power_w < consumption_w:
+                _LOGGER.info(
+                    "EV charger: solar=%.0fW < house consumption=%.0fW — "
+                    "no real surplus to divert, stopping EV charging",
+                    solar_power_w, consumption_w,
+                )
+                await self._turn_off()
+                self._state = ChargerState.IDLE
+                self._start_mode = None
+                return (
+                    f"stop: no surplus (solar {solar_power_w:.0f}W < "
+                    f"cons {consumption_w:.0f}W)"
+                )
+
+        # Regulate amperage based on real headroom (+ SoC bias in Auto).
+        return await self._regulate_amps(
+            soc, headroom_w, target_soc,
+            solar_power_w, consumption_w, now, ev_mode,
         )
 
     async def _regulate_amps(
         self,
+        soc: float,
         headroom_w: float,
+        target_soc: float,
         solar_power_w: float,
         consumption_w: float,
         now: float,
-    ) -> None:
-        """Adjust charging amps to track real headroom.
+        ev_mode: EvMode,
+    ) -> str:
+        """Adjust charging amps to track real headroom (+ SoC bias in Auto).
 
         ``headroom_w`` already reflects the current EV draw (it's derived
-        from grid + battery telemetry), so the target is simply::
+        from grid + battery telemetry).  The base target is::
 
-            target = current_amps + floor(headroom_w / 230)
+            base_target = current_amps + floor(headroom_w / 230)
 
-        Positive headroom → we can grow.  Negative → we must shrink.
+        In ``Auto`` mode we add a small SoC-tracking bias so the closed
+        loop drifts SoC toward ``target_soc``:
+          - ``soc - target_soc > +SOC_DEADBAND_PCT`` → +SOC_BIAS_AMPS
+          - ``soc - target_soc < -SOC_DEADBAND_PCT`` → -SOC_BIAS_AMPS
+          - otherwise (deadband) → 0
+        Combined with the ±1 A ramp limit this gives ~1 A / 30 s of drift.
+        ``Manual`` mode uses no bias (pure headroom equilibrium).
 
-        Throttled: only sends an update when delta ≥ 500 W (~2 A) or 30 s
-        have elapsed — except for *emergency shrink* (headroom
-        ≤ -EMERGENCY_SHRINK_W) which bypasses the throttle so we respond
-        fast to a sudden import spike.
+        Throttled: only sends an update when 30 s have elapsed — except
+        for *emergency shrink* (headroom ≤ -EMERGENCY_SHRINK_W) which
+        bypasses the throttle so we respond fast to a sudden import spike.
         """
         delta_amps = int(headroom_w // WATTS_PER_AMP)
+
+        if ev_mode == EvMode.AUTO:
+            soc_diff = soc - target_soc
+            if soc_diff > SOC_DEADBAND_PCT:
+                soc_bias = SOC_BIAS_AMPS
+            elif soc_diff < -SOC_DEADBAND_PCT:
+                soc_bias = -SOC_BIAS_AMPS
+            else:
+                soc_bias = 0
+        else:
+            soc_bias = 0
+
         target_amps = max(
             MIN_CHARGE_AMPS,
-            min(MAX_CHARGE_AMPS, self._current_amps + delta_amps),
+            min(MAX_CHARGE_AMPS, self._current_amps + delta_amps + soc_bias),
         )
 
         # Ramp limit: move at most ±1A per regulation cycle
@@ -434,29 +519,39 @@ class EvChargerController:
         elif target_amps < self._current_amps:
             new_amps = self._current_amps - 1
         else:
-            return  # already at target
+            return (
+                f"hold {self._current_amps}A "
+                f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d})"
+            )
 
         elapsed = now - self._last_regulate_time
         emergency_shrink = (
             new_amps < self._current_amps
             and headroom_w <= -EMERGENCY_SHRINK_W
         )
-        # A single ±1A step is only 230 W (< REGULATE_DELTA_W), so in
-        # practice we wait for the interval unless this is an emergency
-        # shrink.
         if elapsed < REGULATE_INTERVAL_S and not emergency_shrink:
-            return
+            return (
+                f"throttled {self._current_amps}A "
+                f"(elapsed {elapsed:.0f}s/{REGULATE_INTERVAL_S}s, "
+                f"would-be {new_amps}A)"
+            )
 
         _LOGGER.info(
-            "EV charger: adjusting %dA → %dA (target=%dA, "
+            "EV charger: adjusting %dA → %dA (target=%dA, bias=%+d, "
             "solar=%.0fW, consumption=%.0fW, headroom=%.0fW%s)",
-            self._current_amps, new_amps, target_amps,
+            self._current_amps, new_amps, target_amps, soc_bias,
             solar_power_w, consumption_w, headroom_w,
             ", emergency" if emergency_shrink else "",
         )
+        prev = self._current_amps
         self._current_amps = new_amps
         self._last_regulate_time = now
         await self._set_amps(new_amps)
+        return (
+            f"adjust {prev}A→{new_amps}A "
+            f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d}"
+            f"{', emergency' if emergency_shrink else ''})"
+        )
 
     # -- Switch control --
 

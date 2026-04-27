@@ -111,25 +111,35 @@ class WaterHeaterController:
         """
         now = time.monotonic()
         wh_mode = _mode_from_str(mode)
+        prev_state = self._state
 
         if wh_mode == WhMode.DISABLED:
             # Force-off even if _state == IDLE: the physical switch may
             # still be on (e.g. controller was just rebuilt by an options
             # reload, or user toggled the switch directly).
             await self._force_off()
-            return
-
-        if self._state == HeaterState.IDLE:
-            await self._evaluate_idle(
+            decision = "disabled: force-off"
+        elif self._state == HeaterState.IDLE:
+            decision = await self._evaluate_idle(
                 soc, export_w, charge_power_w,
                 soc_threshold, charge_power_threshold, now,
                 import_w=import_w,
                 sustain_seconds=sustain_seconds,
             )
-        elif self._state == HeaterState.HEATING:
-            await self._evaluate_heating(
+        else:
+            decision = await self._evaluate_heating(
                 soc, consumption_w, import_w, now, min_duration_s,
             )
+
+        _LOGGER.debug(
+            "WH eval: mode=%s state=%s→%s soc=%.1f%% socThr=%.1f%% "
+            "export=%.0fW chargeP=%.0fW chargeThr=%.0fW import=%.0fW "
+            "cons=%.0fW → %s",
+            wh_mode.value, prev_state.value, self._state.value,
+            soc, soc_threshold,
+            export_w, charge_power_w, charge_power_threshold, import_w,
+            consumption_w, decision,
+        )
 
     async def _evaluate_idle(
         self,
@@ -141,7 +151,7 @@ class WaterHeaterController:
         now: float,
         import_w: float = 0.0,
         sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
-    ) -> None:
+    ) -> str:
         """IDLE state: check if either rule triggers."""
         # Grace period never exceeds half the sustain window — otherwise a
         # condition that's been false for longer than sustain would never
@@ -178,6 +188,7 @@ class WaterHeaterController:
                     "waiting %ds sustained before turning on",
                     soc, reason, sustain_seconds,
                 )
+                return f"idle: arming sustain ({sustain_seconds}s, {reason})"
             elif now - self._sustained_since >= sustain_seconds:
                 _LOGGER.info(
                     "Solar surplus detected: SoC=%.1f%%, %s "
@@ -191,17 +202,32 @@ class WaterHeaterController:
                 self._heating_started_at = now
                 self._sustained_since = None
                 self._last_ok_at = None
-        else:
-            # Grace period: brief dips (e.g. oscillating grid) don't reset
-            # the sustain timer — only reset if conditions have been false
-            # continuously for grace_s seconds.
-            if (
-                self._sustained_since is not None
-                and self._last_ok_at is not None
-                and now - self._last_ok_at >= grace_s
-            ):
-                self._sustained_since = None
-                self._last_ok_at = None
+                return f"start: {reason} (active SoC={active_soc:.1f}%)"
+            else:
+                sustained = now - self._sustained_since
+                return (
+                    f"idle: sustaining {sustained:.0f}s/{sustain_seconds}s "
+                    f"({reason})"
+                )
+
+        # Grace period: brief dips (e.g. oscillating grid) don't reset
+        # the sustain timer — only reset if conditions have been false
+        # continuously for grace_s seconds.
+        if (
+            self._sustained_since is not None
+            and self._last_ok_at is not None
+            and now - self._last_ok_at >= grace_s
+        ):
+            self._sustained_since = None
+            self._last_ok_at = None
+            return "idle: sustain reset (grace expired)"
+        if self._sustained_since is not None:
+            return "idle: in grace (conditions dipped)"
+        return (
+            f"idle: no trigger (rule1={'y' if soc >= EXPORT_SOC_THRESHOLD else 'n'}/"
+            f"export={export_w:.0f}W, "
+            f"rule2 SoC>{soc_threshold:.0f} & charge>{charge_power_threshold:.0f}W)"
+        )
 
     async def _evaluate_heating(
         self,
@@ -210,7 +236,7 @@ class WaterHeaterController:
         import_w: float,
         now: float,
         min_duration_s: int,
-    ) -> None:
+    ) -> str:
         """HEATING state: accumulate energy, check if we should stop.
 
         Overload (house ≥ 7 kW AND importing) is a safety override and
@@ -231,7 +257,7 @@ class WaterHeaterController:
             self._state = HeaterState.IDLE
             self._last_accumulate_time = None
             self._heating_started_at = None
-            return
+            return f"stop: overload (cons {consumption_w:.0f}W, import {import_w:.0f}W)"
 
         stop_threshold = self._active_soc_threshold - HYSTERESIS_PCT
         if soc < stop_threshold:
@@ -248,7 +274,10 @@ class WaterHeaterController:
                     "duration not met (%.0fs remaining) — keeping on",
                     soc, stop_threshold, remaining,
                 )
-                return
+                return (
+                    f"hold: SoC<{stop_threshold:.1f}% but min-duration "
+                    f"{remaining:.0f}s remaining"
+                )
 
             _LOGGER.info(
                 "Battery SoC dropped to %.1f%% (< %.1f%%) — turning off water "
@@ -259,6 +288,8 @@ class WaterHeaterController:
             self._state = HeaterState.IDLE
             self._last_accumulate_time = None
             self._heating_started_at = None
+            return f"stop: SoC {soc:.1f}% < {stop_threshold:.1f}%"
+        return f"heating: SoC {soc:.1f}% (stop at {stop_threshold:.1f}%)"
 
     def _accumulate_energy(self, now: float) -> None:
         """Read power sensor and accumulate energy (kWh)."""
