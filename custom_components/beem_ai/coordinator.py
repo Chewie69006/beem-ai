@@ -42,6 +42,7 @@ from .const import (
     OPT_WH_CHARGE_POWER_THRESHOLD,
     OPT_WATER_HEATER_MODE,
     WH_MODE_DISABLED,
+    EV_MODE_MANUAL,
     OPT_WH_MIN_DURATION_S,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
@@ -473,31 +474,42 @@ class BeemAICoordinator(DataUpdateCoordinator):
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
 
+        ev_manual = self.ev_charger_mode == EV_MODE_MANUAL
         if self._water_heater:
-            await self._water_heater.evaluate(
-                soc,
-                export_w=export_w,
-                charge_power_w=battery.battery_power_w,
-                consumption_w=consumption_w,
-                import_w=import_w,
-                soc_threshold=self.wh_soc_threshold,
-                charge_power_threshold=self.wh_charge_power_threshold,
-                sustain_seconds=self.wh_sustain_s,
-                min_duration_s=self.wh_min_duration_s,
-                mode=self.water_heater_mode,
-            )
+            # When EV is in Manual, the user is explicitly steering surplus
+            # into the car; don't auto-start the heater on top.  We still
+            # let the controller run when WH is already heating so SoC-floor
+            # and overload stops keep working.
+            if ev_manual and not self._water_heater.is_heating:
+                pass
+            else:
+                await self._water_heater.evaluate(
+                    soc,
+                    export_w=export_w,
+                    charge_power_w=battery.battery_power_w,
+                    consumption_w=consumption_w,
+                    import_w=import_w,
+                    soc_threshold=self.wh_soc_threshold,
+                    charge_power_threshold=self.wh_charge_power_threshold,
+                    sustain_seconds=self.wh_sustain_s,
+                    min_duration_s=self.wh_min_duration_s,
+                    mode=self.water_heater_mode,
+                )
         if self._ev_charger:
             # wh_heating=None means "no prerequisite".  Pass None when:
             #   - no WH configured, or
             #   - the Require-WH option is off, or
             #   - WH mode is Disabled (the user explicitly told the WH
             #     not to run — forcing the EV to wait on it would
-            #     deadlock the whole diverter chain).
+            #     deadlock the whole diverter chain), or
+            #   - EV is in Manual mode (user is overriding; don't gate
+            #     on WH state).
             wh_disabled = self.water_heater_mode == WH_MODE_DISABLED
             if (
                 self._water_heater
                 and self.ev_require_water_heater
                 and not wh_disabled
+                and not ev_manual
             ):
                 wh_heating = self._water_heater.is_heating
             else:

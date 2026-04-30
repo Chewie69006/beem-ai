@@ -1168,18 +1168,58 @@ async def test_manual_mode_no_soc_bias():
 
 
 @pytest.mark.asyncio
-async def test_auto_stops_when_solar_below_consumption():
-    """Auto mode: solar production below house consumption → stop."""
+async def test_auto_stops_when_pinned_at_min_with_sustained_no_surplus():
+    """Auto: pinned at MIN amps + sustained negative headroom → stop.
+
+    Regression: previously fired on the first sample where solar <
+    consumption, which is misleading because consumption already
+    includes the EV's own draw.  Now we only stop after SUSTAIN_SECONDS
+    of headroom < -WATTS_PER_AMP while at MIN amps — so the regulator
+    has a chance to ramp down first.
+    """
     ctrl, hass = _make_controller(user_amps=20)
-    await _start_charging(ctrl, hass)
+    t0 = await _start_charging(ctrl, hass)
+    ctrl._current_amps = MIN_CHARGE_AMPS  # pin at min
+    hass.services.async_call.reset_mock()
 
-    await _eval(ctrl, soc=TARGET_SOC,
-                solar_power_w=500.0, consumption_w=900.0)
+    # First sample: importing >230W → arms the timer but doesn't stop.
+    with patch("time.monotonic", return_value=t0 + 100):
+        await _eval(ctrl, soc=TARGET_SOC,
+                    meter_power_w=500.0, battery_power_w=0.0,
+                    solar_power_w=500.0, consumption_w=900.0)
+    assert ctrl._state == ChargerState.CHARGING
 
+    # After SUSTAIN_SECONDS of the same condition → stop.
+    with patch("time.monotonic", return_value=t0 + 100 + SUSTAIN_SECONDS):
+        await _eval(ctrl, soc=TARGET_SOC,
+                    meter_power_w=500.0, battery_power_w=0.0,
+                    solar_power_w=500.0, consumption_w=900.0)
     assert ctrl._state == ChargerState.IDLE
     hass.services.async_call.assert_any_call(
         "homeassistant", "turn_off", {"entity_id": "switch.ev_charger"},
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_does_not_stop_above_min_amps_when_solar_below_consumption():
+    """Auto: solar < consumption while above MIN amps → regulate, don't stop.
+
+    The old behaviour killed charging on any solar < consumption sample,
+    even though `consumption_w` includes the EV's own draw — so the
+    regulator never got a chance to step amps down.  The new behaviour
+    lets `_regulate_amps` ramp the amps; only at MIN with sustained
+    deficit do we actually stop.
+    """
+    ctrl, hass = _make_controller(user_amps=20)
+    await _start_charging(ctrl, hass)
+    ctrl._current_amps = 16
+    hass.services.async_call.reset_mock()
+
+    await _eval(ctrl, soc=TARGET_SOC,
+                meter_power_w=20.0, battery_power_w=0.0,
+                solar_power_w=500.0, consumption_w=900.0)
+
+    assert ctrl._state == ChargerState.CHARGING
 
 
 @pytest.mark.asyncio

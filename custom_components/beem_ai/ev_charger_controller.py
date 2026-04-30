@@ -127,6 +127,7 @@ class EvChargerController:
         self._current_amps: int = MIN_CHARGE_AMPS
         self._saved_amps: int | None = None  # user's setting before we took over
         self._last_regulate_time: float = 0.0  # last time we sent an amp update
+        self._no_surplus_since: float | None = None  # sustain timer for AUTO no-surplus stop
 
     # -- Public properties --
 
@@ -181,6 +182,7 @@ class EvChargerController:
         self._start_mode = None
         self._export_sustained_since = None
         self._last_headroom_ok_at = None
+        self._no_surplus_since = None
 
     async def handle_mode_change(self, mode: str) -> None:
         """React to a user-driven mode change from the select entity.
@@ -429,12 +431,17 @@ class EvChargerController:
             await self._set_amps(target)
             return f"overload: cons {consumption_w:.0f}W → {target}A"
 
-        # Auto-only surplus stops (after overload, before regulation):
-        if ev_mode == EvMode.AUTO:
-            if (
-                self._current_amps <= MIN_CHARGE_AMPS
-                and soc < stop_soc
-            ):
+        # Auto-only stops at MIN amps:
+        #   - SoC has dropped below the floor → battery isn't recovering.
+        #   - Real headroom can't even sustain MIN amps for a sustained
+        #     window → there's genuinely no surplus left to divert.
+        # We track the no-surplus condition over SUSTAIN_SECONDS instead of
+        # tripping on the first sample so brief dips don't kill a session.
+        # `consumption_w`-based comparisons are unreliable here: that signal
+        # includes the EV's own draw, so even modest imports look catastrophic
+        # and would stop charging that the regulator could otherwise ramp down.
+        if ev_mode == EvMode.AUTO and self._current_amps <= MIN_CHARGE_AMPS:
+            if soc < stop_soc:
                 _LOGGER.info(
                     "EV charger: pinned at %dA, SoC=%.1f%% < %.1f%% "
                     "(target %.1f%% − hysteresis %.1f%%) — stopping",
@@ -444,21 +451,28 @@ class EvChargerController:
                 await self._turn_off()
                 self._state = ChargerState.IDLE
                 self._start_mode = None
+                self._no_surplus_since = None
                 return f"stop: SoC floor (SoC {soc:.1f}% < {stop_soc:.1f}%)"
 
-            if solar_power_w < consumption_w:
-                _LOGGER.info(
-                    "EV charger: solar=%.0fW < house consumption=%.0fW — "
-                    "no real surplus to divert, stopping EV charging",
-                    solar_power_w, consumption_w,
-                )
-                await self._turn_off()
-                self._state = ChargerState.IDLE
-                self._start_mode = None
-                return (
-                    f"stop: no surplus (solar {solar_power_w:.0f}W < "
-                    f"cons {consumption_w:.0f}W)"
-                )
+            if headroom_w < -WATTS_PER_AMP:
+                if self._no_surplus_since is None:
+                    self._no_surplus_since = now
+                elif now - self._no_surplus_since >= SUSTAIN_SECONDS:
+                    _LOGGER.info(
+                        "EV charger: pinned at %dA, headroom=%.0fW sustained "
+                        "below -%dW for %ds — no real surplus, stopping",
+                        MIN_CHARGE_AMPS, headroom_w, WATTS_PER_AMP,
+                        SUSTAIN_SECONDS,
+                    )
+                    await self._turn_off()
+                    self._state = ChargerState.IDLE
+                    self._start_mode = None
+                    self._no_surplus_since = None
+                    return f"stop: no surplus (headroom {headroom_w:.0f}W)"
+            else:
+                self._no_surplus_since = None
+        else:
+            self._no_surplus_since = None
 
         # Regulate amperage based on real headroom (+ SoC bias in Auto).
         return await self._regulate_amps(
