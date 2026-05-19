@@ -33,6 +33,16 @@ _mod("homeassistant.helpers")
 _ha_core = _mod("homeassistant.core")
 _ha_core.HomeAssistant = MagicMock
 
+# homeassistant.exceptions
+_ha_exc = _mod("homeassistant.exceptions")
+
+
+class _HomeAssistantError(Exception):
+    """Minimal HomeAssistantError stub."""
+
+
+_ha_exc.HomeAssistantError = _HomeAssistantError
+
 # homeassistant.config_entries
 _ha_ce = _mod("homeassistant.config_entries")
 _ha_ce.ConfigEntry = MagicMock

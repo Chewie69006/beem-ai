@@ -35,6 +35,7 @@ import logging
 import time
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +52,15 @@ SUSTAIN_SECONDS = 30
 GRACE_SECONDS = 15
 
 REGULATE_INTERVAL_S = 30
+
+# Wallbox's cloud API frequently raises HomeAssistantError client-side
+# even when the action succeeded on the device. Hold session state for
+# this long after issuing turn_on so the entity has time to catch up
+# instead of resetting the state machine on the next tick.
+PENDING_START_GRACE_S = 120
+# Cadence for nudging the Wallbox integration to repoll during the
+# pending window.
+PENDING_REFRESH_INTERVAL_S = 20
 
 EMERGENCY_SHRINK_W = 500
 
@@ -104,6 +114,11 @@ class EvChargerController:
         self._export_sustained_since: float | None = None
         self._last_headroom_ok_at: float | None = None
         self._last_regulate_time: float = 0.0
+        # Set when we issue turn_on; cleared when the entity confirms
+        # it's on OR when PENDING_START_GRACE_S elapses without
+        # confirmation. Lets us survive Wallbox's noisy cloud API.
+        self._pending_start_since: float | None = None
+        self._last_entity_refresh_at: float = 0.0
 
     # -- Entity reads --
 
@@ -222,6 +237,13 @@ class EvChargerController:
             # (external toggle, HA restart, options reload).  Conservative
             # defaults: assume MANUAL (keeps charger at min on overload
             # rather than stopping outright) and no saved amps.
+            if self._pending_start_since is not None:
+                _LOGGER.info(
+                    "EV charger: pending start confirmed after %.0fs — "
+                    "entity now reports on",
+                    now - self._pending_start_since,
+                )
+                self._pending_start_since = None
             if self._start_mode is None:
                 self._start_mode = StartMode.MANUAL
                 self._last_regulate_time = now
@@ -235,6 +257,37 @@ class EvChargerController:
                 solar_power_w, consumption_w,
                 target_soc, soc_hysteresis, now, ev_mode,
             )
+        elif self._pending_start_since is not None:
+            # We issued turn_on but the entity hasn't flipped yet.
+            # Wallbox's cloud often acks the action after the HTTP call
+            # has already errored client-side, so wait out the grace
+            # window before resetting state. Nudge HA to repoll
+            # periodically so we don't sit on a stale cache.
+            pending_elapsed = now - self._pending_start_since
+            if pending_elapsed >= PENDING_START_GRACE_S:
+                _LOGGER.warning(
+                    "EV charger: entity still off %.0fs after turn_on — "
+                    "giving up on this attempt",
+                    pending_elapsed,
+                )
+                self._pending_start_since = None
+                self._start_mode = None
+                self._saved_amps = None
+                if ev_mode == EvMode.AUTO:
+                    decision = await self._evaluate_idle(
+                        soc, headroom_w, solar_power_w, consumption_w,
+                        water_heater_heating, target_soc, now,
+                    )
+                else:
+                    decision = "idle: Manual mode — waiting for user start"
+            else:
+                if now - self._last_entity_refresh_at >= PENDING_REFRESH_INTERVAL_S:
+                    self._last_entity_refresh_at = now
+                    await self._refresh_toggle_entity()
+                decision = (
+                    f"pending start: waiting for entity "
+                    f"({pending_elapsed:.0f}s/{PENDING_START_GRACE_S}s)"
+                )
         else:
             # Idle branch — if we had an active session, the switch was
             # turned off externally (or we just stopped ourselves and
@@ -480,20 +533,42 @@ class EvChargerController:
     # -- Switch control --
 
     async def _turn_on(self) -> None:
-        """Turn on the EV charger toggle."""
-        await self._hass.services.async_call(
-            "homeassistant",
-            "turn_on",
-            {"entity_id": self._toggle_entity_id},
-        )
+        """Turn on the EV charger toggle.
+
+        Marks pending-start whether or not the service call raises:
+        Wallbox's cloud frequently errors client-side after the action
+        has actually been accepted server-side. The state machine then
+        waits up to PENDING_START_GRACE_S for the entity to reflect on.
+        """
+        now = time.monotonic()
+        self._pending_start_since = now
+        self._last_entity_refresh_at = now
+        try:
+            await self._hass.services.async_call(
+                "homeassistant",
+                "turn_on",
+                {"entity_id": self._toggle_entity_id},
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "EV charger: turn_on failed (%s) — Wallbox cloud may "
+                "still have accepted the request; holding for entity "
+                "to confirm (grace %ds)",
+                err, PENDING_START_GRACE_S,
+            )
+        await self._refresh_toggle_entity()
 
     async def _turn_off_and_restore(self) -> None:
         """Stop EV charging and restore the user's original amperage."""
-        await self._hass.services.async_call(
-            "homeassistant",
-            "turn_off",
-            {"entity_id": self._toggle_entity_id},
-        )
+        try:
+            await self._hass.services.async_call(
+                "homeassistant",
+                "turn_off",
+                {"entity_id": self._toggle_entity_id},
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("EV charger: turn_off failed: %s", err)
+        await self._refresh_toggle_entity()
         if self._saved_amps is not None:
             _LOGGER.info(
                 "EV charger: restoring user amps %dA → %dA",
@@ -503,11 +578,29 @@ class EvChargerController:
 
     async def _set_amps(self, amps: int) -> None:
         """Set the wallbox charging amperage."""
-        await self._hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": self._power_entity_id, "value": amps},
-        )
+        try:
+            await self._hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": self._power_entity_id, "value": amps},
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "EV charger: set_amps(%d) failed: %s", amps, err,
+            )
+
+    async def _refresh_toggle_entity(self) -> None:
+        """Best-effort: ask HA to repoll the toggle entity."""
+        try:
+            await self._hass.services.async_call(
+                "homeassistant",
+                "update_entity",
+                {"entity_id": self._toggle_entity_id},
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "EV charger: update_entity failed: %s", err,
+            )
 
     def _clear_session(self) -> None:
         """Reset all session bookkeeping."""
@@ -515,6 +608,7 @@ class EvChargerController:
         self._saved_amps = None
         self._export_sustained_since = None
         self._last_headroom_ok_at = None
+        self._pending_start_since = None
 
     # -- Lifecycle --
 

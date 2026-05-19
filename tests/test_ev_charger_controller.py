@@ -11,11 +11,14 @@ from datetime import datetime, timezone
 import pytest
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+from homeassistant.exceptions import HomeAssistantError
+
 from custom_components.beem_ai.ev_charger_controller import (
     EMERGENCY_SHRINK_W,
     MAX_CHARGE_AMPS,
     MAX_CONSUMPTION_W,
     MIN_CHARGE_AMPS,
+    PENDING_START_GRACE_S,
     REGULATE_INTERVAL_S,
     START_HEADROOM_W,
     SUSTAIN_SECONDS,
@@ -50,13 +53,18 @@ class FakeHass:
 
     async def _service_call(self, domain, service, data):
         entity_id = data.get("entity_id")
-        if domain == "homeassistant" and entity_id == SWITCH_ID:
+        if (
+            domain == "homeassistant"
+            and service in ("turn_on", "turn_off")
+            and entity_id == SWITCH_ID
+        ):
             new = "on" if service == "turn_on" else "off"
             if new != self._switch_state:
                 self._switch_state = new
                 self._switch_last_changed = datetime.now(timezone.utc)
         elif domain == "number" and service == "set_value" and entity_id == AMPS_ID:
             self._amps = int(data["value"])
+        # homeassistant.update_entity and other services are no-ops here.
 
     def _states_get(self, entity_id):
         if entity_id == SWITCH_ID:
@@ -509,7 +517,8 @@ async def test_stops_when_soc_drops_below_threshold():
     assert calls[0] == call(
         "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
-    assert calls[1] == call(
+    # calls[1] is the post-turn_off update_entity refresh.
+    assert calls[2] == call(
         "number", "set_value",
         {"entity_id": AMPS_ID, "value": 32},
     )
@@ -631,7 +640,8 @@ async def test_restores_user_amps_on_stop():
     assert ctrl._saved_amps is None
 
     calls = hass.services.async_call.call_args_list
-    assert calls[1] == call(
+    # calls[0]=turn_off, calls[1]=update_entity refresh, calls[2]=restore amps.
+    assert calls[2] == call(
         "number", "set_value",
         {"entity_id": AMPS_ID, "value": 25},
     )
@@ -652,9 +662,12 @@ async def test_no_restore_if_entity_unavailable():
                 meter_power_w=0, battery_power_w=-1500)
 
     assert ctrl.is_charging is False
-    hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
-    )
+    # turn_off + post-turn_off update_entity refresh, no amps restore.
+    calls = hass.services.async_call.call_args_list
+    assert calls == [
+        call("homeassistant", "turn_off", {"entity_id": SWITCH_ID}),
+        call("homeassistant", "update_entity", {"entity_id": SWITCH_ID}),
+    ]
 
 
 # ------------------------------------------------------------------
@@ -1105,3 +1118,147 @@ async def test_manual_mode_overload_hard_stops():
     hass.services.async_call.assert_any_call(
         "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
+
+
+# ------------------------------------------------------------------
+# Pending-start grace (Wallbox cloud flakiness)
+# ------------------------------------------------------------------
+
+
+def _flaky_hass_factory():
+    """FakeHass where homeassistant.turn_on raises HomeAssistantError but
+    the switch entity stays off (simulates the Wallbox-cloud failure
+    mode where the HTTP call errors client-side but the entity is
+    *not* updated)."""
+
+    hass = FakeHass(user_amps=32)
+    original = hass._service_call
+
+    async def flaky(domain, service, data):
+        if (
+            domain == "homeassistant"
+            and service == "turn_on"
+            and data.get("entity_id") == SWITCH_ID
+        ):
+            raise HomeAssistantError("Error communicating with Wallbox API")
+        await original(domain, service, data)
+
+    hass.services.async_call = AsyncMock(side_effect=flaky)
+    return hass
+
+
+@pytest.mark.asyncio
+async def test_turn_on_error_does_not_reset_session_within_grace():
+    """When turn_on raises and the entity stays off, the controller
+    must hold session state and not loop through sustain-arm again."""
+    ctrl, _ = _make_controller()
+    ctrl._hass = _flaky_hass_factory()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+
+    assert ctrl._pending_start_since == 1000.0 + SUSTAIN_SECONDS
+    assert ctrl._start_mode == StartMode.AUTO
+    assert ctrl.is_charging is False
+
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS + 5):
+        await _eval(ctrl)
+
+    assert ctrl._start_mode == StartMode.AUTO
+    assert ctrl._pending_start_since == 1000.0 + SUSTAIN_SECONDS
+    assert ctrl._export_sustained_since is None
+
+
+@pytest.mark.asyncio
+async def test_pending_start_clears_when_entity_eventually_confirms():
+    """When the Wallbox entity finally reports `on` after a flaky
+    turn_on, the controller should confirm and proceed to charging."""
+    ctrl, _ = _make_controller()
+    hass = _flaky_hass_factory()
+    ctrl._hass = hass
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+    assert ctrl._pending_start_since is not None
+
+    hass.set_switch("on")
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS + 20):
+        await _eval(ctrl)
+
+    assert ctrl._pending_start_since is None
+    assert ctrl.is_charging is True
+    assert ctrl._start_mode == StartMode.AUTO
+
+
+@pytest.mark.asyncio
+async def test_pending_start_gives_up_after_grace_window():
+    """After PENDING_START_GRACE_S without entity confirmation, the
+    controller resets state and re-evaluates from idle."""
+    ctrl, _ = _make_controller()
+    ctrl._hass = _flaky_hass_factory()
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+    pending_t0 = ctrl._pending_start_since
+
+    with patch("time.monotonic",
+               return_value=pending_t0 + PENDING_START_GRACE_S + 1):
+        await _eval(ctrl, meter_power_w=0, battery_power_w=0)
+
+    assert ctrl._pending_start_since is None
+    assert ctrl._start_mode is None
+
+
+@pytest.mark.asyncio
+async def test_update_entity_called_during_pending():
+    """While pending, controller should periodically nudge HA to repoll."""
+    ctrl, _ = _make_controller()
+    hass = _flaky_hass_factory()
+    ctrl._hass = hass
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+    initial_refreshes = sum(
+        1 for c in hass.services.async_call.call_args_list
+        if c.args[:2] == ("homeassistant", "update_entity")
+    )
+
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS + 5):
+        await _eval(ctrl)
+    mid_refreshes = sum(
+        1 for c in hass.services.async_call.call_args_list
+        if c.args[:2] == ("homeassistant", "update_entity")
+    )
+    assert mid_refreshes == initial_refreshes
+
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS + 25):
+        await _eval(ctrl)
+    late_refreshes = sum(
+        1 for c in hass.services.async_call.call_args_list
+        if c.args[:2] == ("homeassistant", "update_entity")
+    )
+    assert late_refreshes == initial_refreshes + 1
+
+
+@pytest.mark.asyncio
+async def test_set_amps_swallows_homeassistant_error():
+    """set_value failures must not propagate — controller continues."""
+    ctrl, _ = _make_controller()
+    hass = FakeHass(user_amps=32)
+
+    async def raise_on_set(domain, service, data):
+        if domain == "number" and service == "set_value":
+            raise HomeAssistantError("amps service failed")
+
+    hass.services.async_call = AsyncMock(side_effect=raise_on_set)
+    ctrl._hass = hass
+
+    await ctrl._set_amps(10)
