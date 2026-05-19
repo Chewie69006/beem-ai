@@ -33,6 +33,7 @@ from .const import (
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_STATUS,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
     OPT_EV_TARGET_SOC,
@@ -428,15 +429,17 @@ class BeemAICoordinator(DataUpdateCoordinator):
         """Create or destroy the EV charger controller based on options."""
         toggle_id = options.get(OPT_EV_CHARGER_TOGGLE, "")
         power_id = options.get(OPT_EV_CHARGER_POWER, "")
+        status_id = options.get(OPT_EV_CHARGER_STATUS, "") or None
         if toggle_id and power_id:
             self._ev_charger = EvChargerController(
                 hass=self.hass,
                 toggle_entity_id=toggle_id,
                 power_entity_id=power_id,
+                status_entity_id=status_id,
             )
             _LOGGER.info(
-                "EV charger controller configured: toggle=%s, power=%s",
-                toggle_id, power_id,
+                "EV charger controller configured: toggle=%s, power=%s, status=%s",
+                toggle_id, power_id, status_id,
             )
         else:
             self._ev_charger = None

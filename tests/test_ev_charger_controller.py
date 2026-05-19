@@ -21,6 +21,7 @@ from custom_components.beem_ai.ev_charger_controller import (
     PENDING_START_GRACE_S,
     REGULATE_INTERVAL_S,
     START_HEADROOM_W,
+    STATUS_NO_DEMAND_SUSTAIN_S,
     SUSTAIN_SECONDS,
     StartMode,
     WATTS_PER_AMP,
@@ -37,6 +38,7 @@ DEFAULT_START_BATTERY_W = 0.0
 
 SWITCH_ID = "switch.ev_charger"
 AMPS_ID = "number.ev_charger_amps"
+STATUS_ID = "sensor.ev_charger_status"
 
 
 class FakeHass:
@@ -46,6 +48,7 @@ class FakeHass:
         self._switch_state = "off"
         self._switch_last_changed = datetime.now(timezone.utc)
         self._amps: int | None = user_amps
+        self._status: str | None = None
         self.services = MagicMock()
         self.services.async_call = AsyncMock(side_effect=self._service_call)
         self.states = MagicMock()
@@ -78,6 +81,12 @@ class FakeHass:
             obj = MagicMock()
             obj.state = str(self._amps)
             return obj
+        if entity_id == STATUS_ID:
+            if self._status is None:
+                return None
+            obj = MagicMock()
+            obj.state = self._status
+            return obj
         return None
 
     def set_switch(self, state: str) -> None:
@@ -87,13 +96,17 @@ class FakeHass:
     def set_amps(self, amps: int | None) -> None:
         self._amps = amps
 
+    def set_status(self, status: str | None) -> None:
+        self._status = status
 
-def _make_controller(user_amps: int = 32):
+
+def _make_controller(user_amps: int = 32, with_status: bool = False):
     hass = FakeHass(user_amps=user_amps)
     ctrl = EvChargerController(
         hass=hass,
         toggle_entity_id=SWITCH_ID,
         power_entity_id=AMPS_ID,
+        status_entity_id=STATUS_ID if with_status else None,
     )
     return ctrl, hass
 
@@ -1233,3 +1246,108 @@ async def test_set_amps_swallows_homeassistant_error():
     ctrl._hass = hass
 
     await ctrl._set_amps(10)
+
+
+# ==================================================================
+# Wallbox status entity — stop when car not drawing
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_status_no_demand_sustained_stops_charging():
+    """status='waiting for car demand' for the full sustain → stop."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Waiting for car demand")
+
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl)
+    assert ctrl.is_charging is True  # armed, not yet stopped
+
+    with patch("time.monotonic",
+               return_value=t + 1 + STATUS_NO_DEMAND_SUSTAIN_S):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is False
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_no_demand_resets_arm_when_car_resumes():
+    """If status flips back before sustain elapses, don't stop."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Waiting for car demand")
+
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl)
+    assert ctrl._no_demand_since is not None
+
+    hass.set_status("Charging")
+    with patch("time.monotonic",
+               return_value=t + 1 + STATUS_NO_DEMAND_SUSTAIN_S + 10):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is True
+    assert ctrl._no_demand_since is None
+
+
+@pytest.mark.asyncio
+async def test_status_other_state_does_not_stop():
+    """Active states like 'Charging' must never trigger the stop."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Charging")
+
+    with patch("time.monotonic",
+               return_value=t + STATUS_NO_DEMAND_SUSTAIN_S + 30):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is True
+    assert ctrl._no_demand_since is None
+
+
+@pytest.mark.asyncio
+async def test_status_unknown_does_not_stop():
+    """Unknown / unavailable status must not trigger the stop."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("unknown")
+
+    with patch("time.monotonic",
+               return_value=t + STATUS_NO_DEMAND_SUSTAIN_S + 30):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is True
+
+
+@pytest.mark.asyncio
+async def test_status_match_is_case_insensitive():
+    """Wallbox capitalization shouldn't matter."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("WAITING FOR CAR DEMAND")
+
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl)
+    with patch("time.monotonic",
+               return_value=t + 1 + STATUS_NO_DEMAND_SUSTAIN_S):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is False
+
+
+@pytest.mark.asyncio
+async def test_no_status_entity_skips_check():
+    """Without a status entity configured, the branch is a no-op."""
+    ctrl, hass = _make_controller(with_status=False)
+    t = await _start_charging(ctrl, hass)
+    # Even if some other entity has 'waiting for car demand', controller
+    # doesn't read it.
+    with patch("time.monotonic",
+               return_value=t + STATUS_NO_DEMAND_SUSTAIN_S + 30):
+        await _eval(ctrl)
+
+    assert ctrl.is_charging is True

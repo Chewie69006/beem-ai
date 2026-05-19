@@ -66,6 +66,22 @@ EMERGENCY_SHRINK_W = 500
 
 MAX_CONSUMPTION_W = 7000
 
+# Wallbox `sensor.*_status_description` values that mean "the car is
+# physically not drawing current right now" — typically because the EV's
+# BMS hit its own target SoC, the schedule is paused, or the car is
+# simply idle. When the configured status entity reports one of these
+# for STATUS_NO_DEMAND_SUSTAIN_S, we treat the session as complete and
+# turn the switch off so it doesn't sit in "resume" forever.
+NO_DEMAND_STATUSES = frozenset({
+    "waiting for car demand",
+    "connected: waiting for car demand",
+    "ready",
+    "paused",
+    "scheduled",
+    "locked, car connected",
+})
+STATUS_NO_DEMAND_SUSTAIN_S = 60
+
 SOC_BIAS_AMPS = 1
 SOC_DEADBAND_PCT = 0.5
 
@@ -101,10 +117,12 @@ class EvChargerController:
         hass: HomeAssistant,
         toggle_entity_id: str,
         power_entity_id: str,
+        status_entity_id: str | None = None,
     ) -> None:
         self._hass = hass
         self._toggle_entity_id = toggle_entity_id
         self._power_entity_id = power_entity_id
+        self._status_entity_id = status_entity_id or None
 
         # Session bookkeeping — only meaningful while charger is physically
         # on.  Cleared on every on→off transition (and re-initialized on
@@ -119,6 +137,10 @@ class EvChargerController:
         # confirmation. Lets us survive Wallbox's noisy cloud API.
         self._pending_start_since: float | None = None
         self._last_entity_refresh_at: float = 0.0
+        # First time we observed the status entity reporting "no demand"
+        # in the current session. Cleared whenever the car resumes
+        # drawing or the session ends.
+        self._no_demand_since: float | None = None
 
     # -- Entity reads --
 
@@ -143,6 +165,15 @@ class EvChargerController:
         if amps is None:
             return MIN_CHARGE_AMPS
         return max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, amps))
+
+    def _read_status(self) -> str | None:
+        """Read the charger status entity (lowercased), if configured."""
+        if not self._status_entity_id:
+            return None
+        state = self._hass.states.get(self._status_entity_id)
+        if state is None or state.state in (None, "", "unknown", "unavailable"):
+            return None
+        return str(state.state).strip().lower()
 
     # -- Public properties --
 
@@ -401,6 +432,40 @@ class EvChargerController:
         """CHARGING state: regulate amps or stop on low SoC / overload."""
         stop_soc = target_soc - soc_hysteresis
 
+        # Car-not-drawing stop (Wallbox status entity).  Once the car's
+        # BMS hits its own SoC target, the Wallbox stays in "resume"
+        # state but reports e.g. "Waiting for car demand".  Holding the
+        # switch on does nothing useful, blocks an Auto re-arm, and
+        # leaves the user confused.  Sustain to ignore brief
+        # session-handshake transitions.
+        status = self._read_status()
+        if status is not None and status in NO_DEMAND_STATUSES:
+            if self._no_demand_since is None:
+                self._no_demand_since = now
+                _LOGGER.info(
+                    "EV charger: status=%r reports no car demand — "
+                    "waiting %ds sustained before stopping",
+                    status, STATUS_NO_DEMAND_SUSTAIN_S,
+                )
+                return f"charging: no-demand armed ({status!r})"
+            elapsed = now - self._no_demand_since
+            if elapsed >= STATUS_NO_DEMAND_SUSTAIN_S:
+                _LOGGER.info(
+                    "EV charger: status=%r sustained %.0fs — "
+                    "stopping (car not drawing)",
+                    status, elapsed,
+                )
+                await self._turn_off_and_restore()
+                self._clear_session()
+                return f"stop: no car demand ({status!r})"
+            return (
+                f"charging: no-demand sustaining "
+                f"{elapsed:.0f}s/{STATUS_NO_DEMAND_SUSTAIN_S}s"
+            )
+        # Car resumed drawing (or status unknown) — drop the arm.
+        if self._no_demand_since is not None:
+            self._no_demand_since = None
+
         # Overload protection — safety override for both modes.
         if consumption_w >= MAX_CONSUMPTION_W:
             if ev_mode == EvMode.MANUAL:
@@ -596,15 +661,22 @@ class EvChargerController:
         self._export_sustained_since = None
         self._last_headroom_ok_at = None
         self._pending_start_since = None
+        self._no_demand_since = None
 
     # -- Lifecycle --
 
-    def reconfigure(self, toggle_entity_id: str, power_entity_id: str) -> None:
+    def reconfigure(
+        self,
+        toggle_entity_id: str,
+        power_entity_id: str,
+        status_entity_id: str | None = None,
+    ) -> None:
         """Update entity IDs from options."""
         self._toggle_entity_id = toggle_entity_id
         self._power_entity_id = power_entity_id
+        self._status_entity_id = status_entity_id or None
         self._clear_session()
         _LOGGER.info(
-            "EV charger controller reconfigured: toggle=%s, power=%s",
-            toggle_entity_id, power_entity_id,
+            "EV charger controller reconfigured: toggle=%s, power=%s, status=%s",
+            toggle_entity_id, power_entity_id, status_entity_id,
         )

@@ -73,11 +73,13 @@
         "description": "Optionally configure an EV charger as a second-priority solar surplus diverter. Requires the water heater to be active first.",
         "data": {
           "ev_charger_toggle_entity": "EV charger start/stop switch",
-          "ev_charger_power_entity": "EV charger amperage control"
+          "ev_charger_power_entity": "EV charger amperage control",
+          "ev_charger_status_entity": "EV charger status sensor (optional)"
         },
         "data_description": {
           "ev_charger_toggle_entity": "A switch entity that starts/stops EV charging.",
-          "ev_charger_power_entity": "A number entity (6-32A) that controls the wallbox charging amperage."
+          "ev_charger_power_entity": "A number entity (6-32A) that controls the wallbox charging amperage.",
+          "ev_charger_status_entity": "Optional. A sensor reporting the charger status (e.g. Wallbox 'status_description'). When it reports 'Waiting for car demand' / 'Ready' / 'Paused' for 60s, BeemAI stops the switch so it doesn't sit on while the car refuses current."
         }
       },
       "tariffs": {
