@@ -1,5 +1,10 @@
 """EV charger controller — second-priority solar surplus diverter.
 
+Source of truth for "is the EV charging?" and "what's the current
+amperage?" is the HA toggle + amperage entities themselves — we never
+trust an in-memory copy.  Each ``evaluate()`` reads them once at the
+top of the tick and branches on that.
+
 Starts at 6A when real surplus is sustained, then adjusts ±1A per MQTT
 cycle toward the target.  Surplus is computed directly from the grid
 meter and battery power signals (not from ``consumption_w``), so we
@@ -17,10 +22,7 @@ The available headroom we can divert to the EV is::
     headroom_w = -meter_power_w + battery_power_w
 
 That is, every watt of export we're currently throwing away plus every
-watt of solar we're currently stashing in the battery.  Once the EV is
-drawing N amps, the next MQTT cycle reflects that draw in ``meter_power_w``
-and/or ``battery_power_w`` — the regulation is self-correcting and no
-longer depends on how ``consumption_w`` accounts for the EV.
+watt of solar we're currently stashing in the battery.
 
 When a water heater is configured, the EV charger waits for it to be ON
 before starting.  Without a water heater, the EV starts on surplus alone.
@@ -43,29 +45,19 @@ MAX_CHARGE_AMPS = 32
 # Watts per amp (single-phase 230 V)
 WATTS_PER_AMP = 230
 
-# Minimum sustained headroom before we start at 6 A.  6 A × 230 V = 1380 W:
-# below this we'd start importing the moment the EV plugs in.
+# Minimum sustained headroom before we start at 6 A.
 START_HEADROOM_W = MIN_CHARGE_AMPS * WATTS_PER_AMP
 SUSTAIN_SECONDS = 30
-GRACE_SECONDS = 15  # Brief headroom dips under this don't reset the sustain timer
+GRACE_SECONDS = 15
 
-# Regulation throttle: one ±1A adjustment per REGULATE_INTERVAL_S,
-# unless the emergency-shrink path fires.
 REGULATE_INTERVAL_S = 30
 
-# Emergency-shrink threshold: when we're drawing this much more than
-# available, bypass the throttle and shrink immediately.
 EMERGENCY_SHRINK_W = 500
 
-# Overload protection
-MAX_CONSUMPTION_W = 7000  # stop charging if house exceeds this
+MAX_CONSUMPTION_W = 7000
 
-
-class ChargerState(enum.Enum):
-    """EV charger state machine states."""
-
-    IDLE = "idle"
-    CHARGING = "charging"
+SOC_BIAS_AMPS = 1
+SOC_DEADBAND_PCT = 0.5
 
 
 class EvMode(enum.Enum):
@@ -76,11 +68,6 @@ class EvMode(enum.Enum):
     MANUAL = "Manual"
 
 
-# Legacy alias kept for any external imports; StartMode values now map
-# 1:1 to the user-facing EvMode (except Disabled, which is not a running
-# session).  Manual/Auto here == the mode that was active when the
-# session started and still governs how overload and low-surplus are
-# handled.
 class StartMode(enum.Enum):
     """Who / which mode initiated the current charging session."""
 
@@ -109,88 +96,94 @@ class EvChargerController:
         self._toggle_entity_id = toggle_entity_id
         self._power_entity_id = power_entity_id
 
-        self._state = ChargerState.IDLE
+        # Session bookkeeping — only meaningful while charger is physically
+        # on.  Cleared on every on→off transition (and re-initialized on
+        # off→on transitions we didn't drive ourselves).
         self._start_mode: StartMode | None = None
+        self._saved_amps: int | None = None
         self._export_sustained_since: float | None = None
         self._last_headroom_ok_at: float | None = None
-        self._current_amps: int = MIN_CHARGE_AMPS
-        self._saved_amps: int | None = None  # user's setting before we took over
-        self._last_regulate_time: float = 0.0  # last time we sent an amp update
+        self._last_regulate_time: float = 0.0
+
+    # -- Entity reads --
+
+    def _is_switch_on(self) -> bool:
+        """Read the toggle entity state directly from HA."""
+        state = self._hass.states.get(self._toggle_entity_id)
+        return state is not None and state.state == "on"
+
+    def _read_amps(self) -> int | None:
+        """Read the current amperage from the HA number entity."""
+        state = self._hass.states.get(self._power_entity_id)
+        if state is None:
+            return None
+        try:
+            return int(float(state.state))
+        except (ValueError, TypeError):
+            return None
+
+    def _read_amps_clamped(self) -> int:
+        """Read amps, clamped to [MIN, MAX]; falls back to MIN if unreadable."""
+        amps = self._read_amps()
+        if amps is None:
+            return MIN_CHARGE_AMPS
+        return max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, amps))
 
     # -- Public properties --
 
     @property
     def is_charging(self) -> bool:
-        """Return True if EV charger is currently on."""
-        return self._state == ChargerState.CHARGING
+        """Return True if the toggle entity is on."""
+        return self._is_switch_on()
 
     @property
     def current_amps(self) -> int:
-        """Return the current charging amperage."""
-        return self._current_amps
+        """Return the current charging amperage (read from the HA entity)."""
+        return self._read_amps_clamped()
 
     # -- Manual / mode control --
 
     async def start_manual(self) -> None:
         """Start charging manually at minimum amps."""
-        if self._state == ChargerState.CHARGING:
+        if self._is_switch_on():
             return
         _LOGGER.info("EV charger: manual start requested")
-        self._saved_amps = self._read_current_amps()
-        self._current_amps = MIN_CHARGE_AMPS
+        self._saved_amps = self._read_amps()
         self._last_regulate_time = time.monotonic()
         self._start_mode = StartMode.MANUAL
-        await self._turn_on()
-        self._state = ChargerState.CHARGING
         self._export_sustained_since = None
         self._last_headroom_ok_at = None
+        await self._set_amps(MIN_CHARGE_AMPS)
+        await self._turn_on()
 
     async def stop(self) -> None:
         """Stop charging (from any mode)."""
-        if self._state == ChargerState.IDLE:
+        if not self._is_switch_on() and self._start_mode is None:
             return
         _LOGGER.info("EV charger: stop requested")
-        await self._turn_off()
-        self._state = ChargerState.IDLE
-        self._start_mode = None
-
-    async def _force_off(self) -> None:
-        """Unconditionally turn the physical switch off and reset state.
-
-        Used when we want "off" to mean "off" regardless of what the
-        controller thinks — e.g. on Disabled, the controller may have
-        just been rebuilt by an options reload and its in-memory state
-        is IDLE even though the physical switch is still on.
-        """
-        state = self._hass.states.get(self._toggle_entity_id)
-        physically_on = state is not None and state.state == "on"
-        if self._state == ChargerState.CHARGING or physically_on:
-            await self._turn_off()
-        self._state = ChargerState.IDLE
-        self._start_mode = None
-        self._export_sustained_since = None
-        self._last_headroom_ok_at = None
+        await self._turn_off_and_restore()
+        self._clear_session()
 
     async def handle_mode_change(self, mode: str) -> None:
         """React to a user-driven mode change from the select entity.
 
-        - ``Disabled``: stop immediately (unconditionally turn the switch
-          off, even if our internal state says IDLE — it may be stale
-          after an options-reload recreates the controller while the
-          physical switch is still on).
+        - ``Disabled``: stop immediately.
         - ``Manual``:   start immediately at 6A if idle (no sustain wait).
         - ``Auto``:     no immediate action; ``evaluate()`` will take over.
         """
         ev_mode = _mode_from_str(mode)
         if ev_mode == EvMode.DISABLED:
             _LOGGER.info("EV charger: mode set to Disabled — stopping")
-            await self._force_off()
+            if self._is_switch_on():
+                await self._turn_off_and_restore()
+            self._clear_session()
         elif ev_mode == EvMode.MANUAL:
-            if self._state == ChargerState.IDLE:
-                _LOGGER.info("EV charger: mode set to Manual — starting at %dA", MIN_CHARGE_AMPS)
+            if not self._is_switch_on():
+                _LOGGER.info(
+                    "EV charger: mode set to Manual — starting at %dA",
+                    MIN_CHARGE_AMPS,
+                )
                 await self.start_manual()
-            # If already charging, keep running; mode will drive behavior in evaluate.
-        # Auto: nothing to do here.
 
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
@@ -202,54 +195,73 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
-        start_soc_threshold: float,
-        stop_soc_threshold: float,
+        target_soc: float,
+        soc_hysteresis: float,
         mode: str = EvMode.AUTO.value,
     ) -> None:
         """Evaluate state machine and act.
 
-        ``mode`` is the user-selected operating mode:
-          - ``Disabled``: no-op; if charging, stop.
-          - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
-          - ``Manual``:   no auto-start; on overload ≥7 kW → stop; SoC-stop
-            is disabled (user explicitly asked for the charger to keep
-            running at 6A until they change mode or overload trips).
-
-        ``meter_power_w`` uses +import/-export, ``battery_power_w`` uses
-        +charge/-discharge.  Both are read directly from MQTT telemetry
-        (``BatteryState``) so they correctly reflect the true headroom.
-
-        ``solar_power_w`` and ``consumption_w`` are used only for logging
-        and the overload safety (``MAX_CONSUMPTION_W``).
-
-        ``start_soc_threshold`` / ``stop_soc_threshold`` are
-        user-configurable (see Number entities in ``number.py``, persisted
-        in ``ConfigEntry`` options).
+        Branches are driven by the live toggle-entity state read at the
+        top of the tick.  See module docstring for the headroom model.
         """
         now = time.monotonic()
         headroom_w = -meter_power_w + battery_power_w
         ev_mode = _mode_from_str(mode)
+        is_on = self._is_switch_on()
+        amps = self._read_amps_clamped()
 
         if ev_mode == EvMode.DISABLED:
-            # Force-off even if _state == IDLE: the physical switch may
-            # still be on (e.g. controller was just rebuilt by an options
-            # reload) and we want Disabled to unambiguously mean "off".
-            await self._force_off()
-            return
-
-        if self._state == ChargerState.IDLE:
-            if ev_mode == EvMode.AUTO:
-                await self._evaluate_idle(
-                    soc, headroom_w, solar_power_w, consumption_w,
-                    water_heater_heating, start_soc_threshold, now,
+            if is_on:
+                _LOGGER.info("EV charger: mode=Disabled and switch is on — stopping")
+                await self._turn_off_and_restore()
+            self._clear_session()
+            decision = "disabled"
+        elif is_on:
+            # Charging branch — initialize session bookkeeping if this is
+            # the first tick of a session we didn't start ourselves
+            # (external toggle, HA restart, options reload).  Conservative
+            # defaults: assume MANUAL (keeps charger at min on overload
+            # rather than stopping outright) and no saved amps.
+            if self._start_mode is None:
+                self._start_mode = StartMode.MANUAL
+                self._last_regulate_time = now
+                _LOGGER.info(
+                    "EV charger: switch is on without active session — "
+                    "adopting MANUAL mode at %dA",
+                    amps,
                 )
-            # Manual + IDLE: start is user-driven via handle_mode_change.
-        elif self._state == ChargerState.CHARGING:
-            await self._evaluate_charging(
-                soc, headroom_w, battery_power_w,
+            decision = await self._evaluate_charging(
+                soc, amps, headroom_w, battery_power_w,
                 solar_power_w, consumption_w,
-                stop_soc_threshold, now, ev_mode,
+                target_soc, soc_hysteresis, now, ev_mode,
             )
+        else:
+            # Idle branch — if we had an active session, the switch was
+            # turned off externally (or we just stopped ourselves and
+            # came back round to evaluate); either way, clear the
+            # post-start bookkeeping.  Don't touch the sustain timer —
+            # _evaluate_idle owns that.
+            if self._start_mode is not None:
+                self._start_mode = None
+                self._saved_amps = None
+            if ev_mode == EvMode.AUTO:
+                decision = await self._evaluate_idle(
+                    soc, headroom_w, solar_power_w, consumption_w,
+                    water_heater_heating, target_soc, now,
+                )
+            else:
+                decision = "idle: Manual mode — waiting for user start"
+
+        _LOGGER.debug(
+            "EV eval: mode=%s on=%s amps=%d soc=%.1f%% target=%.1f%% "
+            "hyst=%.1f%% meter=%+.0fW batt=%+.0fW headroom=%+.0fW "
+            "solar=%.0fW cons=%.0fW wh=%s → %s",
+            ev_mode.value, is_on, amps,
+            soc, target_soc, soc_hysteresis,
+            meter_power_w, battery_power_w, headroom_w,
+            solar_power_w, consumption_w, water_heater_heating,
+            decision,
+        )
 
     async def _evaluate_idle(
         self,
@@ -258,27 +270,18 @@ class EvChargerController:
         solar_power_w: float,
         consumption_w: float,
         water_heater_heating: bool | None,
-        start_soc_threshold: float,
+        target_soc: float,
         now: float,
-    ) -> None:
-        """IDLE state: check if we should start charging.
-
-        Start requires:
-          - Water heater prerequisite met (or no WH configured)
-          - SoC ≥ user's start threshold
-          - ``headroom_w`` (export + battery-charge) sustained above
-            ``START_HEADROOM_W`` for ``SUSTAIN_SECONDS``.  This guarantees
-            we can absorb at least 6 A without importing from the grid.
-
-        ``water_heater_heating`` is ``None`` when no water heater is
-        configured, which is treated as "prerequisite satisfied".
-        """
+    ) -> str:
+        """IDLE state: check if we should start charging (Auto mode)."""
         wh_ok = water_heater_heating is None or water_heater_heating
-        if (
+        conditions_met = (
             wh_ok
-            and soc >= start_soc_threshold
+            and soc >= target_soc
             and headroom_w >= START_HEADROOM_W
-        ):
+        )
+
+        if conditions_met:
             self._last_headroom_ok_at = now
             if self._export_sustained_since is None:
                 self._export_sustained_since = now
@@ -289,189 +292,203 @@ class EvChargerController:
                     soc, solar_power_w, consumption_w, headroom_w,
                     water_heater_heating, SUSTAIN_SECONDS,
                 )
-            elif now - self._export_sustained_since >= SUSTAIN_SECONDS:
-                _LOGGER.info(
-                    "EV charger: headroom sustained %.0fs — SoC=%.1f%%, "
-                    "solar=%.0fW, consumption=%.0fW, headroom=%.0fW — "
-                    "starting at %dA",
-                    now - self._export_sustained_since,
-                    soc, solar_power_w, consumption_w, headroom_w,
-                    MIN_CHARGE_AMPS,
-                )
-                self._saved_amps = self._read_current_amps()
-                self._current_amps = MIN_CHARGE_AMPS
-                self._last_regulate_time = now
-                _LOGGER.info(
-                    "EV charger: saved user amps=%s before taking over",
-                    self._saved_amps,
-                )
-                await self._turn_on()
-                self._state = ChargerState.CHARGING
-                self._start_mode = StartMode.AUTO
-                self._export_sustained_since = None
-                self._last_headroom_ok_at = None
-        else:
-            # Grace period: brief headroom dips (oscillating grid/consumption)
-            # don't reset the sustain timer — only reset if conditions have
-            # been false continuously for GRACE_SECONDS.
-            if (
-                self._export_sustained_since is not None
-                and self._last_headroom_ok_at is not None
-                and now - self._last_headroom_ok_at >= GRACE_SECONDS
-            ):
-                self._export_sustained_since = None
-                self._last_headroom_ok_at = None
+                return f"idle: arming sustain timer ({SUSTAIN_SECONDS}s)"
+
+            sustained = now - self._export_sustained_since
+            if sustained < SUSTAIN_SECONDS:
+                return f"idle: sustaining {sustained:.0f}s/{SUSTAIN_SECONDS}s"
+
+            _LOGGER.info(
+                "EV charger: headroom sustained %.0fs — SoC=%.1f%%, "
+                "solar=%.0fW, consumption=%.0fW, headroom=%.0fW — "
+                "starting at %dA",
+                sustained, soc, solar_power_w, consumption_w, headroom_w,
+                MIN_CHARGE_AMPS,
+            )
+            self._saved_amps = self._read_amps()
+            self._last_regulate_time = now
+            self._start_mode = StartMode.AUTO
+            self._export_sustained_since = None
+            self._last_headroom_ok_at = None
+            _LOGGER.info(
+                "EV charger: saved user amps=%s before taking over",
+                self._saved_amps,
+            )
+            await self._set_amps(MIN_CHARGE_AMPS)
+            await self._turn_on()
+            return f"start AUTO at {MIN_CHARGE_AMPS}A"
+
+        if (
+            self._export_sustained_since is not None
+            and self._last_headroom_ok_at is not None
+            and now - self._last_headroom_ok_at >= GRACE_SECONDS
+        ):
+            self._export_sustained_since = None
+            self._last_headroom_ok_at = None
+
+        if not wh_ok:
+            return "idle: water heater prerequisite not met"
+        if soc < target_soc:
+            return f"idle: SoC {soc:.1f}% < target {target_soc:.1f}%"
+        return f"idle: headroom {headroom_w:.0f}W < {START_HEADROOM_W}W"
 
     async def _evaluate_charging(
         self,
         soc: float,
+        amps: int,
         headroom_w: float,
         battery_power_w: float,
         solar_power_w: float,
         consumption_w: float,
-        stop_soc_threshold: float,
+        target_soc: float,
+        soc_hysteresis: float,
         now: float,
         ev_mode: EvMode,
-    ) -> None:
-        """CHARGING state: regulate amps or stop on low SoC / overload.
+    ) -> str:
+        """CHARGING state: regulate amps or stop on low SoC / overload."""
+        stop_soc = target_soc - soc_hysteresis
 
-        Mode-dependent stop behavior:
-          - ``Auto``: SoC-stop fires when pinned at 6A, battery draining,
-            and SoC has dropped below the user's stop threshold.  Overload
-            (≥ 7 kW) first shrinks amps; if already at min, stops.
-          - ``Manual``: SoC-stop disabled (user explicitly wants to keep
-            charging at 6A if surplus collapses).  Overload (≥ 7 kW)
-            still stops unconditionally — the safety override.
-        """
-        # SoC-stop: Auto mode only
-        if ev_mode == EvMode.AUTO and soc < stop_soc_threshold:
-            at_min_amps = self._current_amps <= MIN_CHARGE_AMPS
-            battery_draining = battery_power_w < 0
-            if at_min_amps and battery_draining:
-                _LOGGER.info(
-                    "EV charger: pinned at %dA, battery=%.0fW (draining), "
-                    "SoC=%.1f%% < %.1f%% — stopping EV charging",
-                    MIN_CHARGE_AMPS, battery_power_w,
-                    soc, stop_soc_threshold,
-                )
-                await self._turn_off()
-                self._state = ChargerState.IDLE
-                self._start_mode = None
-                return
-
-        # Overload protection: house consuming too much.
+        # Overload protection — safety override for both modes.
         if consumption_w >= MAX_CONSUMPTION_W:
             if ev_mode == EvMode.MANUAL:
-                # Manual: overload ≥ 7 kW → hard stop (the safety
-                # override the user explicitly asked for).
                 _LOGGER.info(
                     "EV charger (Manual): consumption %.0fW >= %dW — "
                     "stopping EV charging (safety override)",
                     consumption_w, MAX_CONSUMPTION_W,
                 )
-                await self._turn_off()
-                self._state = ChargerState.IDLE
-                self._start_mode = None
-                return
+                await self._turn_off_and_restore()
+                self._clear_session()
+                return f"stop: Manual overload (cons {consumption_w:.0f}W)"
 
-            target = self._current_amps - 1
+            target = amps - 1
             if target < MIN_CHARGE_AMPS:
                 _LOGGER.info(
                     "EV charger: consumption %.0fW >= %dW and already at "
                     "minimum — stopping EV charging",
                     consumption_w, MAX_CONSUMPTION_W,
                 )
-                await self._turn_off()
-                self._state = ChargerState.IDLE
-                self._start_mode = None
-                return
+                await self._turn_off_and_restore()
+                self._clear_session()
+                return f"stop: overload at min (cons {consumption_w:.0f}W)"
 
             _LOGGER.info(
                 "EV charger: overload %.0fW >= %dW — reducing %dA → %dA",
-                consumption_w, MAX_CONSUMPTION_W,
-                self._current_amps, target,
+                consumption_w, MAX_CONSUMPTION_W, amps, target,
             )
-            self._current_amps = target
             self._last_regulate_time = now
             await self._set_amps(target)
-            return
+            return f"overload: cons {consumption_w:.0f}W → {target}A"
 
-        # Regulate amperage based on real headroom (both modes).
-        await self._regulate_amps(
-            headroom_w, solar_power_w, consumption_w, now
+        # Auto-only surplus stops (after overload, before regulation):
+        if ev_mode == EvMode.AUTO:
+            if amps <= MIN_CHARGE_AMPS and soc < stop_soc:
+                _LOGGER.info(
+                    "EV charger: pinned at %dA, SoC=%.1f%% < %.1f%% "
+                    "(target %.1f%% − hysteresis %.1f%%) — stopping",
+                    MIN_CHARGE_AMPS, soc, stop_soc,
+                    target_soc, soc_hysteresis,
+                )
+                await self._turn_off_and_restore()
+                self._clear_session()
+                return f"stop: SoC floor (SoC {soc:.1f}% < {stop_soc:.1f}%)"
+
+            if solar_power_w < consumption_w:
+                _LOGGER.info(
+                    "EV charger: solar=%.0fW < house consumption=%.0fW — "
+                    "no real surplus to divert, stopping EV charging",
+                    solar_power_w, consumption_w,
+                )
+                await self._turn_off_and_restore()
+                self._clear_session()
+                return (
+                    f"stop: no surplus (solar {solar_power_w:.0f}W < "
+                    f"cons {consumption_w:.0f}W)"
+                )
+
+        return await self._regulate_amps(
+            soc, amps, headroom_w, target_soc,
+            solar_power_w, consumption_w, now, ev_mode,
         )
 
     async def _regulate_amps(
         self,
+        soc: float,
+        amps: int,
         headroom_w: float,
+        target_soc: float,
         solar_power_w: float,
         consumption_w: float,
         now: float,
-    ) -> None:
-        """Adjust charging amps to track real headroom.
-
-        ``headroom_w`` already reflects the current EV draw (it's derived
-        from grid + battery telemetry), so the target is simply::
-
-            target = current_amps + floor(headroom_w / 230)
-
-        Positive headroom → we can grow.  Negative → we must shrink.
-
-        Throttled: only sends an update when delta ≥ 500 W (~2 A) or 30 s
-        have elapsed — except for *emergency shrink* (headroom
-        ≤ -EMERGENCY_SHRINK_W) which bypasses the throttle so we respond
-        fast to a sudden import spike.
-        """
+        ev_mode: EvMode,
+    ) -> str:
+        """Adjust charging amps to track real headroom (+ SoC bias in Auto)."""
         delta_amps = int(headroom_w // WATTS_PER_AMP)
+
+        if ev_mode == EvMode.AUTO:
+            soc_diff = soc - target_soc
+            if soc_diff > SOC_DEADBAND_PCT:
+                soc_bias = SOC_BIAS_AMPS
+            elif soc_diff < -SOC_DEADBAND_PCT:
+                soc_bias = -SOC_BIAS_AMPS
+            else:
+                soc_bias = 0
+        else:
+            soc_bias = 0
+
         target_amps = max(
             MIN_CHARGE_AMPS,
-            min(MAX_CHARGE_AMPS, self._current_amps + delta_amps),
+            min(MAX_CHARGE_AMPS, amps + delta_amps + soc_bias),
         )
 
-        # Ramp limit: move at most ±1A per regulation cycle
-        if target_amps > self._current_amps:
-            new_amps = self._current_amps + 1
-        elif target_amps < self._current_amps:
-            new_amps = self._current_amps - 1
+        if target_amps > amps:
+            new_amps = amps + 1
+        elif target_amps < amps:
+            new_amps = amps - 1
         else:
-            return  # already at target
+            return (
+                f"hold {amps}A "
+                f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d})"
+            )
 
         elapsed = now - self._last_regulate_time
         emergency_shrink = (
-            new_amps < self._current_amps
+            new_amps < amps
             and headroom_w <= -EMERGENCY_SHRINK_W
         )
-        # A single ±1A step is only 230 W (< REGULATE_DELTA_W), so in
-        # practice we wait for the interval unless this is an emergency
-        # shrink.
         if elapsed < REGULATE_INTERVAL_S and not emergency_shrink:
-            return
+            return (
+                f"throttled {amps}A "
+                f"(elapsed {elapsed:.0f}s/{REGULATE_INTERVAL_S}s, "
+                f"would-be {new_amps}A)"
+            )
 
         _LOGGER.info(
-            "EV charger: adjusting %dA → %dA (target=%dA, "
+            "EV charger: adjusting %dA → %dA (target=%dA, bias=%+d, "
             "solar=%.0fW, consumption=%.0fW, headroom=%.0fW%s)",
-            self._current_amps, new_amps, target_amps,
+            amps, new_amps, target_amps, soc_bias,
             solar_power_w, consumption_w, headroom_w,
             ", emergency" if emergency_shrink else "",
         )
-        self._current_amps = new_amps
         self._last_regulate_time = now
         await self._set_amps(new_amps)
+        return (
+            f"adjust {amps}A→{new_amps}A "
+            f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d}"
+            f"{', emergency' if emergency_shrink else ''})"
+        )
 
     # -- Switch control --
 
     async def _turn_on(self) -> None:
-        """Set charging amperage to minimum and start charging."""
-        await self._set_amps(self._current_amps)
+        """Turn on the EV charger toggle."""
         await self._hass.services.async_call(
             "homeassistant",
             "turn_on",
             {"entity_id": self._toggle_entity_id},
         )
 
-    async def _turn_off(self) -> None:
+    async def _turn_off_and_restore(self) -> None:
         """Stop EV charging and restore the user's original amperage."""
-        self._start_mode = None
         await self._hass.services.async_call(
             "homeassistant",
             "turn_off",
@@ -480,21 +497,9 @@ class EvChargerController:
         if self._saved_amps is not None:
             _LOGGER.info(
                 "EV charger: restoring user amps %dA → %dA",
-                self._current_amps, self._saved_amps,
+                self._read_amps_clamped(), self._saved_amps,
             )
             await self._set_amps(self._saved_amps)
-            self._current_amps = self._saved_amps
-            self._saved_amps = None
-
-    def _read_current_amps(self) -> int | None:
-        """Read the current amperage from the HA number entity."""
-        state = self._hass.states.get(self._power_entity_id)
-        if state is None:
-            return None
-        try:
-            return int(float(state.state))
-        except (ValueError, TypeError):
-            return None
 
     async def _set_amps(self, amps: int) -> None:
         """Set the wallbox charging amperage."""
@@ -504,37 +509,20 @@ class EvChargerController:
             {"entity_id": self._power_entity_id, "value": amps},
         )
 
+    def _clear_session(self) -> None:
+        """Reset all session bookkeeping."""
+        self._start_mode = None
+        self._saved_amps = None
+        self._export_sustained_since = None
+        self._last_headroom_ok_at = None
+
     # -- Lifecycle --
-
-    def resync_state(self) -> None:
-        """Sync internal state to the actual HA toggle state.
-
-        Called once at integration startup so that if HA restarts while the
-        EV is physically charging, we resume in the CHARGING state and the
-        SoC/overload stop checks can still fire.  Start mode is set to
-        MANUAL conservatively (we can't know who started the session, and
-        MANUAL keeps the charger at minimum on overload instead of stopping
-        outright — user still has the switch to stop manually).
-        """
-        state = self._hass.states.get(self._toggle_entity_id)
-        if state is None or state.state != "on":
-            return
-        self._state = ChargerState.CHARGING
-        self._start_mode = StartMode.MANUAL
-        current = self._read_current_amps()
-        if current is not None:
-            self._current_amps = max(MIN_CHARGE_AMPS, min(MAX_CHARGE_AMPS, current))
-        self._last_regulate_time = time.monotonic()
-        _LOGGER.info(
-            "EV charger: resynced to CHARGING (toggle is on) — "
-            "current=%dA, mode=MANUAL",
-            self._current_amps,
-        )
 
     def reconfigure(self, toggle_entity_id: str, power_entity_id: str) -> None:
         """Update entity IDs from options."""
         self._toggle_entity_id = toggle_entity_id
         self._power_entity_id = power_entity_id
+        self._clear_session()
         _LOGGER.info(
             "EV charger controller reconfigured: toggle=%s, power=%s",
             toggle_entity_id, power_entity_id,

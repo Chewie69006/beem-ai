@@ -1,4 +1,14 @@
-"""Tests for WaterHeaterController."""
+"""Tests for WaterHeaterController.
+
+The controller reads the live switch-entity state on every evaluate, so
+tests use a stateful ``FakeHass`` whose ``hass.services.async_call`` for
+``homeassistant.turn_on``/``turn_off`` actually flips the simulated
+switch state (and bumps ``last_changed``).  This mirrors real HA closely
+enough that the controller's branching logic exercises the same code
+paths as in production.
+"""
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,46 +17,72 @@ from custom_components.beem_ai.water_heater_controller import (
     EXPORT_SOC_THRESHOLD,
     HYSTERESIS_PCT,
     MAX_CONSUMPTION_W,
-    HeaterState,
     SUSTAIN_SECONDS,
     WaterHeaterController,
 )
 
-# Default configurable thresholds (rule 2)
 SOC_THRESHOLD = 80.0
 CHARGE_POWER_THRESHOLD = 500.0
+SWITCH_ID = "switch.water_heater"
 
 
-def _make_controller(power_value=2000.0):
-    """Create a controller with mocked hass."""
-    hass = MagicMock()
-    hass.services = MagicMock()
-    hass.services.async_call = AsyncMock()
+class FakeHass:
+    """Stateful HA stub for the water heater controller."""
 
-    state_obj = MagicMock()
-    state_obj.state = str(power_value)
-    hass.states.get = MagicMock(return_value=state_obj)
+    def __init__(self) -> None:
+        self._switch_state = "off"
+        self._switch_last_changed = datetime.now(timezone.utc)
+        self.services = MagicMock()
+        self.services.async_call = AsyncMock(side_effect=self._service_call)
+        self.states = MagicMock()
+        self.states.get = MagicMock(side_effect=self._states_get)
 
-    ctrl = WaterHeaterController(
-        hass=hass,
-        switch_entity_id="switch.water_heater",
-        power_sensor_entity_id="sensor.water_heater_power",
-    )
+    async def _service_call(self, domain, service, data):
+        if domain == "homeassistant":
+            new = "on" if service == "turn_on" else "off"
+            if new != self._switch_state:
+                self._switch_state = new
+                self._switch_last_changed = datetime.now(timezone.utc)
+
+    def _states_get(self, entity_id):
+        if entity_id != SWITCH_ID:
+            return None
+        obj = MagicMock()
+        obj.state = self._switch_state
+        obj.last_changed = self._switch_last_changed
+        return obj
+
+    def set_switch(self, state: str, seconds_ago: float = 0.0) -> None:
+        """Force the switch state and last_changed (testing helper)."""
+        self._switch_state = state
+        self._switch_last_changed = (
+            datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        )
+
+    def remove_switch(self) -> None:
+        """Make hass.states.get return None for the switch."""
+        self.states.get = MagicMock(return_value=None)
+
+
+def _make_controller():
+    hass = FakeHass()
+    ctrl = WaterHeaterController(hass=hass, switch_entity_id=SWITCH_ID)
     return ctrl, hass
 
 
-async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
-                    consumption_w=500.0, import_w=0.0,
-                    soc_threshold=SOC_THRESHOLD,
-                    charge_power_threshold=CHARGE_POWER_THRESHOLD,
-                    sustain_seconds=SUSTAIN_SECONDS,
-                    min_duration_s=0,
-                    mode="Auto"):
-    """Helper to call evaluate with default thresholds.
+async def _evaluate(
+    ctrl, soc, export_w=0.0, charge_power_w=0.0,
+    consumption_w=500.0, import_w=0.0,
+    soc_threshold=SOC_THRESHOLD,
+    charge_power_threshold=CHARGE_POWER_THRESHOLD,
+    sustain_seconds=SUSTAIN_SECONDS,
+    min_duration_s=0,
+    mode="Auto",
+):
+    """Helper to call evaluate with sane defaults.
 
-    ``min_duration_s`` defaults to 0 so legacy SoC-stop tests still
-    fire immediately; pass a non-zero value to exercise the new
-    minimum-duration behavior explicitly.
+    ``min_duration_s`` defaults to 0 so legacy SoC-stop tests fire
+    immediately.  Pass a non-zero value to exercise minimum-duration.
     """
     await ctrl.evaluate(
         soc, export_w, charge_power_w, consumption_w,
@@ -58,23 +94,23 @@ async def _evaluate(ctrl, soc, export_w=0.0, charge_power_w=0.0,
 
 
 async def _heat_via_export(ctrl, hass, t0=1000.0):
-    """Drive into HEATING via rule 1 (export) and reset mock."""
+    """Drive into HEATING via rule 1 (export) and reset the services mock."""
     with patch("time.monotonic", return_value=t0):
         await _evaluate(ctrl, soc=96.0, export_w=600)
     with patch("time.monotonic", return_value=t0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=96.0, export_w=600)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.reset_mock()
     return t0 + SUSTAIN_SECONDS
 
 
 async def _heat_via_charge(ctrl, hass, t0=1000.0):
-    """Drive into HEATING via rule 2 (charge power) and reset mock."""
+    """Drive into HEATING via rule 2 (charge power) and reset the services mock."""
     with patch("time.monotonic", return_value=t0):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
     with patch("time.monotonic", return_value=t0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.reset_mock()
     return t0 + SUSTAIN_SECONDS
 
@@ -86,9 +122,7 @@ async def _heat_via_charge(ctrl, hass, t0=1000.0):
 
 def test_initial_state():
     ctrl, _ = _make_controller()
-    assert ctrl._state == HeaterState.IDLE
     assert ctrl.is_heating is False
-    assert ctrl.accumulated_kwh == 0.0
 
 
 # ==================================================================
@@ -98,7 +132,6 @@ def test_initial_state():
 
 @pytest.mark.asyncio
 async def test_rule1_triggers_when_exporting_above_95():
-    """Rule 1: SoC > 95% + exporting → heats after sustain."""
     ctrl, hass = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -106,15 +139,14 @@ async def test_rule1_triggers_when_exporting_above_95():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=96.0, export_w=600)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_on", {"entity_id": "switch.water_heater"}
+        "homeassistant", "turn_on", {"entity_id": SWITCH_ID}
     )
 
 
 @pytest.mark.asyncio
 async def test_rule1_any_positive_export():
-    """Rule 1: even 1W export triggers it."""
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -122,12 +154,11 @@ async def test_rule1_any_positive_export():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=96.0, export_w=1.0)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
 
 @pytest.mark.asyncio
 async def test_rule1_soc_at_threshold_triggers():
-    """Rule 1: SoC == 95% — triggers (>= threshold)."""
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -135,30 +166,26 @@ async def test_rule1_soc_at_threshold_triggers():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=EXPORT_SOC_THRESHOLD, export_w=600)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
 
 @pytest.mark.asyncio
 async def test_rule1_soc_too_low():
-    """Rule 1: SoC < 95% — doesn't trigger (even if exporting)."""
     ctrl, hass = _make_controller()
     await _evaluate(ctrl, soc=94.9, export_w=600)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_rule1_not_exporting():
-    """Rule 1: not exporting — doesn't trigger (even with SoC > 95%)."""
-    ctrl, hass = _make_controller()
-    # No export, no charge power above threshold either
+    ctrl, _ = _make_controller()
     await _evaluate(ctrl, soc=96.0, export_w=0, charge_power_w=0)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
 
 
 @pytest.mark.asyncio
 async def test_rule1_sustain_resets_when_export_stops():
-    """Rule 1: export stops mid-sustain → timer resets."""
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -172,7 +199,6 @@ async def test_rule1_sustain_resets_when_export_stops():
 
 @pytest.mark.asyncio
 async def test_rule1_before_sustain():
-    """Rule 1: conditions met but not sustained — stays IDLE."""
     ctrl, hass = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -180,27 +206,24 @@ async def test_rule1_before_sustain():
     with patch("time.monotonic", return_value=1010.0):
         await _evaluate(ctrl, soc=96.0, export_w=600)
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_rule1_stop_hysteresis():
-    """Rule 1: stops at SoC < 90% (95% - 5% hysteresis)."""
     ctrl, hass = _make_controller()
     t = await _heat_via_export(ctrl, hass)
 
-    # At 90% — stays heating
     with patch("time.monotonic", return_value=t + 60):
         await _evaluate(ctrl, soc=EXPORT_SOC_THRESHOLD - HYSTERESIS_PCT)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
-    # Below 90% — stops
     with patch("time.monotonic", return_value=t + 120):
         await _evaluate(ctrl, soc=EXPORT_SOC_THRESHOLD - HYSTERESIS_PCT - 1)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
 
 
@@ -211,7 +234,6 @@ async def test_rule1_stop_hysteresis():
 
 @pytest.mark.asyncio
 async def test_rule2_triggers_on_charge_power():
-    """Rule 2: SoC > 80% + charge power >= 500W → heats after sustain."""
     ctrl, hass = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -219,33 +241,41 @@ async def test_rule2_triggers_on_charge_power():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_on", {"entity_id": "switch.water_heater"}
+        "homeassistant", "turn_on", {"entity_id": SWITCH_ID}
     )
 
 
 @pytest.mark.asyncio
 async def test_rule2_soc_too_low():
-    """Rule 2: SoC < configurable threshold — doesn't trigger."""
     ctrl, hass = _make_controller()
     await _evaluate(ctrl, soc=79.9, export_w=0, charge_power_w=600)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_rule2_charge_power_too_low():
-    """Rule 2: charge power below threshold — doesn't trigger."""
     ctrl, hass = _make_controller()
     await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=400)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rule2_does_not_fire_when_grid_charging():
+    """Importing from grid must NOT count as solar surplus."""
+    ctrl, hass = _make_controller()
+    await _evaluate(
+        ctrl, soc=81.0, export_w=0, charge_power_w=600, import_w=600,
+    )
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_rule2_sustain_resets_when_power_drops():
-    """Rule 2: charge power drops mid-sustain → timer resets."""
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -259,53 +289,42 @@ async def test_rule2_sustain_resets_when_power_drops():
 
 @pytest.mark.asyncio
 async def test_oscillating_conditions_do_not_reset_sustain_within_grace():
-    """Brief condition dips (< GRACE_SECONDS) must NOT reset the sustain timer.
+    """Brief condition dips (< GRACE_SECONDS) must NOT reset the sustain timer."""
+    ctrl, _ = _make_controller()
 
-    Reproduces the oscillating-grid scenario where a single failing MQTT
-    update between successful ones was wiping the 30s timer.
-    """
-    ctrl, hass = _make_controller()
-
-    # t=1000: conditions met → sustain starts
     with patch("time.monotonic", return_value=1000.0):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
     assert ctrl._sustained_since == 1000.0
 
-    # t=1005: brief dip (5s < grace=15s) → timer must NOT reset
     with patch("time.monotonic", return_value=1005.0):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=200)
     assert ctrl._sustained_since == 1000.0
 
-    # t=1010: conditions back → still same timer
     with patch("time.monotonic", return_value=1010.0):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
     assert ctrl._sustained_since == 1000.0
 
-    # t=1030: >= 30s since sustain start + currently OK → turns on
     with patch("time.monotonic", return_value=1030.0):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
 
 @pytest.mark.asyncio
 async def test_rule2_stop_hysteresis():
-    """Rule 2: stops at SoC < 75% (80% - 5% hysteresis)."""
     ctrl, hass = _make_controller()
     t = await _heat_via_charge(ctrl, hass)
 
-    stop = SOC_THRESHOLD - HYSTERESIS_PCT  # 75%
+    stop = SOC_THRESHOLD - HYSTERESIS_PCT  # 75% w/ default SOC_THRESHOLD=80
 
-    # At 75% — stays heating
     with patch("time.monotonic", return_value=t + 60):
         await _evaluate(ctrl, soc=stop)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
-    # Below 75% — stops
     with patch("time.monotonic", return_value=t + 120):
         await _evaluate(ctrl, soc=stop - 1)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
 
 
@@ -316,7 +335,6 @@ async def test_rule2_stop_hysteresis():
 
 @pytest.mark.asyncio
 async def test_rule2_fires_below_95_when_charging():
-    """Rule 2 can fire at SoC=81% (below rule 1's 95%) when charging hard."""
     ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -324,93 +342,21 @@ async def test_rule2_fires_below_95_when_charging():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=81.0, export_w=0, charge_power_w=600)
 
-    assert ctrl._state == HeaterState.HEATING
-    assert ctrl._active_soc_threshold == SOC_THRESHOLD  # 80%
+    assert ctrl.is_heating is True
+    assert ctrl._active_soc_threshold == SOC_THRESHOLD
 
 
 @pytest.mark.asyncio
 async def test_both_rules_active_uses_lower_threshold():
-    """When both rules match, active SoC threshold is the lower one."""
     ctrl, _ = _make_controller()
 
-    # SoC > 95%, exporting AND charging above threshold → both rules match
     with patch("time.monotonic", return_value=1000.0):
         await _evaluate(ctrl, soc=96.0, export_w=600, charge_power_w=600)
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=96.0, export_w=600, charge_power_w=600)
 
-    assert ctrl._state == HeaterState.HEATING
-    # SOC_THRESHOLD (80) < EXPORT_SOC_THRESHOLD (95), so min = 80
+    assert ctrl.is_heating is True
     assert ctrl._active_soc_threshold == SOC_THRESHOLD
-
-
-# ==================================================================
-# Energy accumulation
-# ==================================================================
-
-
-@pytest.mark.asyncio
-async def test_energy_accumulation():
-    ctrl, hass = _make_controller(power_value=2000.0)
-    t = await _heat_via_export(ctrl, hass)
-
-    with patch("time.monotonic", return_value=t + 3600):
-        await _evaluate(ctrl, soc=92.0)
-
-    assert abs(ctrl.accumulated_kwh - 2.0) < 0.01
-
-
-@pytest.mark.asyncio
-async def test_energy_accumulation_unavailable_sensor():
-    ctrl, hass = _make_controller()
-    hass.states.get.return_value = None
-
-    t = await _heat_via_export(ctrl, hass)
-
-    with patch("time.monotonic", return_value=t + 3600):
-        await _evaluate(ctrl, soc=92.0)
-
-    assert ctrl.accumulated_kwh == 0.0
-
-
-@pytest.mark.asyncio
-async def test_energy_accumulation_non_numeric_sensor():
-    ctrl, hass = _make_controller()
-    state_obj = MagicMock()
-    state_obj.state = "unavailable"
-    hass.states.get.return_value = state_obj
-
-    t = await _heat_via_export(ctrl, hass)
-
-    with patch("time.monotonic", return_value=t + 3600):
-        await _evaluate(ctrl, soc=92.0)
-
-    assert ctrl.accumulated_kwh == 0.0
-
-
-# ==================================================================
-# reset_daily / reconfigure
-# ==================================================================
-
-
-@pytest.mark.asyncio
-async def test_reset_daily_clears_energy():
-    ctrl, hass = _make_controller(power_value=2000.0)
-    t = await _heat_via_export(ctrl, hass)
-
-    with patch("time.monotonic", return_value=t + 3600):
-        await _evaluate(ctrl, soc=92.0)
-
-    assert ctrl.accumulated_kwh > 0
-    ctrl.reset_daily()
-    assert ctrl.accumulated_kwh == 0.0
-
-
-def test_reconfigure_updates_entity_ids():
-    ctrl, _ = _make_controller()
-    ctrl.reconfigure("switch.new_heater", "sensor.new_power")
-    assert ctrl._switch_entity_id == "switch.new_heater"
-    assert ctrl._power_sensor_entity_id == "sensor.new_power"
 
 
 # ==================================================================
@@ -420,98 +366,80 @@ def test_reconfigure_updates_entity_ids():
 
 @pytest.mark.asyncio
 async def test_overload_stops_when_importing():
-    """Consumption >= 7kW AND importing → stop heating."""
     ctrl, hass = _make_controller()
     t = await _heat_via_export(ctrl, hass)
 
     with patch("time.monotonic", return_value=t + 60):
         await _evaluate(ctrl, soc=92.0, consumption_w=8000, import_w=1000)
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
 
 
 @pytest.mark.asyncio
 async def test_no_overload_if_not_importing():
-    """Consumption >= 7kW but NOT importing → keep heating."""
     ctrl, hass = _make_controller()
     t = await _heat_via_export(ctrl, hass)
 
     with patch("time.monotonic", return_value=t + 60):
         await _evaluate(ctrl, soc=92.0, consumption_w=8000, import_w=0)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_no_overload_below_threshold():
-    """Consumption < 7kW and importing → keep heating."""
     ctrl, hass = _make_controller()
     t = await _heat_via_export(ctrl, hass)
 
     with patch("time.monotonic", return_value=t + 60):
         await _evaluate(ctrl, soc=92.0, consumption_w=6000, import_w=500)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.assert_not_called()
 
 
 # ==================================================================
-# Startup resync
+# External switch toggles / session-adoption
 # ==================================================================
 
 
-def _set_switch_state(hass, value: str) -> None:
-    """Make hass.states.get return a switch entity in the given state."""
-    state_obj = MagicMock()
-    state_obj.state = value
-    hass.states.get = MagicMock(return_value=state_obj)
-
-
 @pytest.mark.asyncio
-async def test_resync_switch_on_sets_heating():
-    """Switch physically ON at startup → controller resyncs to HEATING."""
+async def test_externally_turned_on_adopts_session():
+    """Switch turned on externally → next evaluate adopts a session and
+    will honour subsequent SoC-stop logic."""
     ctrl, hass = _make_controller()
-    _set_switch_state(hass, "on")
+    hass.set_switch("on", seconds_ago=0)
 
-    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
-
-    assert ctrl._state == HeaterState.HEATING
-    # active threshold = min(95, 80) = 80 → stop at 70%
+    # First evaluate adopts the session (uses min(95, 80) = 80 → stop at 70)
+    await _evaluate(ctrl, soc=90.0)
+    assert ctrl.is_heating is True
     assert ctrl._active_soc_threshold == SOC_THRESHOLD
 
-
-@pytest.mark.asyncio
-async def test_resync_switch_off_stays_idle():
-    """Switch OFF at startup → controller stays IDLE."""
-    ctrl, hass = _make_controller()
-    _set_switch_state(hass, "off")
-
-    ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
-
-    assert ctrl._state == HeaterState.IDLE
-
-
-@pytest.mark.asyncio
-async def test_resync_then_soc_drop_turns_off():
-    """After resync to HEATING, a SoC drop below hysteresis must stop it."""
-    ctrl, hass = _make_controller()
-    _set_switch_state(hass, "on")
-    with patch("time.monotonic", return_value=1000.0):
-        ctrl.resync_state(soc_threshold=SOC_THRESHOLD)
-
-    # SoC drops below SOC_THRESHOLD - HYSTERESIS = 70%; min_duration=0 so
-    # the stop fires immediately (helper default).
-    with patch("time.monotonic", return_value=2000.0):
-        await _evaluate(ctrl, soc=69.0)
-
-    assert ctrl._state == HeaterState.IDLE
-    hass.services.async_call.assert_called_once_with(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"}
+    # SoC drop below 70 → stops (default min_duration_s=0)
+    await _evaluate(ctrl, soc=69.0)
+    assert ctrl.is_heating is False
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
+
+
+@pytest.mark.asyncio
+async def test_externally_turned_off_clears_session():
+    """Switch turned off externally → controller clears session bookkeeping."""
+    ctrl, hass = _make_controller()
+    await _heat_via_export(ctrl, hass)
+    assert ctrl._active_soc_threshold is not None
+
+    # External turn-off
+    hass.set_switch("off")
+    await _evaluate(ctrl, soc=85.0)
+
+    assert ctrl.is_heating is False
+    assert ctrl._active_soc_threshold is None
 
 
 # ==================================================================
@@ -523,12 +451,12 @@ async def test_resync_then_soc_drop_turns_off():
 async def test_min_duration_defers_soc_stop():
     """SoC drop during min duration → heater stays on."""
     ctrl, hass = _make_controller()
-    t = await _heat_via_charge(ctrl, hass)  # active threshold = 80 → stop at 70
+    await _heat_via_charge(ctrl, hass)
+    # Switch turned on ~now → seconds_since_turned_on is small
 
-    with patch("time.monotonic", return_value=t + 60):
-        await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
+    await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
 
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
     hass.services.async_call.assert_not_called()
 
 
@@ -536,14 +464,15 @@ async def test_min_duration_defers_soc_stop():
 async def test_min_duration_elapsed_allows_soc_stop():
     """SoC drop after min duration elapsed → heater stops."""
     ctrl, hass = _make_controller()
-    t = await _heat_via_charge(ctrl, hass)
+    await _heat_via_charge(ctrl, hass)
+    # Backdate last_changed to simulate 31 min ago
+    hass.set_switch("on", seconds_ago=31 * 60)
 
-    with patch("time.monotonic", return_value=t + 30 * 60 + 10):
-        await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
+    await _evaluate(ctrl, soc=65.0, min_duration_s=30 * 60)
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
 
 
@@ -551,37 +480,36 @@ async def test_min_duration_elapsed_allows_soc_stop():
 async def test_overload_overrides_min_duration():
     """Overload (≥7kW + importing) fires even during min duration."""
     ctrl, hass = _make_controller()
-    t = await _heat_via_charge(ctrl, hass)
+    await _heat_via_charge(ctrl, hass)
+    # Switch turned on now — min duration not elapsed
 
-    with patch("time.monotonic", return_value=t + 60):
-        await _evaluate(
-            ctrl, soc=81.0,
-            consumption_w=MAX_CONSUMPTION_W + 100,
-            import_w=500,
-            min_duration_s=30 * 60,
-        )
+    await _evaluate(
+        ctrl, soc=81.0,
+        consumption_w=MAX_CONSUMPTION_W + 100,
+        import_w=500,
+        min_duration_s=30 * 60,
+    )
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
 
 
 @pytest.mark.asyncio
 async def test_custom_sustain_seconds_used_for_turn_on():
-    """sustain_seconds=60 → heater only turns on after 60s sustained."""
-    ctrl, hass = _make_controller()
+    ctrl, _ = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
         await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
 
     with patch("time.monotonic", return_value=1030.0):
         await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
 
     with patch("time.monotonic", return_value=1060.0):
         await _evaluate(ctrl, soc=96.0, export_w=600, sustain_seconds=60)
-    assert ctrl._state == HeaterState.HEATING
+    assert ctrl.is_heating is True
 
 
 # ==================================================================
@@ -591,34 +519,34 @@ async def test_custom_sustain_seconds_used_for_turn_on():
 
 @pytest.mark.asyncio
 async def test_handle_mode_change_disabled_stops_when_heating():
-    """Mode → Disabled while HEATING must stop the heater."""
     ctrl, hass = _make_controller()
     await _heat_via_export(ctrl, hass)
 
     await ctrl.handle_mode_change("Disabled")
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
 
 
 @pytest.mark.asyncio
-async def test_handle_mode_change_disabled_force_off_when_state_stale_idle():
-    """Disabled must force-off even if internal state is IDLE but switch is on."""
+async def test_handle_mode_change_disabled_force_off_when_external_on():
+    """Switch is on but controller has no session yet → Disabled still
+    turns it off."""
     ctrl, hass = _make_controller()
-    _set_switch_state(hass, "on")  # physical ON, controller fresh IDLE
+    hass.set_switch("on")
 
     await ctrl.handle_mode_change("Disabled")
 
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
 
 
 @pytest.mark.asyncio
 async def test_evaluate_disabled_mode_does_not_start():
-    """evaluate(mode=Disabled): even with perfect surplus conditions, no start."""
     ctrl, hass = _make_controller()
 
     with patch("time.monotonic", return_value=1000.0):
@@ -626,25 +554,30 @@ async def test_evaluate_disabled_mode_does_not_start():
     with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
         await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
 
-    assert ctrl._state == HeaterState.IDLE
-    # Only turn_off (from _force_off check) may have been called, not turn_on.
+    assert ctrl.is_heating is False
     for c in hass.services.async_call.call_args_list:
-        assert c != (
-            ("homeassistant", "turn_on"),
-            {"entity_id": "switch.water_heater"},
-        )
+        assert c.args[:2] != ("homeassistant", "turn_on")
 
 
 @pytest.mark.asyncio
 async def test_evaluate_disabled_mode_stops_heating():
-    """evaluate(mode=Disabled) while HEATING must stop."""
     ctrl, hass = _make_controller()
-    t = await _heat_via_export(ctrl, hass)
+    await _heat_via_export(ctrl, hass)
 
-    with patch("time.monotonic", return_value=t + 10):
-        await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
+    await _evaluate(ctrl, soc=96.0, export_w=600, mode="Disabled")
 
-    assert ctrl._state == HeaterState.IDLE
+    assert ctrl.is_heating is False
     hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": "switch.water_heater"},
+        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
     )
+
+
+# ==================================================================
+# reconfigure
+# ==================================================================
+
+
+def test_reconfigure_updates_switch_id():
+    ctrl, _ = _make_controller()
+    ctrl.reconfigure("switch.new_heater")
+    assert ctrl._switch_entity_id == "switch.new_heater"

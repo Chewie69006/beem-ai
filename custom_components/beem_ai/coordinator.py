@@ -35,9 +35,8 @@ from .const import (
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
-    OPT_EV_START_SOC_THRESHOLD,
-    OPT_EV_STOP_SOC_THRESHOLD,
-    OPT_WATER_HEATER_POWER_SENSOR,
+    OPT_EV_TARGET_SOC,
+    OPT_EV_SOC_HYSTERESIS,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_CHARGE_POWER_THRESHOLD,
     OPT_WATER_HEATER_MODE,
@@ -109,11 +108,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.wh_charge_power_threshold: float = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
         )
-        self.ev_start_soc_threshold: float = float(
-            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        self.ev_target_soc: float = float(
+            options.get(OPT_EV_TARGET_SOC, 95.0)
         )
-        self.ev_stop_soc_threshold: float = float(
-            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
+        self.ev_soc_hysteresis: float = float(
+            options.get(OPT_EV_SOC_HYSTERESIS, 5.0)
         )
         self.ev_charger_mode: str = str(
             options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)
@@ -226,13 +225,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Water heater controller (optional)
         self._setup_water_heater(options)
-        if self._water_heater:
-            self._water_heater.resync_state(self.wh_soc_threshold)
 
         # EV charger controller (optional, second-priority after water heater)
         self._setup_ev_charger(options)
-        if self._ev_charger:
-            self._ev_charger.resync_state()
 
         # Start MQTT (connect() is synchronous — it creates a background task)
         _LOGGER.info("Starting MQTT client")
@@ -417,16 +412,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
     def _setup_water_heater(self, options: dict) -> None:
         """Create or destroy the water heater controller based on options."""
         switch_id = options.get(OPT_WATER_HEATER_SWITCH, "")
-        power_id = options.get(OPT_WATER_HEATER_POWER_SENSOR, "")
-        if switch_id and power_id:
+        if switch_id:
             self._water_heater = WaterHeaterController(
                 hass=self.hass,
                 switch_entity_id=switch_id,
-                power_sensor_entity_id=power_id,
             )
             _LOGGER.info(
-                "Water heater controller configured: switch=%s, power=%s",
-                switch_id, power_id,
+                "Water heater controller configured: switch=%s",
+                switch_id,
             )
         else:
             self._water_heater = None
@@ -509,8 +502,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 solar_power_w=battery.solar_power_w,
                 consumption_w=consumption_w,
                 water_heater_heating=wh_heating,
-                start_soc_threshold=self.ev_start_soc_threshold,
-                stop_soc_threshold=self.ev_stop_soc_threshold,
+                target_soc=self.ev_target_soc,
+                soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
 
@@ -548,20 +541,16 @@ class BeemAICoordinator(DataUpdateCoordinator):
             promoted, self._consumption_today_protected,
         )
 
-        # 2. Reset water heater daily energy
-        if self._water_heater:
-            self._water_heater.reset_daily()
-
-        # 3. Clear tomorrow override
+        # 2. Clear tomorrow override
         self._consumption_tomorrow_override = None
 
-        # 4. Persist analytics
+        # 3. Persist analytics
         if self._consumption:
             self._consumption.save()
         if self._forecast_tracker:
             self._forecast_tracker.save()
 
-        # 5. Refresh forecasts → computes fresh tomorrow
+        # 4. Refresh forecasts → computes fresh tomorrow
         await self._refresh_forecasts()
 
         if self._data_dir:
@@ -678,22 +667,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._forecast:
             self._forecast.reconfigure(config)
 
-        # Reconfigure water heater and EV charger controllers.  Setup
-        # recreates the controller, so resync_state() is essential: the
-        # physical switch may be on (user toggled it, or the prior
-        # controller was mid-session) and without resync the new
-        # controller would think IDLE and subsequent mode changes (e.g.
-        # Disabled) would no-op.
+        # Reconfigure water heater and EV charger controllers.  The new
+        # controllers read the live entity state on every evaluate, so no
+        # explicit resync is needed after recreation — they pick up the
+        # current physical state of the switch automatically.
         self._setup_water_heater(options)
-        if self._water_heater:
-            self._water_heater.resync_state(
-                soc_threshold=float(
-                    options.get(OPT_WH_SOC_THRESHOLD, 95.0)
-                ),
-            )
         self._setup_ev_charger(options)
-        if self._ev_charger:
-            self._ev_charger.resync_state()
 
         # Refresh persisted thresholds
         self.wh_soc_threshold = float(
@@ -702,11 +681,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self.wh_charge_power_threshold = float(
             options.get(OPT_WH_CHARGE_POWER_THRESHOLD, 500.0)
         )
-        self.ev_start_soc_threshold = float(
-            options.get(OPT_EV_START_SOC_THRESHOLD, 90.0)
+        self.ev_target_soc = float(
+            options.get(OPT_EV_TARGET_SOC, 95.0)
         )
-        self.ev_stop_soc_threshold = float(
-            options.get(OPT_EV_STOP_SOC_THRESHOLD, 85.0)
+        self.ev_soc_hysteresis = float(
+            options.get(OPT_EV_SOC_HYSTERESIS, 5.0)
         )
         self.ev_charger_mode = str(
             options.get(OPT_EV_CHARGER_MODE, DEFAULT_EV_CHARGER_MODE)
@@ -855,6 +834,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Turn off water heater if heating
         if self._water_heater and self._water_heater.is_heating:
             await self._water_heater._turn_off()
+            self._water_heater._clear_session()
 
         # Stop MQTT
         if self._mqtt_client:

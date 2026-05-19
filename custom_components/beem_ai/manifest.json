@@ -7,5 +7,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/drodrigues/BeemAI/issues",
   "requirements": ["aiohttp>=3.9.0", "aiomqtt>=2.0.0"],
-  "version": "1.0.0"
+  "version": "0.2.0"
 }

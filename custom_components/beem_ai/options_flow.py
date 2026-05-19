@@ -27,7 +27,6 @@ from .const import (
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
     DEFAULT_EV_REQUIRE_WATER_HEATER,
-    OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
 )
 
@@ -194,9 +193,6 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_WATER_HEATER_SWITCH] = user_input.get(
                 OPT_WATER_HEATER_SWITCH, ""
             )
-            self._options[OPT_WATER_HEATER_POWER_SENSOR] = user_input.get(
-                OPT_WATER_HEATER_POWER_SENSOR, ""
-            )
             return await self.async_step_ev_charger()
 
         current = self.config_entry.options
@@ -207,10 +203,6 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_WATER_HEATER_SWITCH,
                     default=current.get(OPT_WATER_HEATER_SWITCH, ""),
                 ): EntitySelector(EntitySelectorConfig(domain="switch")),
-                vol.Optional(
-                    OPT_WATER_HEATER_POWER_SENSOR,
-                    default=current.get(OPT_WATER_HEATER_POWER_SENSOR, ""),
-                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             }
         )
 

@@ -19,7 +19,6 @@ from custom_components.beem_ai.const import (
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_TOGGLE,
-    OPT_WATER_HEATER_POWER_SENSOR,
     OPT_WATER_HEATER_SWITCH,
 )
 
@@ -283,7 +282,6 @@ async def test_step_water_heater_with_existing_values():
     """Existing entity IDs populate form defaults."""
     existing_options = {
         OPT_WATER_HEATER_SWITCH: "switch.water_heater",
-        OPT_WATER_HEATER_POWER_SENSOR: "sensor.water_heater_power",
     }
     flow = _make_flow(options=existing_options)
 
@@ -294,30 +292,26 @@ async def test_step_water_heater_with_existing_values():
         key_str = str(key_obj)
         if key_str == OPT_WATER_HEATER_SWITCH:
             assert key_obj.default() == "switch.water_heater"
-        elif key_str == OPT_WATER_HEATER_POWER_SENSOR:
-            assert key_obj.default() == "sensor.water_heater_power"
 
 
 @pytest.mark.asyncio
 async def test_step_water_heater_proceeds_to_ev_charger():
-    """Water heater input stores entities and proceeds to ev_charger step."""
+    """Water heater input stores entity and proceeds to ev_charger step."""
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
     flow.async_step_ev_charger = AsyncMock(return_value="ev_charger_result")
 
     await flow.async_step_water_heater(user_input={
         OPT_WATER_HEATER_SWITCH: "switch.boiler",
-        OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
     })
 
     flow.async_step_ev_charger.assert_called_once()
     assert flow._options[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
-    assert flow._options[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
 
 
 @pytest.mark.asyncio
 async def test_step_water_heater_empty_proceeds_to_ev_charger():
-    """Empty water heater input stores empty strings and proceeds to ev_charger."""
+    """Empty water heater input stores empty string and proceeds to ev_charger."""
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
     flow.async_step_ev_charger = AsyncMock(return_value="ev_charger_result")
@@ -326,7 +320,6 @@ async def test_step_water_heater_empty_proceeds_to_ev_charger():
 
     flow.async_step_ev_charger.assert_called_once()
     assert flow._options[OPT_WATER_HEATER_SWITCH] == ""
-    assert flow._options[OPT_WATER_HEATER_POWER_SENSOR] == ""
 
 
 # ------------------------------------------------------------------
@@ -440,7 +433,6 @@ async def test_full_flow():
     flow.async_show_form.reset_mock()
     await flow.async_step_water_heater(user_input={
         OPT_WATER_HEATER_SWITCH: "switch.boiler",
-        OPT_WATER_HEATER_POWER_SENSOR: "sensor.boiler_power",
     })
     flow.async_show_form.assert_called_once()
     assert flow.async_show_form.call_args.kwargs["step_id"] == "ev_charger"
@@ -461,7 +453,6 @@ async def test_full_flow():
     assert OPT_TARIFF_PERIODS_JSON in saved_data
     assert OPT_SOLCAST_SITE_IDS_JSON in saved_data
     assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
-    assert saved_data[OPT_WATER_HEATER_POWER_SENSOR] == "sensor.boiler_power"
     assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
     assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
 
