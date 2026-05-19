@@ -445,19 +445,6 @@ class EvChargerController:
                 self._clear_session()
                 return f"stop: SoC floor (SoC {soc:.1f}% < {stop_soc:.1f}%)"
 
-            if solar_power_w < consumption_w:
-                _LOGGER.info(
-                    "EV charger: solar=%.0fW < house consumption=%.0fW — "
-                    "no real surplus to divert, stopping EV charging",
-                    solar_power_w, consumption_w,
-                )
-                await self._turn_off_and_restore()
-                self._clear_session()
-                return (
-                    f"stop: no surplus (solar {solar_power_w:.0f}W < "
-                    f"cons {consumption_w:.0f}W)"
-                )
-
         return await self._regulate_amps(
             soc, amps, headroom_w, target_soc,
             solar_power_w, consumption_w, now, ev_mode,

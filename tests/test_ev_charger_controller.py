@@ -1011,7 +1011,7 @@ async def test_evaluate_disabled_force_off_when_session_stale():
 
 
 # ==================================================================
-# Closed-loop SoC bias + solar<consumption stop (Auto)
+# Closed-loop SoC bias (Auto)
 # ==================================================================
 
 
@@ -1068,35 +1068,6 @@ async def test_manual_mode_no_soc_bias():
                     meter_power_w=0, battery_power_w=0,
                     mode="Manual")
     assert ctrl.current_amps == 10
-
-
-@pytest.mark.asyncio
-async def test_auto_stops_when_solar_below_consumption():
-    ctrl, hass = _make_controller(user_amps=20)
-    await _start_charging(ctrl, hass)
-
-    await _eval(ctrl, soc=TARGET_SOC,
-                solar_power_w=500.0, consumption_w=900.0)
-
-    assert ctrl.is_charging is False
-    hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_off", {"entity_id": SWITCH_ID},
-    )
-
-
-@pytest.mark.asyncio
-async def test_manual_does_not_stop_when_solar_below_consumption():
-    ctrl, hass = _make_controller()
-
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change("Manual")
-    hass.services.async_call.reset_mock()
-
-    with patch("time.monotonic", return_value=2000.0):
-        await _eval(ctrl, soc=TARGET_SOC,
-                    solar_power_w=500.0, consumption_w=900.0,
-                    mode="Manual")
-    assert ctrl.is_charging is True
 
 
 @pytest.mark.asyncio
