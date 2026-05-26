@@ -6,6 +6,7 @@ import json
 import logging
 import logging.handlers
 import os
+import time
 from datetime import timedelta
 
 import aiohttp
@@ -67,6 +68,11 @@ _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(minutes=2)
 FORECAST_INTERVAL = timedelta(hours=4)
+# Mirrors water_heater_controller.MAX_CONSUMPTION_W — the coordinator
+# owns the overload coordination (throttle EV, then cut WH after a
+# short grace) so the two diverters don't act on stale views.
+OVERLOAD_THRESHOLD_W = 7000
+OVERLOAD_WH_FORCE_STOP_GRACE_S = 15.0
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -96,6 +102,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._forecast_tracker: ForecastTracker | None = None
         self._water_heater: WaterHeaterController | None = None
         self._ev_charger: EvChargerController | None = None
+        # Monotonic timestamp of the first tick observing overload
+        # (cons ≥ OVERLOAD_THRESHOLD_W with positive import).  Cleared
+        # when the overload clears.  Used to delay WH force-stop until
+        # after the EV throttle has had a chance to bring us back.
+        self._overload_started_at: float | None = None
 
         # Solar panel arrays fetched from Beem API
         self.panel_arrays: list[dict] = []
@@ -469,6 +480,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
 
+        await self._handle_overload(consumption_w, import_w)
+
         if self._water_heater:
             await self._water_heater.evaluate(
                 soc,
@@ -482,6 +495,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 min_duration_s=self.wh_min_duration_s,
                 mode=self.water_heater_mode,
             )
+        # Note: the EV controller's per-tick overload reduction still
+        # runs inside its evaluate() — that's the actual amps-trim
+        # action.  The coordinator's role here is purely to time the
+        # WH force-stop once the EV intervention has failed to bring
+        # consumption back under the threshold.
         if self._ev_charger:
             # wh_heating=None means "no prerequisite".  Pass None when:
             #   - no WH configured, or
@@ -509,6 +527,58 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
+
+    async def _handle_overload(
+        self, consumption_w: float, import_w: float
+    ) -> None:
+        """Coordinate diverters when the house is over the breaker limit.
+
+        The EV controller's evaluate() trims its own amps once we reach
+        OVERLOAD_THRESHOLD_W with positive import.  This method is the
+        slower second stage: if consumption stays over the threshold
+        for OVERLOAD_WH_FORCE_STOP_GRACE_S (typically because the EV
+        already hit its 6A floor or wasn't drawing much to begin with),
+        we force-stop the water heater — bypassing its min-duration
+        engagement.
+        """
+        now = time.monotonic()
+        overloaded = (
+            consumption_w >= OVERLOAD_THRESHOLD_W and import_w > 0
+        )
+        if not overloaded:
+            if self._overload_started_at is not None:
+                _LOGGER.info(
+                    "Overload cleared (cons=%.0fW, import=%.0fW)",
+                    consumption_w, import_w,
+                )
+            self._overload_started_at = None
+            return
+
+        if self._overload_started_at is None:
+            self._overload_started_at = now
+            _LOGGER.warning(
+                "Overload detected (cons=%.0fW, import=%.0fW) — "
+                "EV will throttle this tick; WH force-stop in %.0fs "
+                "if not resolved",
+                consumption_w, import_w, OVERLOAD_WH_FORCE_STOP_GRACE_S,
+            )
+            return
+
+        sustained = now - self._overload_started_at
+        if (
+            sustained >= OVERLOAD_WH_FORCE_STOP_GRACE_S
+            and self._water_heater is not None
+            and self._water_heater.is_heating
+        ):
+            _LOGGER.warning(
+                "Overload sustained %.0fs (cons=%.0fW, import=%.0fW) — "
+                "force-stopping water heater",
+                sustained, consumption_w, import_w,
+            )
+            await self._water_heater.force_stop_overload(consumption_w)
+            # Don't reset the timer — if we're still overloaded next
+            # tick (e.g., big external load), the EV controller will
+            # keep trimming and we'll log nothing new from here.
 
     # ---- Scheduled callbacks ----
 

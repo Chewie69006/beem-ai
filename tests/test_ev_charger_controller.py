@@ -426,7 +426,9 @@ async def test_regulate_clamped_at_max():
 
 
 @pytest.mark.asyncio
-async def test_overload_reduces_by_1a():
+async def test_overload_reduces_to_target_in_one_step():
+    """Mild overload (1000W over target) → reduce by ceil(1000/230)=5A
+    in a single tick, not -1A."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass)
     hass.set_amps(14)
@@ -435,11 +437,12 @@ async def test_overload_reduces_by_1a():
     with patch("time.monotonic", return_value=t + 2):
         await _eval(ctrl, consumption_w=7500)
 
-    assert ctrl.current_amps == 13
+    # excess = 7500 - 6500 = 1000W → 5A drop → 14 - 5 = 9A
+    assert ctrl.current_amps == 9
     assert ctrl.is_charging is True
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": AMPS_ID, "value": 13},
+        {"entity_id": AMPS_ID, "value": 9},
     )
 
 
@@ -459,7 +462,9 @@ async def test_overload_stops_if_already_at_minimum():
 
 
 @pytest.mark.asyncio
-async def test_overload_reduces_one_at_a_time():
+async def test_overload_stops_when_required_reduction_below_min():
+    """Severe overload (9000W, excess 2500W ≈ 11A) from 14A would put
+    us at 3A — below MIN_CHARGE_AMPS — so we stop instead."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass)
     hass.set_amps(14)
@@ -468,8 +473,7 @@ async def test_overload_reduces_one_at_a_time():
     with patch("time.monotonic", return_value=t + 2):
         await _eval(ctrl, consumption_w=9000)
 
-    assert ctrl.is_charging is True
-    assert ctrl.current_amps == 13
+    assert ctrl.is_charging is False
 
 
 # ------------------------------------------------------------------
@@ -754,21 +758,23 @@ async def test_manual_mode_overload_stops():
 
 
 @pytest.mark.asyncio
-async def test_manual_mode_overload_reduces_by_1a_when_not_manual_mode():
-    """In Auto mode with high amps, overload still shrinks by 1A first."""
+async def test_auto_mode_overload_throttles_when_reduction_feasible():
+    """In Auto mode, overload trims amps to bring consumption below
+    the 6500W target — only stopping when that would fall under 6A.
+    Here cons=7500 from amps=14 → drop 5A → 9A, still charging."""
     ctrl, hass = _make_controller()
     await _start_charging(ctrl, hass)
     hass.set_amps(14)
     hass.services.async_call.reset_mock()
 
     with patch("time.monotonic", return_value=2000.0):
-        await _eval(ctrl, consumption_w=9000)
+        await _eval(ctrl, consumption_w=7500)
 
     assert ctrl.is_charging is True
-    assert ctrl.current_amps == 13
+    assert ctrl.current_amps == 9
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": AMPS_ID, "value": 13},
+        {"entity_id": AMPS_ID, "value": 9},
     )
 
 

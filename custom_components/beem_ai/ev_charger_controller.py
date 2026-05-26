@@ -65,6 +65,9 @@ PENDING_REFRESH_INTERVAL_S = 20
 EMERGENCY_SHRINK_W = 500
 
 MAX_CONSUMPTION_W = 7000
+# Aim for ~6500W when trimming amps under overload — leaves margin
+# before re-tripping the 7kW threshold on the next tick.
+OVERLOAD_TARGET_W = 6500
 
 # Wallbox `sensor.*_status_description` values that mean "the car is
 # physically not drawing current right now" — typically because the EV's
@@ -467,6 +470,10 @@ class EvChargerController:
             self._no_demand_since = None
 
         # Overload protection — safety override for both modes.
+        # We compute the amps reduction needed to drop the household
+        # under OVERLOAD_TARGET_W in a single step (rather than -1A per
+        # tick) so a sudden 8 kW spike doesn't sit at 7.5 kW for several
+        # ticks while we trim slowly.
         if consumption_w >= MAX_CONSUMPTION_W:
             if ev_mode == EvMode.MANUAL:
                 _LOGGER.info(
@@ -478,20 +485,27 @@ class EvChargerController:
                 self._clear_session()
                 return f"stop: Manual overload (cons {consumption_w:.0f}W)"
 
-            target = amps - 1
+            excess_w = consumption_w - OVERLOAD_TARGET_W
+            amps_to_drop = max(
+                1, int((excess_w + WATTS_PER_AMP - 1) // WATTS_PER_AMP)
+            )
+            target = amps - amps_to_drop
             if target < MIN_CHARGE_AMPS:
                 _LOGGER.info(
-                    "EV charger: consumption %.0fW >= %dW and already at "
-                    "minimum — stopping EV charging",
+                    "EV charger: consumption %.0fW >= %dW and reducing "
+                    "%dA would fall below minimum %dA — stopping EV charging",
                     consumption_w, MAX_CONSUMPTION_W,
+                    amps_to_drop, MIN_CHARGE_AMPS,
                 )
                 await self._turn_off_and_restore()
                 self._clear_session()
                 return f"stop: overload at min (cons {consumption_w:.0f}W)"
 
             _LOGGER.info(
-                "EV charger: overload %.0fW >= %dW — reducing %dA → %dA",
+                "EV charger: overload %.0fW >= %dW — reducing %dA → %dA "
+                "(drop %dA to target <%.0fW)",
                 consumption_w, MAX_CONSUMPTION_W, amps, target,
+                amps_to_drop, OVERLOAD_TARGET_W,
             )
             self._last_regulate_time = now
             await self._set_amps(target)

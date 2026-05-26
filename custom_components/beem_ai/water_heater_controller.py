@@ -23,8 +23,9 @@ DEFAULT_SUSTAIN_SECONDS = 30  # Default sustain window (user-configurable)
 SUSTAIN_SECONDS = DEFAULT_SUSTAIN_SECONDS  # Back-compat alias for existing imports
 GRACE_SECONDS = 15  # Brief condition dips under this don't reset the sustain timer
 HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
-MAX_CONSUMPTION_W = 7000  # Kill diverters if house exceeds this
+MAX_CONSUMPTION_W = 7000  # Threshold used by the coordinator for overload coordination
 DEFAULT_MIN_DURATION_S = 15 * 60  # Default minimum heating duration (user-configurable)
+COOLDOWN_AFTER_EXTERNAL_OFF_S = 15 * 60  # Block restart after an unexpected OFF
 
 
 class WhMode(enum.Enum):
@@ -58,6 +59,18 @@ class WaterHeaterController:
         self._sustained_since: float | None = None
         self._last_ok_at: float | None = None
         self._active_soc_threshold: float | None = None
+        # Arm for the surplus-loss stop (heating branch).  Set when the
+        # start rules go False after min_duration; cleared as soon as
+        # they go True again or when the switch turns off.
+        self._stop_armed_since: float | None = None
+        # Tracks what state we last commanded (or observed at startup).
+        # An observed state differing from this is treated as an
+        # external transition (auto-off timer on the plug, manual flip,
+        # integration glitch).
+        self._expected_state: str | None = None
+        # Set when we observe an external ON→OFF; idle branch refuses
+        # to start while this is in the future.
+        self._cooldown_until_monotonic: float | None = None
 
     # -- Entity reads --
 
@@ -114,6 +127,39 @@ class WaterHeaterController:
         now = time.monotonic()
         wh_mode = _mode_from_str(mode)
         is_on = self._is_switch_on()
+        observed = "on" if is_on else "off"
+
+        # Detect transitions we didn't command (plug auto-off timer,
+        # manual toggle, integration glitch).  On unexpected OFF, arm
+        # the cooldown so we don't immediately re-fire on a residual
+        # surplus reading.
+        if self._expected_state is not None and observed != self._expected_state:
+            if observed == "off":
+                _LOGGER.warning(
+                    "Water heater: switch turned off externally "
+                    "(plug auto-off, manual, or integration glitch) — "
+                    "applying %ds cooldown before any restart",
+                    COOLDOWN_AFTER_EXTERNAL_OFF_S,
+                )
+                self._cooldown_until_monotonic = (
+                    now + COOLDOWN_AFTER_EXTERNAL_OFF_S
+                )
+                self._clear_session()
+            else:
+                _LOGGER.warning(
+                    "Water heater: switch turned on externally — "
+                    "controller will adopt the running session",
+                )
+        self._expected_state = observed
+
+        # Start rules — computed once here so both idle (fire-time
+        # validation) and heating (symmetric stop) see the same view.
+        rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
+        rule2 = (
+            soc >= soc_threshold
+            and charge_power_w >= charge_power_threshold
+            and import_w <= 0
+        )
 
         if wh_mode == WhMode.DISABLED:
             if is_on:
@@ -122,6 +168,9 @@ class WaterHeaterController:
                 )
                 await self._turn_off()
             self._clear_session()
+            # Disabled is an explicit user action — clear cooldown so
+            # flipping back to Auto re-arms cleanly.
+            self._cooldown_until_monotonic = None
             decision = "disabled"
         elif is_on:
             # Heating branch — initialize session state if this is the
@@ -137,7 +186,10 @@ class WaterHeaterController:
                     self._active_soc_threshold - HYSTERESIS_PCT,
                 )
             decision = await self._evaluate_heating(
-                soc, consumption_w, import_w, now, min_duration_s,
+                soc, consumption_w, import_w, now,
+                min_duration_s=min_duration_s,
+                start_conditions_met=(rule1 or rule2),
+                sustain_seconds=sustain_seconds,
             )
         else:
             # Idle branch — if we had an active session, the switch was
@@ -151,6 +203,7 @@ class WaterHeaterController:
                 soc_threshold, charge_power_threshold, now,
                 import_w=import_w,
                 sustain_seconds=sustain_seconds,
+                rule1=rule1, rule2=rule2,
             )
 
         _LOGGER.debug(
@@ -173,18 +226,38 @@ class WaterHeaterController:
         now: float,
         import_w: float = 0.0,
         sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
+        rule1: bool | None = None,
+        rule2: bool | None = None,
     ) -> str:
         """IDLE state: check if either rule triggers."""
         # Grace period never exceeds half the sustain window — otherwise a
         # condition that's been false for longer than sustain would never
         # reset the timer.
         grace_s = min(GRACE_SECONDS, max(1, sustain_seconds // 2))
-        rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
-        rule2 = (
-            soc >= soc_threshold
-            and charge_power_w >= charge_power_threshold
-            and import_w <= 0
-        )
+        if rule1 is None:
+            rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
+        if rule2 is None:
+            rule2 = (
+                soc >= soc_threshold
+                and charge_power_w >= charge_power_threshold
+                and import_w <= 0
+            )
+
+        # Cooldown after an external OFF — refuse to start until it expires.
+        if (
+            self._cooldown_until_monotonic is not None
+            and now < self._cooldown_until_monotonic
+        ):
+            self._sustained_since = None
+            self._last_ok_at = None
+            remaining = self._cooldown_until_monotonic - now
+            return f"idle: cooldown ({remaining:.0f}s remaining)"
+        if (
+            self._cooldown_until_monotonic is not None
+            and now >= self._cooldown_until_monotonic
+        ):
+            _LOGGER.info("Water heater: cooldown expired — restart allowed")
+            self._cooldown_until_monotonic = None
 
         if rule1 or rule2:
             if rule1 and rule2:
@@ -249,30 +322,41 @@ class WaterHeaterController:
         import_w: float,
         now: float,
         min_duration_s: int,
+        start_conditions_met: bool,
+        sustain_seconds: int,
     ) -> str:
-        """HEATING state: stop on SoC drop or overload.
+        """HEATING state: stop on SoC drop or sustained surplus loss.
 
-        Overload (house ≥ 7 kW AND importing) is a safety override and
-        fires regardless of minimum duration.  SoC-drop stop is deferred
-        until the heater has been running for at least ``min_duration_s``
-        (measured from the switch entity's ``last_changed``).
+        Overload (house ≥ 7 kW with import) is now coordinated at a
+        higher level (see ``BeemCoordinator._handle_overload``) which
+        throttles the EV charger first and only calls
+        :py:meth:`force_stop_overload` after a grace window.  The
+        heating branch itself only handles surplus-driven stops:
+
+        - **SoC drop** — when SoC falls below the active stop threshold
+          (active start threshold − HYSTERESIS_PCT), provided
+          ``min_duration_s`` has elapsed.
+        - **Surplus lost** — once ``min_duration_s`` has elapsed, if
+          neither start rule is true for ``sustain_seconds``, we stop.
+          This is symmetric to the start path and is what prevents the
+          heater from draining the battery once solar fades.
+
+        ``min_duration_s`` acts as a floor on both stops: the heater
+        always runs at least that long after any commanded turn-on,
+        unless the coordinator force-stops it.
         """
-        if consumption_w >= MAX_CONSUMPTION_W and import_w > 0:
-            _LOGGER.info(
-                "Water heater: consumption %.0fW >= %dW and importing %.0fW "
-                "— turning off to protect grid",
-                consumption_w, MAX_CONSUMPTION_W, import_w,
-            )
-            await self._turn_off()
-            self._clear_session()
-            return f"stop: overload (cons {consumption_w:.0f}W, import {import_w:.0f}W)"
-
         assert self._active_soc_threshold is not None  # set in evaluate()
         stop_threshold = self._active_soc_threshold - HYSTERESIS_PCT
+        elapsed = self._seconds_since_turned_on()
+        min_duration_met = elapsed is not None and elapsed >= min_duration_s
+
         if soc < stop_threshold:
-            elapsed = self._seconds_since_turned_on()
-            if elapsed is not None and elapsed < min_duration_s:
-                remaining = min_duration_s - elapsed
+            if not min_duration_met:
+                remaining = (
+                    min_duration_s - elapsed
+                    if elapsed is not None
+                    else min_duration_s
+                )
                 _LOGGER.debug(
                     "Water heater: SoC=%.1f%% below stop=%.1f%% but min "
                     "duration not met (%.0fs remaining) — keeping on",
@@ -291,6 +375,49 @@ class WaterHeaterController:
             await self._turn_off()
             self._clear_session()
             return f"stop: SoC {soc:.1f}% < {stop_threshold:.1f}%"
+
+        # Surplus-loss stop, only enforced once the minimum-duration
+        # floor has been crossed.  Tracks an arm timer so a brief dip
+        # doesn't immediately cut a session.
+        if not min_duration_met:
+            self._stop_armed_since = None
+            remaining = (
+                min_duration_s - elapsed
+                if elapsed is not None
+                else min_duration_s
+            )
+            return (
+                f"heating: SoC {soc:.1f}% (stop at {stop_threshold:.1f}%, "
+                f"min-duration {remaining:.0f}s remaining)"
+            )
+
+        if not start_conditions_met:
+            if self._stop_armed_since is None:
+                self._stop_armed_since = now
+                _LOGGER.info(
+                    "Water heater: surplus lost while heating — "
+                    "waiting %ds sustained before stopping",
+                    sustain_seconds,
+                )
+                return f"heating: stop armed ({sustain_seconds}s)"
+            sustained = now - self._stop_armed_since
+            if sustained >= sustain_seconds:
+                _LOGGER.info(
+                    "Water heater: surplus lost sustained %.0fs — "
+                    "turning off (SoC=%.1f%%)",
+                    sustained, soc,
+                )
+                await self._turn_off()
+                self._clear_session()
+                return f"stop: surplus lost (sustained {sustained:.0f}s)"
+            return (
+                f"heating: stop sustaining {sustained:.0f}s/{sustain_seconds}s"
+            )
+
+        # Conditions came back — disarm the stop timer.
+        if self._stop_armed_since is not None:
+            _LOGGER.info("Water heater: surplus returned — stop arm cleared")
+            self._stop_armed_since = None
         return f"heating: SoC {soc:.1f}% (stop at {stop_threshold:.1f}%)"
 
     # -- Switch control --
@@ -302,6 +429,7 @@ class WaterHeaterController:
             "turn_on",
             {"entity_id": self._switch_entity_id},
         )
+        self._expected_state = "on"
 
     async def _turn_off(self) -> None:
         """Turn off the water heater switch."""
@@ -310,12 +438,27 @@ class WaterHeaterController:
             "turn_off",
             {"entity_id": self._switch_entity_id},
         )
+        self._expected_state = "off"
+
+    async def force_stop_overload(self, consumption_w: float) -> None:
+        """Force-stop bypassing min-duration — used by the coordinator
+        when overload protection demands the heater go off.
+        """
+        if not self._is_switch_on():
+            return
+        _LOGGER.warning(
+            "Water heater: force-stop on sustained overload (cons=%.0fW)",
+            consumption_w,
+        )
+        await self._turn_off()
+        self._clear_session()
 
     def _clear_session(self) -> None:
         """Reset session bookkeeping (timers + active threshold)."""
         self._sustained_since = None
         self._last_ok_at = None
         self._active_soc_threshold = None
+        self._stop_armed_since = None
 
     # -- Mode control --
 

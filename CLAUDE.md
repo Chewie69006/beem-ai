@@ -1,5 +1,9 @@
 # BeemAI Project Instructions
 
+## Home Assistant Access
+- SSH to HA: `ssh root@192.168.1.50`
+- Retrieve integration logs: `ssh root@192.168.1.50 -- tail -n 150000 -f config/beem_ai_data/beem_ai.log` (limited to 150000 lines)
+
 ## Testing
 - Always run tests through the venv: `.venv/bin/python -m pytest tests/`
 - Never use system Python for test execution
