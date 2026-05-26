@@ -85,7 +85,7 @@ NO_DEMAND_STATUSES = frozenset({
 })
 STATUS_NO_DEMAND_SUSTAIN_S = 60
 
-SOC_BIAS_AMPS = 1
+SOC_BIAS_AMPS = 3
 SOC_DEADBAND_PCT = 0.5
 
 
@@ -554,9 +554,19 @@ class EvChargerController:
         else:
             soc_bias = 0
 
+        # Cap the upward target so the bias never pushes projected
+        # household consumption above MAX_CONSUMPTION_W (7 kW).
+        amps_budget_under_max = int(
+            (MAX_CONSUMPTION_W - consumption_w) // WATTS_PER_AMP
+        )
+        max_amps_under_7kw = max(MIN_CHARGE_AMPS, amps + amps_budget_under_max)
         target_amps = max(
             MIN_CHARGE_AMPS,
-            min(MAX_CHARGE_AMPS, amps + delta_amps + soc_bias),
+            min(
+                MAX_CHARGE_AMPS,
+                max_amps_under_7kw,
+                amps + delta_amps + soc_bias,
+            ),
         )
 
         if target_amps > amps:
