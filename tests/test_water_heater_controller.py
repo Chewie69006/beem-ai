@@ -8,6 +8,7 @@ enough that the controller's branching logic exercises the same code
 paths as in production.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -24,6 +25,7 @@ from custom_components.beem_ai.water_heater_controller import (
 SOC_THRESHOLD = 80.0
 CHARGE_POWER_THRESHOLD = 500.0
 SWITCH_ID = "switch.water_heater"
+POWER_ENTITY_ID = "sensor.water_heater_power"
 
 
 class FakeHass:
@@ -32,6 +34,7 @@ class FakeHass:
     def __init__(self) -> None:
         self._switch_state = "off"
         self._switch_last_changed = datetime.now(timezone.utc)
+        self._power_w: float | None = None
         self.services = MagicMock()
         self.services.async_call = AsyncMock(side_effect=self._service_call)
         self.states = MagicMock()
@@ -45,12 +48,16 @@ class FakeHass:
                 self._switch_last_changed = datetime.now(timezone.utc)
 
     def _states_get(self, entity_id):
-        if entity_id != SWITCH_ID:
-            return None
-        obj = MagicMock()
-        obj.state = self._switch_state
-        obj.last_changed = self._switch_last_changed
-        return obj
+        if entity_id == SWITCH_ID:
+            obj = MagicMock()
+            obj.state = self._switch_state
+            obj.last_changed = self._switch_last_changed
+            return obj
+        if entity_id == POWER_ENTITY_ID and self._power_w is not None:
+            obj = MagicMock()
+            obj.state = str(self._power_w)
+            return obj
+        return None
 
     def set_switch(self, state: str, seconds_ago: float = 0.0) -> None:
         """Force the switch state and last_changed (testing helper)."""
@@ -58,6 +65,10 @@ class FakeHass:
         self._switch_last_changed = (
             datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
         )
+
+    def set_power(self, watts: float | None) -> None:
+        """Set the simulated power reading for the WH power entity."""
+        self._power_w = watts
 
     def remove_switch(self) -> None:
         """Make hass.states.get return None for the switch."""
@@ -78,6 +89,8 @@ async def _evaluate(
     sustain_seconds=SUSTAIN_SECONDS,
     min_duration_s=0,
     mode="Auto",
+    power_entity_id=None,
+    fully_heated_threshold_wh=0,
 ):
     """Helper to call evaluate with sane defaults.
 
@@ -90,6 +103,8 @@ async def _evaluate(
         sustain_seconds=sustain_seconds,
         min_duration_s=min_duration_s,
         mode=mode,
+        power_entity_id=power_entity_id,
+        fully_heated_threshold_wh=fully_heated_threshold_wh,
     )
 
 
@@ -743,3 +758,230 @@ def test_reconfigure_updates_switch_id():
     ctrl, _ = _make_controller()
     ctrl.reconfigure("switch.new_heater")
     assert ctrl._switch_entity_id == "switch.new_heater"
+
+
+# ==================================================================
+# Manual mode
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_starts_on_mode_change():
+    """handle_mode_change('Manual') should turn the switch on."""
+    ctrl, hass = _make_controller()
+    assert not ctrl.is_heating
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_idle_does_not_auto_start():
+    """In Manual mode, evaluate() should NOT auto-start the heater."""
+    ctrl, hass = _make_controller()
+    # Conditions that would trigger in Auto mode
+    await _evaluate(ctrl, soc=96, export_w=500, sustain_seconds=0, mode="Manual")
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_no_auto_stop_on_soc_drop():
+    """Manual mode should not auto-stop on SoC drop."""
+    ctrl, hass = _make_controller()
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+    # In Auto, SoC below threshold would stop — Manual should not
+    await _evaluate(ctrl, soc=50, export_w=0, mode="Manual")
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_no_auto_stop_on_surplus_loss():
+    """Manual mode should not auto-stop when surplus is lost."""
+    ctrl, hass = _make_controller()
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+    # No surplus, no export — Manual should keep running
+    await _evaluate(ctrl, soc=60, export_w=0, charge_power_w=0, mode="Manual")
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_to_disabled_stops():
+    """Switching from Manual to Disabled should stop the heater."""
+    ctrl, hass = _make_controller()
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+    await ctrl.handle_mode_change("Disabled")
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_method():
+    """The stop() method should stop in manual mode."""
+    ctrl, hass = _make_controller()
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+    await ctrl.stop()
+    assert not ctrl.is_heating
+
+
+# ==================================================================
+# Fully-heated detection
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_fully_heated_triggers_on_low_power():
+    """WH should mark fully heated when energy > threshold and power drops."""
+    ctrl, hass = _make_controller()
+    hass.set_power(2000.0)
+
+    # Start the heater in Auto (sustain=0 needs two ticks: arm + fire)
+    await _evaluate(ctrl, soc=96, export_w=500, sustain_seconds=0)
+    await _evaluate(ctrl, soc=96, export_w=500, sustain_seconds=0)
+    assert ctrl.is_heating
+
+    # Simulate energy accumulation above threshold
+    ctrl._energy_today_wh = 600.0
+
+    # Power drops to near zero (thermostat cut off)
+    hass.set_power(5.0)
+
+    # First tick arms the low-power timer
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=500,
+    )
+    assert ctrl.is_heating  # Not yet — sustain not elapsed
+
+    # Advance the low_power_since to simulate 60s passing
+    ctrl._low_power_since = time.monotonic() - 61
+
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=500,
+    )
+    assert not ctrl.is_heating
+    assert ctrl.fully_heated
+
+
+@pytest.mark.asyncio
+async def test_fully_heated_blocks_auto_restart():
+    """Once fully heated, Auto mode should not restart the heater."""
+    ctrl, hass = _make_controller()
+    ctrl._fully_heated = True
+
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=500,
+    )
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_fully_heated_turns_off_if_on():
+    """If fully_heated is set while heater is on, it should turn off."""
+    ctrl, hass = _make_controller()
+    hass.set_switch("on", seconds_ago=600)
+    ctrl._fully_heated = True
+
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=500,
+    )
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_no_power_entity_no_fully_heated():
+    """Without a power entity, fully-heated detection should never fire."""
+    ctrl, hass = _make_controller()
+    ctrl._energy_today_wh = 9999.0
+
+    # Start the heater (sustain=0 needs two ticks)
+    await _evaluate(ctrl, soc=96, export_w=500, sustain_seconds=0)
+    await _evaluate(ctrl, soc=96, export_w=500, sustain_seconds=0)
+    assert ctrl.is_heating
+
+    # Evaluate without power entity — should remain on
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=None, fully_heated_threshold_wh=500,
+    )
+    assert ctrl.is_heating
+    assert not ctrl.fully_heated
+
+
+@pytest.mark.asyncio
+async def test_threshold_zero_disables_detection():
+    """A threshold of 0 should disable fully-heated detection."""
+    ctrl, hass = _make_controller()
+    hass.set_power(0.0)
+    ctrl._energy_today_wh = 9999.0
+
+    hass.set_switch("on", seconds_ago=600)
+    ctrl._expected_state = "on"
+    ctrl._active_soc_threshold = 95.0
+
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0,
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=0,
+    )
+    assert ctrl.is_heating
+    assert not ctrl.fully_heated
+
+
+# ==================================================================
+# Manual + fully-heated interaction
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_manual_clears_fully_heated():
+    """Selecting Manual mode should clear the fully-heated lockout."""
+    ctrl, hass = _make_controller()
+    ctrl._fully_heated = True
+    assert ctrl.fully_heated
+
+    await ctrl.handle_mode_change("Manual")
+    assert not ctrl.fully_heated
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_overrides_fully_heated_with_high_energy():
+    """Manual should keep heater on even when energy is above threshold."""
+    ctrl, hass = _make_controller()
+    hass.set_power(0.0)  # Low power — would trigger fully-heated in Auto
+    ctrl._energy_today_wh = 1000.0
+
+    await ctrl.handle_mode_change("Manual")
+    assert ctrl.is_heating
+
+    # Advance past sustain
+    ctrl._low_power_since = time.monotonic() - 120
+
+    # Evaluate in Manual — should NOT trigger fully-heated
+    await _evaluate(
+        ctrl, soc=96, export_w=500, sustain_seconds=0, mode="Manual",
+        power_entity_id=POWER_ENTITY_ID, fully_heated_threshold_wh=500,
+    )
+    assert ctrl.is_heating
+    assert not ctrl.fully_heated
+
+
+# ==================================================================
+# Daily reset
+# ==================================================================
+
+
+def test_daily_reset_clears_energy_and_flag():
+    """reset_daily() should clear energy accumulator and fully-heated flag."""
+    ctrl, _ = _make_controller()
+    ctrl._energy_today_wh = 1500.0
+    ctrl._fully_heated = True
+
+    ctrl.reset_daily()
+
+    assert ctrl._energy_today_wh == 0.0
+    assert not ctrl._fully_heated

@@ -36,13 +36,16 @@ OPT_EV_REQUIRE_WATER_HEATER = "ev_require_water_heater"
 OPT_WATER_HEATER_MODE = "water_heater_mode"
 OPT_WH_MIN_DURATION_S = "wh_min_duration_s"
 OPT_WH_SUSTAIN_S = "wh_sustain_s"
+OPT_WH_POWER_ENTITY = "wh_power_entity"
+OPT_WH_FULLY_HEATED_THRESHOLD = "wh_fully_heated_threshold"
 
 DEFAULT_EV_REQUIRE_WATER_HEATER = True
 
 # --- Water heater modes ---
 WH_MODE_DISABLED = "Disabled"
 WH_MODE_AUTO = "Auto"
-WH_MODES = [WH_MODE_DISABLED, WH_MODE_AUTO]
+WH_MODE_MANUAL = "Manual"
+WH_MODES = [WH_MODE_DISABLED, WH_MODE_AUTO, WH_MODE_MANUAL]
 DEFAULT_WATER_HEATER_MODE = WH_MODE_AUTO
 
 # --- EV charger modes ---
@@ -65,6 +68,7 @@ WH_SUSTAIN_MIN_S = 5
 WH_SUSTAIN_MAX_S = 120
 WH_SUSTAIN_STEP_S = 5
 DEFAULT_WH_SUSTAIN_S = 30
+DEFAULT_WH_FULLY_HEATED_THRESHOLD = 500
 
 # --- Options defaults ---
 DEFAULT_TARIFF_DEFAULT_PRICE = 0.27

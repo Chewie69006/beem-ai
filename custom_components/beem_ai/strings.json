@@ -62,10 +62,12 @@
         "title": "Water Heater",
         "description": "Optionally configure a water heater as a solar surplus diverter.",
         "data": {
-          "water_heater_switch_entity": "Water heater switch"
+          "water_heater_switch_entity": "Water heater switch",
+          "wh_power_entity": "Water heater power sensor"
         },
         "data_description": {
-          "water_heater_switch_entity": "A switch entity to turn the water heater on/off."
+          "water_heater_switch_entity": "A switch entity to turn the water heater on/off.",
+          "wh_power_entity": "A sensor entity reporting the water heater's power consumption (W). Required for fully-heated detection."
         }
       },
       "ev_charger": {

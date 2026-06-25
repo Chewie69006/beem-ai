@@ -38,4 +38,13 @@ async def async_setup_entry(
             value_fn=lambda c: c.water_heater.is_heating if c.water_heater else False,
             device_type="system",
         ),
+        BeemAIBinarySensor(
+            coordinator, entry,
+            key="water_heater_fully_heated",
+            name="Water Heater Fully Heated",
+            icon="mdi:water-boiler-alert",
+            device_class=None,
+            value_fn=lambda c: c.water_heater.fully_heated if c.water_heater else False,
+            device_type="system",
+        ),
     ])

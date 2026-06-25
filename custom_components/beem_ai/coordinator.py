@@ -46,6 +46,9 @@ from .const import (
     OPT_WH_MIN_DURATION_S,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
+    OPT_WH_POWER_ENTITY,
+    OPT_WH_FULLY_HEATED_THRESHOLD,
+    DEFAULT_WH_FULLY_HEATED_THRESHOLD,
     DEFAULT_EV_CHARGER_MODE,
     DEFAULT_EV_REQUIRE_WATER_HEATER,
     DEFAULT_WATER_HEATER_MODE,
@@ -142,6 +145,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.water_heater_mode: str = str(
             options.get(OPT_WATER_HEATER_MODE, DEFAULT_WATER_HEATER_MODE)
+        )
+        self.wh_power_entity: str = str(
+            options.get(OPT_WH_POWER_ENTITY, "")
+        )
+        self.wh_fully_heated_threshold: float = float(
+            options.get(
+                OPT_WH_FULLY_HEATED_THRESHOLD,
+                DEFAULT_WH_FULLY_HEATED_THRESHOLD,
+            )
         )
 
         # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
@@ -494,6 +506,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 sustain_seconds=self.wh_sustain_s,
                 min_duration_s=self.wh_min_duration_s,
                 mode=self.water_heater_mode,
+                power_entity_id=self.wh_power_entity or None,
+                fully_heated_threshold_wh=self.wh_fully_heated_threshold,
             )
         # Note: the EV controller's per-tick overload reduction still
         # runs inside its evaluate() — that's the actual amps-trim
@@ -629,6 +643,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._data_dir:
             self.state_store.save_forecast(self._data_dir)
             _LOGGER.info("Persisted forecast state to disk")
+
+        # 5. Reset water heater daily accumulators
+        if self._water_heater:
+            self._water_heater.reset_daily()
+
         _LOGGER.info("Daily reset complete")
 
     async def _refresh_forecasts(self) -> None:
@@ -776,6 +795,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.water_heater_mode = str(
             options.get(OPT_WATER_HEATER_MODE, DEFAULT_WATER_HEATER_MODE)
+        )
+        self.wh_power_entity = str(
+            options.get(OPT_WH_POWER_ENTITY, "")
+        )
+        self.wh_fully_heated_threshold = float(
+            options.get(
+                OPT_WH_FULLY_HEATED_THRESHOLD,
+                DEFAULT_WH_FULLY_HEATED_THRESHOLD,
+            )
         )
 
     # ---- EV charger mode control ----

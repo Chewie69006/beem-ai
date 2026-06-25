@@ -177,6 +177,20 @@ async def async_setup_entry(
             value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
             device_type="system",
         ),
+        BeemAISensor(
+            coordinator, entry,
+            key="water_heater_energy_today",
+            name="Water Heater Energy Today",
+            icon="mdi:water-boiler",
+            device_class=SensorDeviceClass.ENERGY,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            unit="Wh",
+            value_fn=lambda c: (
+                round(c.water_heater.energy_today_wh)
+                if c.water_heater else 0
+            ),
+            device_type="system",
+        ),
     ]
 
     # --- Per-array solar sensors (creates a device per panel array) ---

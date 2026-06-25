@@ -27,12 +27,17 @@ MAX_CONSUMPTION_W = 7000  # Threshold used by the coordinator for overload coord
 DEFAULT_MIN_DURATION_S = 15 * 60  # Default minimum heating duration (user-configurable)
 COOLDOWN_AFTER_EXTERNAL_OFF_S = 15 * 60  # Block restart after an unexpected OFF
 
+# Fully-heated detection: power must stay below this for FULLY_HEATED_SUSTAIN_S
+FULLY_HEATED_POWER_W = 50
+FULLY_HEATED_SUSTAIN_S = 60
+
 
 class WhMode(enum.Enum):
     """User-selected controller mode (from the BeemAI select entity)."""
 
     DISABLED = "Disabled"
     AUTO = "Auto"
+    MANUAL = "Manual"
 
 
 def _mode_from_str(mode: str) -> WhMode:
@@ -72,6 +77,12 @@ class WaterHeaterController:
         # to start while this is in the future.
         self._cooldown_until_monotonic: float | None = None
 
+        # Fully-heated tracking
+        self._energy_today_wh: float = 0.0
+        self._last_power_sample_time: float | None = None
+        self._fully_heated: bool = False
+        self._low_power_since: float | None = None
+
     # -- Entity reads --
 
     def _is_switch_on(self) -> bool:
@@ -93,12 +104,34 @@ class WaterHeaterController:
             return None
         return (datetime.now(timezone.utc) - last_changed).total_seconds()
 
+    def _read_power_w(self, power_entity_id: str | None) -> float | None:
+        """Read instantaneous power from the WH power entity."""
+        if not power_entity_id:
+            return None
+        state = self._hass.states.get(power_entity_id)
+        if state is None or state.state in ("unavailable", "unknown"):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
+
     # -- Public properties --
 
     @property
     def is_heating(self) -> bool:
         """Return True if the switch entity is on."""
         return self._is_switch_on()
+
+    @property
+    def fully_heated(self) -> bool:
+        """Return True if the WH reached full temperature today."""
+        return self._fully_heated
+
+    @property
+    def energy_today_wh(self) -> float:
+        """Accumulated WH energy consumption today (Wh)."""
+        return self._energy_today_wh
 
     # -- Core evaluate (called on every MQTT update) --
 
@@ -114,12 +147,15 @@ class WaterHeaterController:
         sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
         min_duration_s: int = DEFAULT_MIN_DURATION_S,
         mode: str = WhMode.AUTO.value,
+        power_entity_id: str | None = None,
+        fully_heated_threshold_wh: float = 0,
     ) -> None:
         """Evaluate state machine and act.
 
         ``mode`` is the user-selected operating mode:
           - ``Disabled``: no-op; if heating, force-off.
           - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
+          - ``Manual``:   start on mode change; keeps running until user stops.
 
         Branches are driven by the live switch-entity state read at the
         top of the tick — never an in-memory copy.
@@ -128,6 +164,47 @@ class WaterHeaterController:
         wh_mode = _mode_from_str(mode)
         is_on = self._is_switch_on()
         observed = "on" if is_on else "off"
+
+        # Accumulate energy from power entity
+        wh_power = self._read_power_w(power_entity_id)
+        if wh_power is not None and is_on and wh_power > 0:
+            if self._last_power_sample_time is not None:
+                dt_h = (now - self._last_power_sample_time) / 3600.0
+                if 0 < dt_h < 1:
+                    self._energy_today_wh += wh_power * dt_h
+            self._last_power_sample_time = now
+        elif wh_power is not None and is_on:
+            self._last_power_sample_time = now
+        else:
+            self._last_power_sample_time = None
+
+        # Fully-heated detection: ON + low power + accumulated > threshold
+        # Skip in Manual mode — it's an explicit user override.
+        if (
+            wh_mode != WhMode.MANUAL
+            and is_on
+            and wh_power is not None
+            and fully_heated_threshold_wh > 0
+            and self._energy_today_wh >= fully_heated_threshold_wh
+            and wh_power < FULLY_HEATED_POWER_W
+        ):
+            if self._low_power_since is None:
+                self._low_power_since = now
+            elif now - self._low_power_since >= FULLY_HEATED_SUSTAIN_S:
+                if not self._fully_heated:
+                    _LOGGER.info(
+                        "Water heater: fully heated — consumed %.0f Wh today "
+                        "(threshold %.0f Wh), power %.1f W — "
+                        "disabling for rest of day",
+                        self._energy_today_wh, fully_heated_threshold_wh,
+                        wh_power,
+                    )
+                    self._fully_heated = True
+                    await self._turn_off()
+                    self._clear_session()
+                    return
+        else:
+            self._low_power_since = None
 
         # Detect transitions we didn't command (plug auto-off timer,
         # manual toggle, integration glitch).  On unexpected OFF, arm
@@ -172,6 +249,20 @@ class WaterHeaterController:
             # flipping back to Auto re-arms cleanly.
             self._cooldown_until_monotonic = None
             decision = "disabled"
+        elif self._fully_heated:
+            # Fully heated today — refuse to start/keep running
+            if is_on:
+                _LOGGER.info(
+                    "Water heater: fully heated today — turning off"
+                )
+                await self._turn_off()
+                self._clear_session()
+            decision = "blocked: fully heated today"
+        elif wh_mode == WhMode.MANUAL:
+            if is_on:
+                decision = "heating: manual mode"
+            else:
+                decision = "idle: Manual mode — waiting for user start"
         elif is_on:
             # Heating branch — initialize session state if this is the
             # first tick of a session we didn't start ourselves (external
@@ -459,6 +550,24 @@ class WaterHeaterController:
         self._last_ok_at = None
         self._active_soc_threshold = None
         self._stop_armed_since = None
+        self._low_power_since = None
+
+    # -- Manual mode control --
+
+    async def start_manual(self) -> None:
+        """Start heating manually."""
+        if self._is_switch_on():
+            return
+        _LOGGER.info("Water heater: manual start requested")
+        await self._turn_on()
+
+    async def stop(self) -> None:
+        """Stop heating (from any mode)."""
+        if not self._is_switch_on():
+            return
+        _LOGGER.info("Water heater: stop requested")
+        await self._turn_off()
+        self._clear_session()
 
     # -- Mode control --
 
@@ -470,6 +579,27 @@ class WaterHeaterController:
             if self._is_switch_on():
                 await self._turn_off()
             self._clear_session()
+        elif wh_mode == WhMode.MANUAL:
+            # Manual overrides fully-heated lockout
+            if self._fully_heated:
+                _LOGGER.info(
+                    "Water heater: Manual mode clears fully-heated lockout"
+                )
+                self._fully_heated = False
+            if not self._is_switch_on():
+                _LOGGER.info("Water heater: mode set to Manual — starting")
+                self._cooldown_until_monotonic = None
+                await self.start_manual()
+
+    # -- Daily reset --
+
+    def reset_daily(self) -> None:
+        """Reset daily accumulators (called by coordinator at daily reset)."""
+        self._energy_today_wh = 0.0
+        self._fully_heated = False
+        self._low_power_since = None
+        self._last_power_sample_time = None
+        _LOGGER.info("Water heater: daily reset — energy and fully-heated cleared")
 
     # -- Lifecycle --
 

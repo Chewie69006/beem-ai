@@ -15,6 +15,7 @@ from .const import (
     OPT_EV_TARGET_SOC,
     OPT_EV_SOC_HYSTERESIS,
     OPT_WH_CHARGE_POWER_THRESHOLD,
+    OPT_WH_FULLY_HEATED_THRESHOLD,
     OPT_WH_SOC_THRESHOLD,
     OPT_WH_SUSTAIN_S,
     WH_SUSTAIN_MAX_S,
@@ -40,6 +41,7 @@ async def async_setup_entry(
         BeemAIWaterHeaterSocThreshold(coordinator, entry),
         BeemAIWaterHeaterChargePowerThreshold(coordinator, entry),
         BeemAIWaterHeaterSustainDuration(coordinator, entry),
+        BeemAIWaterHeaterFullyHeatedThreshold(coordinator, entry),
         BeemAIEvTargetSoc(coordinator, entry),
         BeemAIEvSocHysteresis(coordinator, entry),
     ])
@@ -283,6 +285,51 @@ class BeemAIWaterHeaterSustainDuration(CoordinatorEntity, NumberEntity):
         self.hass.config_entries.async_update_entry(
             self._entry,
             options={**self._entry.options, OPT_WH_SUSTAIN_S: seconds},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIWaterHeaterFullyHeatedThreshold(CoordinatorEntity, NumberEntity):
+    """Minimum Wh consumed today before the WH can be considered fully heated.
+
+    Set to 0 to disable fully-heated detection.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Water Heater Fully Heated Threshold"
+    _attr_icon = "mdi:water-thermometer"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 10000
+    _attr_native_step = 50
+    _attr_native_unit_of_measurement = "Wh"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "wh_fully_heated_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_wh_fully_heated_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.water_heater is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return float(self.coordinator.wh_fully_heated_threshold)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.wh_fully_heated_threshold = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={
+                **self._entry.options,
+                OPT_WH_FULLY_HEATED_THRESHOLD: value,
+            },
         )
         self.async_write_ha_state()
 

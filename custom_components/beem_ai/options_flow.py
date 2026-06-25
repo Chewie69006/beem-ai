@@ -29,6 +29,7 @@ from .const import (
     OPT_EV_REQUIRE_WATER_HEATER,
     DEFAULT_EV_REQUIRE_WATER_HEATER,
     OPT_WATER_HEATER_SWITCH,
+    OPT_WH_POWER_ENTITY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -194,6 +195,9 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_WATER_HEATER_SWITCH] = user_input.get(
                 OPT_WATER_HEATER_SWITCH, ""
             )
+            self._options[OPT_WH_POWER_ENTITY] = user_input.get(
+                OPT_WH_POWER_ENTITY, ""
+            )
             return await self.async_step_ev_charger()
 
         current = self.config_entry.options
@@ -204,6 +208,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_WATER_HEATER_SWITCH,
                     default=current.get(OPT_WATER_HEATER_SWITCH, ""),
                 ): EntitySelector(EntitySelectorConfig(domain="switch")),
+                vol.Optional(
+                    OPT_WH_POWER_ENTITY,
+                    default=current.get(OPT_WH_POWER_ENTITY, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             }
         )
 
