@@ -356,9 +356,9 @@ async def test_regulate_ramp_throttled():
     assert ctrl.current_amps == MIN_CHARGE_AMPS
 
     with patch("time.monotonic", return_value=t + 5):
-        await _eval(ctrl, meter_power_w=-2000, battery_power_w=0)
+        await _eval(ctrl, meter_power_w=-200, battery_power_w=0)
 
-    assert ctrl.current_amps == MIN_CHARGE_AMPS  # throttled
+    assert ctrl.current_amps == MIN_CHARGE_AMPS  # throttled (below fast-ramp)
     hass.services.async_call.assert_not_called()
 
 
@@ -427,7 +427,7 @@ async def test_regulate_clamped_at_max():
 
 @pytest.mark.asyncio
 async def test_overload_reduces_to_target_in_one_step():
-    """Mild overload (1000W over target) → reduce by ceil(1000/230)=5A
+    """Mild overload (600W over target) → reduce by ceil(600/230)=3A
     in a single tick, not -1A."""
     ctrl, hass = _make_controller()
     t = await _start_charging(ctrl, hass)
@@ -437,12 +437,12 @@ async def test_overload_reduces_to_target_in_one_step():
     with patch("time.monotonic", return_value=t + 2):
         await _eval(ctrl, consumption_w=7500)
 
-    # excess = 7500 - 6500 = 1000W → 5A drop → 14 - 5 = 9A
-    assert ctrl.current_amps == 9
+    # excess = 7500 - 6900 = 600W → 3A drop → 14 - 3 = 11A
+    assert ctrl.current_amps == 11
     assert ctrl.is_charging is True
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": AMPS_ID, "value": 9},
+        {"entity_id": AMPS_ID, "value": 11},
     )
 
 
@@ -760,8 +760,8 @@ async def test_manual_mode_overload_stops():
 @pytest.mark.asyncio
 async def test_auto_mode_overload_throttles_when_reduction_feasible():
     """In Auto mode, overload trims amps to bring consumption below
-    the 6500W target — only stopping when that would fall under 6A.
-    Here cons=7500 from amps=14 → drop 5A → 9A, still charging."""
+    the 6900W target — only stopping when that would fall under 6A.
+    Here cons=7500 from amps=14 → drop 3A → 11A, still charging."""
     ctrl, hass = _make_controller()
     await _start_charging(ctrl, hass)
     hass.set_amps(14)
@@ -771,10 +771,10 @@ async def test_auto_mode_overload_throttles_when_reduction_feasible():
         await _eval(ctrl, consumption_w=7500)
 
     assert ctrl.is_charging is True
-    assert ctrl.current_amps == 9
+    assert ctrl.current_amps == 11
     hass.services.async_call.assert_called_once_with(
         "number", "set_value",
-        {"entity_id": AMPS_ID, "value": 9},
+        {"entity_id": AMPS_ID, "value": 11},
     )
 
 
@@ -843,7 +843,7 @@ async def test_externally_turned_on_adopts_manual_session():
     hass.set_switch("on")
 
     # First evaluate after external turn-on: adopts MANUAL session
-    await _eval(ctrl, soc=92.0)
+    await _eval(ctrl, soc=92.0, meter_power_w=0, battery_power_w=0)
     assert ctrl.is_charging is True
     assert ctrl._start_mode == StartMode.MANUAL
     assert ctrl.current_amps == 16  # whatever the wallbox was at

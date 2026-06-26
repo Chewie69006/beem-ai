@@ -52,6 +52,8 @@ SUSTAIN_SECONDS = 30
 GRACE_SECONDS = 15
 
 REGULATE_INTERVAL_S = 30
+# Skip the regulate interval when exporting more than this — fast ramp-up
+FAST_RAMP_EXPORT_W = 300
 
 # Wallbox's cloud API frequently raises HomeAssistantError client-side
 # even when the action succeeded on the device. Hold session state for
@@ -65,9 +67,9 @@ PENDING_REFRESH_INTERVAL_S = 20
 EMERGENCY_SHRINK_W = 500
 
 MAX_CONSUMPTION_W = 7000
-# Aim for ~6500W when trimming amps under overload — leaves margin
+# Aim for ~6900W when trimming amps under overload — leaves margin
 # before re-tripping the 7kW threshold on the next tick.
-OVERLOAD_TARGET_W = 6500
+OVERLOAD_TARGET_W = 6900
 
 # Wallbox `sensor.*_status_description` values that mean "the car is
 # physically not drawing current right now" — typically because the EV's
@@ -290,6 +292,7 @@ class EvChargerController:
                 soc, amps, headroom_w, battery_power_w,
                 solar_power_w, consumption_w,
                 target_soc, soc_hysteresis, now, ev_mode,
+                meter_power_w,
             )
         elif self._pending_start_since is not None:
             # We issued turn_on but the entity hasn't flipped yet.
@@ -431,6 +434,7 @@ class EvChargerController:
         soc_hysteresis: float,
         now: float,
         ev_mode: EvMode,
+        meter_power_w: float = 0.0,
     ) -> str:
         """CHARGING state: regulate amps or stop on low SoC / overload."""
         stop_soc = target_soc - soc_hysteresis
@@ -526,7 +530,7 @@ class EvChargerController:
 
         return await self._regulate_amps(
             soc, amps, headroom_w, target_soc,
-            solar_power_w, consumption_w, now, ev_mode,
+            solar_power_w, consumption_w, now, ev_mode, meter_power_w,
         )
 
     async def _regulate_amps(
@@ -539,6 +543,7 @@ class EvChargerController:
         consumption_w: float,
         now: float,
         ev_mode: EvMode,
+        meter_power_w: float = 0.0,
     ) -> str:
         """Adjust charging amps to track real headroom (+ SoC bias in Auto)."""
         delta_amps = int(headroom_w // WATTS_PER_AMP)
@@ -584,26 +589,31 @@ class EvChargerController:
             new_amps < amps
             and headroom_w <= -EMERGENCY_SHRINK_W
         )
-        if elapsed < REGULATE_INTERVAL_S and not emergency_shrink:
+        fast_ramp = (
+            new_amps > amps
+            and meter_power_w <= -FAST_RAMP_EXPORT_W
+        )
+        if elapsed < REGULATE_INTERVAL_S and not emergency_shrink and not fast_ramp:
             return (
                 f"throttled {amps}A "
                 f"(elapsed {elapsed:.0f}s/{REGULATE_INTERVAL_S}s, "
                 f"would-be {new_amps}A)"
             )
 
+        tag = ", emergency" if emergency_shrink else (
+            ", fast-ramp" if fast_ramp else ""
+        )
         _LOGGER.info(
             "EV charger: adjusting %dA → %dA (target=%dA, bias=%+d, "
             "solar=%.0fW, consumption=%.0fW, headroom=%.0fW%s)",
             amps, new_amps, target_amps, soc_bias,
-            solar_power_w, consumption_w, headroom_w,
-            ", emergency" if emergency_shrink else "",
+            solar_power_w, consumption_w, headroom_w, tag,
         )
         self._last_regulate_time = now
         await self._set_amps(new_amps)
         return (
             f"adjust {amps}A→{new_amps}A "
-            f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d}"
-            f"{', emergency' if emergency_shrink else ''})"
+            f"(headroom {headroom_w:.0f}W, bias {soc_bias:+d}{tag})"
         )
 
     # -- Switch control --

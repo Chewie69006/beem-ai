@@ -26,6 +26,7 @@ HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
 MAX_CONSUMPTION_W = 7000  # Threshold used by the coordinator for overload coordination
 DEFAULT_MIN_DURATION_S = 15 * 60  # Default minimum heating duration (user-configurable)
 COOLDOWN_AFTER_EXTERNAL_OFF_S = 15 * 60  # Block restart after an unexpected OFF
+IMPORT_TOLERANCE_W = 50  # Small grid import below this is noise, not real deficit
 
 # Fully-heated detection: power must stay below this for FULLY_HEATED_SUSTAIN_S
 FULLY_HEATED_POWER_W = 50
@@ -235,7 +236,7 @@ class WaterHeaterController:
         rule2 = (
             soc >= soc_threshold
             and charge_power_w >= charge_power_threshold
-            and import_w <= 0
+            and import_w <= IMPORT_TOLERANCE_W
         )
 
         if wh_mode == WhMode.DISABLED:
@@ -331,7 +332,7 @@ class WaterHeaterController:
             rule2 = (
                 soc >= soc_threshold
                 and charge_power_w >= charge_power_threshold
-                and import_w <= 0
+                and import_w <= IMPORT_TOLERANCE_W
             )
 
         # Cooldown after an external OFF — refuse to start until it expires.
