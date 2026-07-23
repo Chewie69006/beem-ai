@@ -1,10 +1,8 @@
 """Thread-safe shared state container for BeemAI."""
 
-import json
 import logging
-import os
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -60,34 +58,6 @@ class BatteryState:
 
 
 @dataclass
-class ForecastData:
-    """Solar and consumption forecasts."""
-
-    # Hourly solar forecast (hour -> watts)
-    solar_today: dict = field(default_factory=dict)
-    solar_tomorrow: dict = field(default_factory=dict)
-
-    # Confidence intervals
-    solar_today_p10: dict = field(default_factory=dict)
-    solar_today_p90: dict = field(default_factory=dict)
-    solar_tomorrow_p10: dict = field(default_factory=dict)
-    solar_tomorrow_p90: dict = field(default_factory=dict)
-
-    # Daily totals (kWh)
-    solar_today_kwh: float = 0.0
-    solar_tomorrow_kwh: float = 0.0
-
-    # Consumption forecast
-    consumption_today_kwh: float = 0.0
-    consumption_tomorrow_kwh: float = 0.0
-    consumption_hourly: dict = field(default_factory=dict)
-
-    last_updated: Optional[datetime] = None
-    sources_used: list = field(default_factory=list)
-    confidence: str = "low"  # low, medium, high
-
-
-@dataclass
 class ControlState:
     """Battery control parameters (mirrors API control-parameters)."""
 
@@ -106,7 +76,6 @@ class StateStore:
     def __init__(self):
         self._lock = threading.RLock()
         self._battery = BatteryState()
-        self._forecast = ForecastData()
         self._control = ControlState()
         self._enabled = True
         self._mqtt_connected = False
@@ -116,11 +85,6 @@ class StateStore:
     def battery(self) -> BatteryState:
         with self._lock:
             return self._battery
-
-    @property
-    def forecast(self) -> ForecastData:
-        with self._lock:
-            return self._forecast
 
     @property
     def enabled(self) -> bool:
@@ -171,74 +135,3 @@ class StateStore:
                 if hasattr(self._battery, key):
                     setattr(self._battery, key, value)
             self._battery.last_updated = datetime.now()
-
-    def update_forecast(self, **kwargs):
-        """Update forecast fields atomically."""
-        with self._lock:
-            for key, value in kwargs.items():
-                if hasattr(self._forecast, key):
-                    setattr(self._forecast, key, value)
-            self._forecast.last_updated = datetime.now()
-
-    # ---- Persistence ----
-
-    def save_forecast(self, data_dir: str) -> None:
-        """Serialize ForecastData to data_dir/forecast_state.json."""
-        path = os.path.join(data_dir, "forecast_state.json")
-        with self._lock:
-            data = asdict(self._forecast)
-        # Convert datetime
-        val = data.get("last_updated")
-        if isinstance(val, datetime):
-            data["last_updated"] = val.isoformat()
-        # Convert dict keys to strings for JSON (hourly dicts have int keys)
-        for dict_key in (
-            "solar_today", "solar_tomorrow",
-            "solar_today_p10", "solar_today_p90",
-            "solar_tomorrow_p10", "solar_tomorrow_p90",
-            "consumption_hourly",
-        ):
-            d = data.get(dict_key)
-            if isinstance(d, dict):
-                data[dict_key] = {str(k): v for k, v in d.items()}
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-        except OSError:
-            _LOGGER.exception("Failed to save forecast state")
-
-    def load_forecast(self, data_dir: str) -> bool:
-        """Restore ForecastData from data_dir/forecast_state.json. Returns True if loaded."""
-        path = os.path.join(data_dir, "forecast_state.json")
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            # Convert last_updated
-            val = data.get("last_updated")
-            if isinstance(val, str):
-                try:
-                    data["last_updated"] = datetime.fromisoformat(val)
-                except (ValueError, TypeError):
-                    data["last_updated"] = None
-            # Convert dict keys back to int (hourly forecasts)
-            for dict_key in (
-                "solar_today", "solar_tomorrow",
-                "solar_today_p10", "solar_today_p90",
-                "solar_tomorrow_p10", "solar_tomorrow_p90",
-                "consumption_hourly",
-            ):
-                d = data.get(dict_key)
-                if isinstance(d, dict):
-                    data[dict_key] = {int(k): v for k, v in d.items()}
-            with self._lock:
-                self._forecast = ForecastData(**data)
-            _LOGGER.info(
-                "Restored forecast from disk: today=%.1f kWh, tomorrow=%.1f kWh",
-                data.get("solar_today_kwh", 0), data.get("solar_tomorrow_kwh", 0),
-            )
-            return True
-        except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
-            _LOGGER.warning("Failed to load forecast state: %s", exc)
-            return False

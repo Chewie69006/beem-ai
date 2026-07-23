@@ -1,4 +1,4 @@
-"""Number entity for BeemAI — editable consumption forecast tomorrow and SoC limits."""
+"""Number entities for BeemAI — editable SoC limits and controller thresholds."""
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ async def async_setup_entry(
     """Set up BeemAI number entities from a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
-        BeemAIConsumptionForecastTomorrowNumber(coordinator, entry),
         BeemAIMinSocNumber(coordinator, entry),
         BeemAIMaxSocNumber(coordinator, entry),
         BeemAIWaterHeaterSocThreshold(coordinator, entry),
@@ -45,46 +44,6 @@ async def async_setup_entry(
         BeemAIEvTargetSoc(coordinator, entry),
         BeemAIEvSocHysteresis(coordinator, entry),
     ])
-
-
-class BeemAIConsumptionForecastTomorrowNumber(CoordinatorEntity, NumberEntity):
-    """Editable consumption forecast for tomorrow (kWh)."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Consumption Forecast Tomorrow"
-    _attr_icon = "mdi:home-lightning-bolt"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 100.0
-    _attr_native_step = 0.5
-    _attr_native_unit_of_measurement = "kWh"
-    _attr_mode = NumberMode.BOX
-    _attr_translation_key = "consumption_forecast_tomorrow"
-
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
-        """Initialize the number entity."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_consumption_forecast_tomorrow"
-        self._entry = entry
-
-    @property
-    def device_info(self):
-        """Return device info for grouping entities."""
-        return _system_device_info(self._entry)
-
-    @property
-    def native_value(self) -> float | None:
-        """Return the current consumption forecast for tomorrow."""
-        try:
-            return round(
-                self.coordinator.state_store.forecast.consumption_tomorrow_kwh, 1
-            )
-        except Exception:
-            return None
-
-    async def async_set_native_value(self, value: float) -> None:
-        """Set the consumption forecast override for tomorrow."""
-        await self.coordinator.async_set_consumption_forecast_tomorrow(value)
-        self.async_write_ha_state()
 
 
 class BeemAIMinSocNumber(CoordinatorEntity, NumberEntity):

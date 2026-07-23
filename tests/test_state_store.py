@@ -135,28 +135,6 @@ class TestUpdateBattery:
         assert b.working_mode == "charging"
 
 
-# ── StateStore update_forecast ───────────────────────────────────────
-
-
-class TestUpdateForecast:
-    def test_update_forecast_sets_fields(self, state_store):
-        state_store.update_forecast(solar_today_kwh=15.5, confidence="high")
-        assert state_store.forecast.solar_today_kwh == 15.5
-        assert state_store.forecast.confidence == "high"
-
-    def test_update_forecast_sets_last_updated(self, state_store):
-        before = datetime.now()
-        state_store.update_forecast(solar_today_kwh=10.0)
-        after = datetime.now()
-        assert state_store.forecast.last_updated is not None
-        assert before <= state_store.forecast.last_updated <= after
-
-    def test_update_forecast_with_dict_fields(self, state_store):
-        hourly = {8: 500, 9: 1200, 10: 2000}
-        state_store.update_forecast(solar_today=hourly)
-        assert state_store.forecast.solar_today == hourly
-
-
 # ── StateStore thread safety ─────────────────────────────────────────
 
 

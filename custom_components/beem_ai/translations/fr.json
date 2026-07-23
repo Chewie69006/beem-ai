@@ -12,18 +12,6 @@
           "email": "L'adresse e-mail utilisee pour votre compte Beem Energy.",
           "password": "Le mot de passe de votre compte Beem Energy."
         }
-      },
-      "solcast": {
-        "title": "Previsions solaires (Optionnel)",
-        "description": "Configurez optionnellement Solcast pour de meilleures previsions solaires.",
-        "data": {
-          "solcast_api_key": "Cle API Solcast",
-          "solcast_site_id": "Identifiant de site Solcast"
-        },
-        "data_description": {
-          "solcast_api_key": "Cle API pour les previsions solaires Solcast. Laissez vide pour ignorer.",
-          "solcast_site_id": "Identifiant de site Solcast. Laissez vide pour ignorer."
-        }
       }
     },
     "error": {
@@ -40,18 +28,10 @@
       "init": {
         "title": "Parametres BeemAI",
         "data": {
-          "location_lat": "Latitude (optionnel)",
-          "location_lon": "Longitude (optionnel)",
-          "solcast_api_key": "Cle API Solcast",
-          "solcast_site_id": "Identifiant de site Solcast",
           "tariff_default_price": "Tarif par defaut (EUR/kWh)",
           "tariff_period_count": "Nombre de periodes tarifaires"
         },
         "data_description": {
-          "location_lat": "Latitude de votre installation. Laissez vide pour utiliser la position configuree dans Home Assistant.",
-          "location_lon": "Longitude de votre installation. Laissez vide pour utiliser la position configuree dans Home Assistant.",
-          "solcast_api_key": "Cle API pour les previsions solaires Solcast (optionnel).",
-          "solcast_site_id": "Identifiant de site Solcast (optionnel).",
           "tariff_default_price": "Prix par defaut de l'electricite en EUR/kWh (utilise hors periodes tarifaires configurees).",
           "tariff_period_count": "Nombre de periodes tarifaires a configurer (1-6). Chaque periode a une plage horaire et un prix."
         }

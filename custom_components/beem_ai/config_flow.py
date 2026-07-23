@@ -19,8 +19,6 @@ from .const import (
     CONF_USER_ID,
     DEFAULT_API_BASE,
     DOMAIN,
-    OPT_LOCATION_LAT,
-    OPT_LOCATION_LON,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,10 +71,6 @@ class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
                 except CannotConnect:
                     errors["base"] = "cannot_connect"
                 else:
-                    # Use HA's configured location as default
-                    ha_lat = getattr(getattr(self.hass, 'config', None), 'latitude', 0.0)
-                    ha_lon = getattr(getattr(self.hass, 'config', None), 'longitude', 0.0)
-
                     return self.async_create_entry(
                         title=f"Beem ({email})",
                         data={
@@ -86,10 +80,6 @@ class BeemAIConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_BATTERY_SERIAL: battery_serial,
                             CONF_USER_ID: user_id,
                             CONF_API_BASE: DEFAULT_API_BASE,
-                        },
-                        options={
-                            OPT_LOCATION_LAT: ha_lat,
-                            OPT_LOCATION_LON: ha_lon,
                         },
                     )
 

@@ -26,10 +26,6 @@ from .const import (
     DEFAULT_API_BASE,
     DEFAULT_TARIFF_DEFAULT_PRICE,
     DOMAIN,
-    OPT_LOCATION_LAT,
-    OPT_LOCATION_LON,
-    OPT_SOLCAST_API_KEY,
-    OPT_SOLCAST_SITE_IDS_JSON,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_MODE,
@@ -56,11 +52,6 @@ from .const import (
     DEFAULT_WH_SUSTAIN_S,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
-from .forecast_tracker import ForecastTracker
-from .forecasting.forecast_solar import ForecastSolarSource
-from .forecasting.open_meteo import OpenMeteoSource
-from .forecasting.solar_forecast import SolarForecast
-from .forecasting.solcast import SolcastSource
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
@@ -70,7 +61,6 @@ from .water_heater_controller import WaterHeaterController
 _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(minutes=2)
-FORECAST_INTERVAL = timedelta(hours=4)
 # Mirrors water_heater_controller.MAX_CONSUMPTION_W — the coordinator
 # owns the overload coordination (throttle EV, then cut WH after a
 # short grace) so the two diverters don't act on stale views.
@@ -100,9 +90,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._api_client: BeemApiClient | None = None
         self._mqtt_client: BeemMqttClient | None = None
         self._tariff: TariffManager | None = None
-        self._forecast: SolarForecast | None = None
         self._consumption: ConsumptionAnalyzer | None = None
-        self._forecast_tracker: ForecastTracker | None = None
         self._water_heater: WaterHeaterController | None = None
         self._ev_charger: EvChargerController | None = None
         # Monotonic timestamp of the first tick observing overload
@@ -156,11 +144,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
             )
         )
 
-        # Consumption forecast override for tomorrow (user-set, cleared at daily reset)
-        self._consumption_tomorrow_override: float | None = None
-        # True after promotion of a user-overridden tomorrow → today
-        self._consumption_today_protected: bool = False
-
         # Schedule handles
         self._daily_reset_unsub = None
         self._last_reset_date = None
@@ -191,10 +174,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         # Set up persistent log file
         self._setup_file_logging(data_dir)
-
-        # Restore persisted state before anything else reads it
-        _LOGGER.info("Loading persisted state from %s", data_dir)
-        self.state_store.load_forecast(data_dir)
 
         # HTTP session
         self._session = aiohttp.ClientSession()
@@ -229,13 +208,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
             periods=tariff_periods,
         )
 
-        # Forecasting
-        sources = self._build_forecast_sources(options)
-        self._forecast = SolarForecast(
-            state_store=self.state_store,
-            sources=sources,
-        )
-
         # Analytics
         self._consumption = ConsumptionAnalyzer(data_dir=data_dir)
         self._consumption.load()
@@ -243,9 +215,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Bootstrap consumption if no learned data yet
         if not self._consumption.has_learned_data():
             await self._bootstrap_consumption()
-
-        self._forecast_tracker = ForecastTracker(data_dir=data_dir)
-        self._forecast_tracker.load()
 
         # Water heater controller (optional)
         self._setup_water_heater(options)
@@ -258,11 +227,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._mqtt_client.connect()
 
         # Schedule recurring tasks
-        _LOGGER.info("Scheduling recurring tasks (forecast refresh, daily reset)")
+        _LOGGER.info("Scheduling recurring tasks (daily reset)")
         self._schedule_tasks()
-
-        # Initial forecast fetch
-        await self._refresh_forecasts()
 
         _LOGGER.info("BeemAI coordinator setup complete")
 
@@ -347,71 +313,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.exception("Failed to bootstrap consumption from API history")
 
-    @staticmethod
-    def _parse_solcast_site_ids(options: dict) -> list[str]:
-        """Parse Solcast site IDs from options JSON, with migration from legacy format."""
-        # Migration: convert legacy single site_id to new JSON format
-        legacy_site = options.get("solcast_site_id")
-        if legacy_site and not options.get(OPT_SOLCAST_SITE_IDS_JSON):
-            _LOGGER.info(
-                "Migrating legacy solcast_site_id '%s' to new JSON format", legacy_site
-            )
-            return [legacy_site]
-
-        raw = options.get(OPT_SOLCAST_SITE_IDS_JSON, "")
-        if not raw:
-            return []
-        try:
-            entries = json.loads(raw)
-            return [e["site_id"] for e in entries if e.get("site_id")]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            _LOGGER.warning("Failed to parse Solcast site IDs JSON: %s", raw)
-            return []
-
-    def _build_forecast_sources(self, options: dict) -> list:
-        """Instantiate forecast sources from options."""
-        # Use HA's configured location as fallback
-        ha_lat = getattr(self.hass.config, 'latitude', 0.0)
-        ha_lon = getattr(self.hass.config, 'longitude', 0.0)
-        lat = float(options.get(OPT_LOCATION_LAT, 0) or ha_lat)
-        lon = float(options.get(OPT_LOCATION_LON, 0) or ha_lon)
-        panel_arrays = self.panel_arrays
-
-        sources = [
-            OpenMeteoSource(
-                session=self._session, lat=lat, lon=lon, panel_arrays=panel_arrays
-            ),
-            ForecastSolarSource(
-                session=self._session, lat=lat, lon=lon, panel_arrays=panel_arrays
-            ),
-        ]
-
-        solcast_key = options.get(OPT_SOLCAST_API_KEY)
-        site_ids = self._parse_solcast_site_ids(options)
-        if solcast_key and site_ids:
-            total_kwp = sum(a["kwp"] for a in panel_arrays)
-            sources.append(SolcastSource(
-                session=self._session,
-                api_key=solcast_key,
-                site_ids=site_ids,
-                total_kwp=total_kwp,
-            ))
-            _LOGGER.info(
-                "Solcast configured with %d site(s): %s", len(site_ids), site_ids
-            )
-
-        return sources
-
     def _schedule_tasks(self) -> None:
         """Set up recurring schedules."""
-        # Forecast refresh every hour
-        unsub = async_track_time_interval(
-            self.hass,
-            self._forecast_loop,
-            FORECAST_INTERVAL,
-        )
-        self._unsub_listeners.append(unsub)
-
         # Daily reset at midnight — use time interval and check hour
         self._daily_reset_unsub = async_track_time_interval(
             self.hass,
@@ -434,9 +337,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
     # ---- Event handlers ----
 
     def _setup_water_heater(self, options: dict) -> None:
-        """Create or destroy the water heater controller based on options."""
+        """Create, reconfigure, or destroy the water heater controller.
+
+        Reconfigures the existing controller in place when one already
+        exists — recreating it on every options update (e.g. a mode
+        switch, which also writes to config entry options) would wipe
+        its in-memory daily energy accumulator and fully-heated flag.
+        """
         switch_id = options.get(OPT_WATER_HEATER_SWITCH, "")
-        if switch_id:
+        if self._water_heater is not None:
+            if switch_id:
+                self._water_heater.reconfigure(switch_id)
+            else:
+                self._water_heater = None
+        elif switch_id:
             self._water_heater = WaterHeaterController(
                 hass=self.hass,
                 switch_entity_id=switch_id,
@@ -445,8 +359,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 "Water heater controller configured: switch=%s",
                 switch_id,
             )
-        else:
-            self._water_heater = None
 
     def _setup_ev_charger(self, options: dict) -> None:
         """Create or destroy the EV charger controller based on options."""
@@ -596,13 +508,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     # ---- Scheduled callbacks ----
 
-    async def _forecast_loop(self, _now=None) -> None:
-        """Hourly forecast refresh."""
-        _LOGGER.info("Forecast refresh triggered (every 4h)")
-        await self._refresh_forecasts()
-        if self._data_dir:
-            self.state_store.save_forecast(self._data_dir)
-
     async def _check_daily_reset(self, _now=None) -> None:
         """Check if it's the daily reset hour (start of cheapest tariff period, rounded up)."""
         from datetime import datetime
@@ -615,77 +520,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 await self._daily_reset()
 
     async def _daily_reset(self) -> None:
-        """Daily reset: promote tomorrow → today, compute fresh tomorrow."""
-        # 1. Promote tomorrow → today
-        promoted = self.state_store.forecast.consumption_tomorrow_kwh
-        if self._consumption_tomorrow_override is not None:
-            self._consumption_today_protected = True
-        else:
-            self._consumption_today_protected = False
-        self.state_store.update_forecast(consumption_today_kwh=promoted)
-        _LOGGER.info(
-            "Promoted consumption tomorrow (%.1f kWh) → today (protected=%s)",
-            promoted, self._consumption_today_protected,
-        )
-
-        # 2. Clear tomorrow override
-        self._consumption_tomorrow_override = None
-
-        # 3. Persist analytics
+        """Daily reset: persist analytics, reset water heater accumulators."""
         if self._consumption:
             self._consumption.save()
-        if self._forecast_tracker:
-            self._forecast_tracker.save()
 
-        # 4. Refresh forecasts → computes fresh tomorrow
-        await self._refresh_forecasts()
-
-        if self._data_dir:
-            self.state_store.save_forecast(self._data_dir)
-            _LOGGER.info("Persisted forecast state to disk")
-
-        # 5. Reset water heater daily accumulators
         if self._water_heater:
             self._water_heater.reset_daily()
 
         _LOGGER.info("Daily reset complete")
-
-    async def _refresh_forecasts(self) -> None:
-        """Refresh solar and consumption forecasts."""
-        try:
-            if self._forecast:
-                # Apply accuracy-weighted ensemble before refresh (#2)
-                if self._forecast_tracker and self._forecast.sources_used:
-                    weights = self._forecast_tracker.get_weights(
-                        self._forecast.sources_used
-                    )
-                    self._forecast.set_weights(weights)
-                    _LOGGER.debug("Applied accuracy weights: %s", weights)
-
-                await self._forecast.refresh()
-
-            if self._consumption:
-                today_kwh = self._consumption.get_forecast_kwh_today()
-                tomorrow_kwh = self._consumption.get_forecast_kwh_tomorrow()
-                hourly = self._consumption.get_hourly_consumption_forecast_tomorrow()
-                update: dict = {"consumption_hourly": hourly}
-                # Skip today if protected (promoted user override)
-                if not self._consumption_today_protected:
-                    update["consumption_today_kwh"] = today_kwh
-                # Skip tomorrow if user override is active
-                if self._consumption_tomorrow_override is None:
-                    update["consumption_tomorrow_kwh"] = tomorrow_kwh
-                self.state_store.update_forecast(**update)
-
-            f = self.state_store.forecast
-            _LOGGER.info(
-                "Forecasts updated: solar_today=%.1f kWh, solar_tomorrow=%.1f kWh, "
-                "consumption_tomorrow=%.1f kWh, confidence=%s, sources=%s",
-                f.solar_today_kwh, f.solar_tomorrow_kwh,
-                f.consumption_tomorrow_kwh, f.confidence, f.sources_used,
-            )
-        except Exception:
-            _LOGGER.exception("Failed to refresh forecasts")
 
     # ---- Pre-optimization API refresh (#9) ----
 
@@ -742,11 +584,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
     # ---- Options update ----
 
     async def async_options_updated(self, options: dict) -> None:
-        """Reconfigure tariff and forecast modules when options change."""
+        """Reconfigure tariff module when options change."""
         _LOGGER.info("Options changed — reconfiguring modules")
 
         config = dict(options)
-        config["panel_arrays"] = self.panel_arrays
         # Ensure tariff periods JSON is passed through to reconfigure
         tariff_periods = self._parse_tariff_periods(options)
         if tariff_periods is not None:
@@ -754,10 +595,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._tariff:
             self._tariff.reconfigure(config)
-
-        # Rebuild forecast sources with new config
-        if self._forecast:
-            self._forecast.reconfigure(config)
 
         # Reconfigure water heater and EV charger controllers.  The new
         # controllers read the live entity state on every evaluate, so no
@@ -905,15 +742,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Failed to set battery control: %s", kwargs)
         return success
 
-    # ---- Consumption forecast override ----
-
-    async def async_set_consumption_forecast_tomorrow(self, value: float) -> None:
-        """Set a manual override for tomorrow's consumption forecast."""
-        self._consumption_tomorrow_override = value
-        self.state_store.update_forecast(consumption_tomorrow_kwh=value)
-        _LOGGER.info("Consumption forecast tomorrow overridden to %.1f kWh by user", value)
-        self.async_update_listeners()
-
     # ---- Shutdown ----
 
     async def async_shutdown(self) -> None:
@@ -941,13 +769,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._mqtt_client:
             await self._mqtt_client.disconnect()
 
-        # Save analytics and state
+        # Save analytics
         if self._consumption:
             self._consumption.save()
-        if self._forecast_tracker:
-            self._forecast_tracker.save()
-        if self._data_dir:
-            self.state_store.save_forecast(self._data_dir)
 
         # Close API client
         if self._api_client:

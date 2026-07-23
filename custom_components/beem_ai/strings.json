@@ -28,34 +28,12 @@
       "init": {
         "title": "BeemAI Settings",
         "data": {
-          "location_lat": "Latitude (optional)",
-          "location_lon": "Longitude (optional)",
-          "solcast_api_key": "Solcast API Key",
           "tariff_default_price": "Default tariff price (EUR/kWh)",
           "tariff_period_count": "Number of tariff periods"
         },
         "data_description": {
-          "location_lat": "Latitude of your installation. Leave blank to use Home Assistant's configured location.",
-          "location_lon": "Longitude of your installation. Leave blank to use Home Assistant's configured location.",
-          "solcast_api_key": "API key for Solcast solar forecasting (optional).",
           "tariff_default_price": "Default electricity price in EUR/kWh (used when not in any configured tariff period).",
           "tariff_period_count": "Number of tariff periods to configure (1-6). Each period has a time range and price."
-        }
-      },
-      "solcast": {
-        "title": "Solcast Site IDs",
-        "description": "Assign a Solcast Site ID to each solar array. Create sites at toolkit.solcast.com.au matching your array configurations.",
-        "data": {
-          "solcast_site_0_id": "Array 1 Solcast Site ID",
-          "solcast_site_1_id": "Array 2 Solcast Site ID",
-          "solcast_site_2_id": "Array 3 Solcast Site ID",
-          "solcast_site_3_id": "Array 4 Solcast Site ID"
-        },
-        "data_description": {
-          "solcast_site_0_id": "Solcast resource ID for solar array 1 (optional).",
-          "solcast_site_1_id": "Solcast resource ID for solar array 2 (optional).",
-          "solcast_site_2_id": "Solcast resource ID for solar array 3 (optional).",
-          "solcast_site_3_id": "Solcast resource ID for solar array 4 (optional)."
         }
       },
       "water_heater": {

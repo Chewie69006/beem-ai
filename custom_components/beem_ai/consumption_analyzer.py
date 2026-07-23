@@ -3,7 +3,7 @@
 import json
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -105,40 +105,6 @@ class ConsumptionAnalyzer:
         self._mean[day][hour] = old_mean + delta / n
         delta2 = consumption_w - self._mean[day][hour]
         self._m2[day][hour] += delta * delta2
-
-    def get_hourly_forecast(self, day_of_week: int) -> dict[int, float]:
-        """Return {hour: avg_watts} for a given day of the week."""
-        return dict(self._ema.get(day_of_week, {}))
-
-    def get_forecast_kwh_tomorrow(self) -> float:
-        """Sum hourly EMA for tomorrow's day-of-week, converted to kWh."""
-        tomorrow = (datetime.now() + timedelta(days=1)).weekday()
-        hourly = self._ema.get(tomorrow, {})
-        total_wh = sum(hourly.values())  # Each bucket is 1 hour of watts
-        return total_wh / 1000.0
-
-    def get_forecast_kwh_today(self) -> float:
-        """Sum hourly EMA for today's day-of-week, converted to kWh."""
-        day = datetime.now().weekday()
-        hourly = self._ema.get(day, {})
-        total_wh = sum(hourly.get(h, _DEFAULT_CONSUMPTION_W) for h in range(24))
-        return total_wh / 1000.0
-
-    def get_forecast_kwh_today_remaining(self) -> float:
-        """Sum EMA from current hour+1 to 23 for today, converted to kWh."""
-        now = datetime.now()
-        day = now.weekday()
-        current_hour = now.hour
-        hourly = self._ema.get(day, {})
-        total_wh = sum(
-            hourly.get(h, _DEFAULT_CONSUMPTION_W) for h in range(current_hour + 1, 24)
-        )
-        return total_wh / 1000.0
-
-    def get_hourly_consumption_forecast_tomorrow(self) -> dict[int, float]:
-        """Return {hour: watts} for tomorrow's day-of-week."""
-        tomorrow = (datetime.now() + timedelta(days=1)).weekday()
-        return self.get_hourly_forecast(tomorrow)
 
     def is_anomaly(self, consumption_w: float) -> bool:
         """True if current reading > 3 standard deviations from the mean.

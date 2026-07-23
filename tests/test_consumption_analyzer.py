@@ -47,13 +47,13 @@ class TestDefaults:
 
     def test_all_buckets_exist(self, analyzer):
         for day in range(7):
-            hourly = analyzer.get_hourly_forecast(day)
+            hourly = analyzer._ema.get(day, {})
             assert len(hourly) == 24
             for h in range(24):
                 assert hourly[h] == pytest.approx(_DEFAULT_CONSUMPTION_W)
 
     def test_missing_day_returns_empty(self, analyzer):
-        assert analyzer.get_hourly_forecast(99) == {}
+        assert analyzer._ema.get(99, {}) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class TestRecordConsumption:
             mock_dt.now.return_value = now
             analyzer.record_consumption(1000.0)
 
-        hourly = analyzer.get_hourly_forecast(0)
+        hourly = analyzer._ema[0]
         # EMA: 0.1 * 1000 + 0.9 * 500 = 550
         assert hourly[14] == pytest.approx(550.0)
         # Other hours remain default
@@ -83,48 +83,8 @@ class TestRecordConsumption:
             for _ in range(200):
                 analyzer.record_consumption(800.0)
 
-        hourly = analyzer.get_hourly_forecast(2)
+        hourly = analyzer._ema[2]
         assert hourly[10] == pytest.approx(800.0, abs=1.0)
-
-
-# ---------------------------------------------------------------------------
-# Tests — Forecasts
-# ---------------------------------------------------------------------------
-
-class TestForecasts:
-    def test_get_forecast_kwh_tomorrow(self, analyzer):
-        now = _fixed_datetime(0, 12)  # Monday -> tomorrow is Tuesday (1)
-
-        # Set a known value for Tuesday (day=1)
-        for h in range(24):
-            analyzer._ema[1][h] = 1000.0  # 1000 W each hour
-
-        with patch("custom_components.beem_ai.consumption_analyzer.datetime") as mock_dt:
-            mock_dt.now.return_value = now
-            result = analyzer.get_forecast_kwh_tomorrow()
-
-        # 24 hours * 1000 W / 1000 = 24.0 kWh
-        assert result == pytest.approx(24.0)
-
-    def test_get_forecast_kwh_today_remaining(self, analyzer):
-        now = _fixed_datetime(0, 20)  # Monday 20:00
-        with patch("custom_components.beem_ai.consumption_analyzer.datetime") as mock_dt:
-            mock_dt.now.return_value = now
-
-            # Set known values for Monday
-            for h in range(24):
-                analyzer._ema[0][h] = 1000.0  # 1000 W each hour
-
-            result = analyzer.get_forecast_kwh_today_remaining()
-
-        # Hours 21, 22, 23 => 3 hours * 1000 W / 1000 = 3.0 kWh
-        assert result == pytest.approx(3.0)
-
-    def test_get_hourly_forecast_returns_copy(self, analyzer):
-        """Modifying the returned dict should not affect internal state."""
-        hourly = analyzer.get_hourly_forecast(0)
-        hourly[0] = 99999.0
-        assert analyzer.get_hourly_forecast(0)[0] == pytest.approx(_DEFAULT_CONSUMPTION_W)
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +143,8 @@ class TestPersistence:
         analyzer2 = ConsumptionAnalyzer(data_dir=tmp_path)
         analyzer2.load()
 
-        h1 = analyzer1.get_hourly_forecast(3)
-        h2 = analyzer2.get_hourly_forecast(3)
+        h1 = analyzer1._ema[3]
+        h2 = analyzer2._ema[3]
         assert h1[18] == pytest.approx(h2[18])
 
         # Welford stats should also survive
@@ -195,7 +155,7 @@ class TestPersistence:
     def test_load_missing_file_uses_defaults(self, tmp_path):
         analyzer = ConsumptionAnalyzer(data_dir=tmp_path)
         analyzer.load()  # No file exists — should not crash
-        assert analyzer.get_hourly_forecast(0)[0] == pytest.approx(_DEFAULT_CONSUMPTION_W)
+        assert analyzer._ema[0][0] == pytest.approx(_DEFAULT_CONSUMPTION_W)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +191,7 @@ class TestSeedFromHistory:
         assert analyzer.has_learned_data() is True
 
         # Monday 10:00 EMA should have moved from default (500) toward the values
-        mon_10 = analyzer.get_hourly_forecast(0)[10]
+        mon_10 = analyzer._ema[0][10]
         assert mon_10 != pytest.approx(_DEFAULT_CONSUMPTION_W)
         assert mon_10 > _DEFAULT_CONSUMPTION_W  # values are above default
 
@@ -244,7 +204,7 @@ class TestSeedFromHistory:
         history = {(2, 12): [900.0] * 200}
         analyzer.seed_from_history(history)
 
-        wed_12 = analyzer.get_hourly_forecast(2)[12]
+        wed_12 = analyzer._ema[2][12]
         assert wed_12 == pytest.approx(900.0, abs=1.0)
 
     def test_empty_history_returns_zero(self, analyzer):

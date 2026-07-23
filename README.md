@@ -44,17 +44,13 @@ and restart.
 | Step | Fields | Description |
 |------|--------|-------------|
 | 1. Login | Email, Password | Beem Energy account credentials |
-| 2. Solcast (optional) | API Key, Site ID | Enhanced solar forecasting via Solcast |
 
-The integration automatically discovers your battery ID and serial, and uses
-Home Assistant's configured location for solar forecasting.
+The integration automatically discovers your battery ID and serial.
 
 ### Options (editable at any time)
 
 | Field                      | Default | Description                                               |
 |----------------------------|---------|-----------------------------------------------------------|
-| Latitude / Longitude       | HA config | Installation location (optional override)              |
-| Solcast API Key / Site ID  | —       | Optional premium solar forecast (10 calls/day)            |
 | Default tariff price       | €0.27   | Peak electricity price in EUR/kWh                         |
 | Tariff periods (1-6)       | None    | Custom periods with label, time range, and price  |
 | Min SoC                    | 20 %    | Battery floor (applied year-round)                        |
@@ -96,10 +92,7 @@ Entities are organized into three HA devices:
 ### BeemAI System
 | Entity | Type | Description |
 |--------|------|-------------|
-| Solar Forecast Today | Sensor | Ensemble solar forecast for today (kWh) |
-| Solar Forecast Tomorrow | Sensor | Ensemble solar forecast for tomorrow (kWh) |
 | Optimization Status | Sensor | Current phase + reasoning text |
-| Consumption Forecast Today | Sensor | Consumption forecast for today (kWh) |
 | Cost Savings Today | Sensor | Estimated savings today (EUR) |
 | Optimal Charge Target | Sensor | Tonight's target SoC (%) |
 | Optimal Charge Power | Sensor | Planned charge power (W) |
@@ -230,27 +223,6 @@ Evaluated every 5 minutes. Rules are checked in priority order — first match w
 
 **Hysteresis summary**: rules 2 and 5 have separate "exit" conditions (rules 3 and 6) with lower
 thresholds so the heater doesn't toggle every 5 minutes near the boundary.
-
----
-
-### Solar Forecasting
-
-Three sources merged into an equally-weighted ensemble:
-
-| Source | Cost | Rate limit | How it uses your arrays |
-|---|---|---|---|
-| Open-Meteo | Free, no key | None | One API call **per array** (uses tilt, azimuth, kWp), sums results |
-| Forecast.Solar | Free | 12 req/hour | One API call **per array** (uses tilt, azimuth, kWp), sums results |
-| Solcast | Free hobbyist (10/day) | 10 req/day | **Single call** for the whole site — arrays are configured on Solcast's website, not duplicated locally |
-
-Each source returns hourly watt values for today and tomorrow. Results are merged by
-weighted average (currently equal weights — 1/N per active source).
-
-**Confidence level**: 1 source = `low` → +15% charge target buffer, 2 = `medium`, 3 = `high`.
-
-**Solcast does not double-count.** It fetches your site's total forecast (which already
-includes all arrays you configured on solcast.com.au). Open-Meteo and Forecast.Solar make
-separate per-array calls using tilt/azimuth/kWp from the Beem API and sum them.
 
 ---
 

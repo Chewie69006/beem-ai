@@ -16,10 +16,6 @@ CONF_API_BASE = "api_base"
 DEFAULT_API_BASE = "https://api-x.beem.energy/beemapp"
 
 # --- Options keys ---
-OPT_LOCATION_LAT = "location_lat"
-OPT_LOCATION_LON = "location_lon"
-OPT_SOLCAST_API_KEY = "solcast_api_key"
-OPT_SOLCAST_SITE_IDS_JSON = "solcast_site_ids_json"
 OPT_TARIFF_DEFAULT_PRICE = "tariff_default_price"
 OPT_TARIFF_PERIODS_JSON = "tariff_periods_json"
 OPT_TARIFF_PERIOD_COUNT = "tariff_period_count"
@@ -81,8 +77,6 @@ SENSOR_BATTERY_POWER = "battery_power"
 SENSOR_GRID_POWER = "grid_power"
 SENSOR_CONSUMPTION = "consumption"
 SENSOR_BATTERY_SOH = "battery_soh"
-SENSOR_SOLAR_FORECAST_TODAY = "solar_forecast_today"
-SENSOR_SOLAR_FORECAST_TOMORROW = "solar_forecast_tomorrow"
 # Binary sensor keys
 BINARY_SENSOR_MQTT_CONNECTED = "mqtt_connected"
 

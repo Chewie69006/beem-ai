@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -59,19 +58,6 @@ def _system_device_info(entry: ConfigEntry) -> dict:
         "model": "Optimization System",
         "via_device": (DOMAIN, f"battery_{entry.entry_id}"),
     }
-
-
-def _get_solcast_site_id(entry, array_index: int) -> str:
-    """Read the Solcast site ID for a given array from current config options."""
-    raw = entry.options.get("solcast_site_ids_json", "")
-    if raw:
-        try:
-            for sid_entry in json.loads(raw):
-                if sid_entry.get("array_index") == array_index:
-                    return sid_entry["site_id"]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-    return "Not configured"
 
 
 async def async_setup_entry(
@@ -151,32 +137,6 @@ async def async_setup_entry(
             device_type="battery",
         ),
         # --- System device sensors ---
-        BeemAISensor(
-            coordinator, entry,
-            key="solar_forecast_today",
-            name="Solar Forecast Today",
-            icon="mdi:weather-sunny",
-            device_class=SensorDeviceClass.ENERGY,
-            state_class=SensorStateClass.TOTAL,
-            unit="kWh",
-            value_fn=lambda c: round(c.state_store.forecast.solar_today_kwh, 1),
-            extra_fn=lambda c: {
-                "sources": c.state_store.forecast.sources_used,
-                "confidence": c.state_store.forecast.confidence,
-            },
-            device_type="system",
-        ),
-        BeemAISensor(
-            coordinator, entry,
-            key="solar_forecast_tomorrow",
-            name="Solar Forecast Tomorrow",
-            icon="mdi:weather-sunny-alert",
-            device_class=SensorDeviceClass.ENERGY,
-            state_class=SensorStateClass.TOTAL,
-            unit="kWh",
-            value_fn=lambda c: round(c.state_store.forecast.solar_tomorrow_kwh, 1),
-            device_type="system",
-        ),
         BeemAISensor(
             coordinator, entry,
             key="water_heater_energy_today",
@@ -274,19 +234,6 @@ async def async_setup_entry(
             device_type="solar",
             solar_index=idx,
         ))
-        sensors.append(BeemAISensor(
-            coordinator, entry,
-            key=f"solar_array_{idx + 1}_solcast_site_id",
-            name=f"Array {idx + 1} Solcast Site ID",
-            icon="mdi:cloud-outline",
-            device_class=None,
-            state_class=None,
-            unit=None,
-            value_fn=lambda c, _e=entry, _i=idx: _get_solcast_site_id(_e, _i),
-            device_type="solar",
-            solar_index=idx,
-        ))
-
     async_add_entities(sensors)
 
 
