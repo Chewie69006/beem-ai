@@ -114,6 +114,9 @@ class _DataUpdateCoordinator:
     def async_set_updated_data(self, data):
         self.data = data
 
+    def async_update_listeners(self):
+        pass
+
 
 class _CoordinatorEntity:
     """Minimal CoordinatorEntity for testing."""
@@ -121,9 +124,31 @@ class _CoordinatorEntity:
     def __init__(self, coordinator):
         self.coordinator = coordinator
 
+    async def async_added_to_hass(self):
+        pass
+
+    def async_write_ha_state(self):
+        pass
+
 
 _ha_uc.DataUpdateCoordinator = _DataUpdateCoordinator
 _ha_uc.CoordinatorEntity = _CoordinatorEntity
+
+# homeassistant.helpers.restore_state
+_ha_rs = _mod("homeassistant.helpers.restore_state")
+
+
+class _RestoreEntity:
+    """Stub RestoreEntity — tests patch async_get_last_state."""
+
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_state(self):
+        return None
+
+
+_ha_rs.RestoreEntity = _RestoreEntity
 
 # homeassistant.data_entry_flow
 _ha_def = _mod("homeassistant.data_entry_flow")

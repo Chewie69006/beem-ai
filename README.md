@@ -102,7 +102,36 @@ Entities are organized into three HA devices:
 | Min SoC | Sensor | Active minimum SoC floor (%) |
 | MQTT Connected | Binary sensor | MQTT live-data connection status |
 | Grid Charging Recommended | Binary sensor | Whether grid charging is planned |
-| Enabled | Switch | Enable / disable the automation entirely |
+| Enabled | Switch | Enable / disable the automation entirely (see [Enabled switch](#enabled-switch--standing-down)) |
+
+---
+
+### Enabled Switch — Master Off
+
+Turning `switch.beemai_system_enabled` **off** stops everything BeemAI
+drives — the EV charge and the water heater, whoever started them — and
+then BeemAI sends **no commands at all**:
+
+- No amperage regulation — start the charge from the Wallbox app and it
+  keeps whatever current you set.
+- No 7 kW overload trim, and no water-heater force-stop.
+- No surplus start/stop rules; EV / water-heater mode changes are recorded
+  but stay inert until BeemAI is enabled again.
+
+That's the whole point of the switch: stop, then do it yourself. The state
+survives Home Assistant restarts and config entry reloads, and re-enabling
+resumes on the next MQTT tick, adopting whatever state the devices are in.
+
+**Nothing else stops a running session.** A value change (a threshold, a
+mode) never cuts the charge — the new number is simply what the next MQTT
+tick judges the session against:
+
+| Event | EV charger | Water heater |
+|---|---|---|
+| Enabled switch → off | **Stopped**, your amperage restored | **Stopped** |
+| Options changed (thresholds, modes) | Untouched — re-judged next tick | Untouched — re-judged next tick |
+| Charger / switch entity re-pointed in options | Controller re-pointed in place | Controller re-pointed in place |
+| HA restart, integration reload | Untouched — not stopped, and not bumped back to full amps mid-restart (that's how you trip the breaker unattended) | A session **BeemAI** started is switched off: HA may not come back, and an immersion heater shouldn't run unsupervised |
 
 ---
 

@@ -74,6 +74,11 @@ class WaterHeaterController:
         # external transition (auto-off timer on the plug, manual flip,
         # integration glitch).
         self._expected_state: str | None = None
+        # True while the heater is on *because we turned it on*.  An
+        # externally started session (manual flip, another automation)
+        # leaves this False so releasing control never kills a run we
+        # did not initiate.
+        self._commanded_on: bool = False
         # Set when we observe an external ON→OFF; idle branch refuses
         # to start while this is in the future.
         self._cooldown_until_monotonic: float | None = None
@@ -118,6 +123,12 @@ class WaterHeaterController:
             return None
 
     # -- Public properties --
+
+    @property
+    def switch_entity_id(self) -> str:
+        """The switch this controller drives — used to decide whether an
+        options update actually re-points it at something new."""
+        return self._switch_entity_id
 
     @property
     def is_heating(self) -> bool:
@@ -222,12 +233,14 @@ class WaterHeaterController:
                 self._cooldown_until_monotonic = (
                     now + COOLDOWN_AFTER_EXTERNAL_OFF_S
                 )
+                self._commanded_on = False
                 self._clear_session()
             else:
                 _LOGGER.warning(
                     "Water heater: switch turned on externally — "
                     "controller will adopt the running session",
                 )
+                self._commanded_on = False
         self._expected_state = observed
 
         # Start rules — computed once here so both idle (fire-time
@@ -522,6 +535,7 @@ class WaterHeaterController:
             {"entity_id": self._switch_entity_id},
         )
         self._expected_state = "on"
+        self._commanded_on = True
 
     async def _turn_off(self) -> None:
         """Turn off the water heater switch."""
@@ -531,6 +545,7 @@ class WaterHeaterController:
             {"entity_id": self._switch_entity_id},
         )
         self._expected_state = "off"
+        self._commanded_on = False
 
     async def force_stop_overload(self, consumption_w: float) -> None:
         """Force-stop bypassing min-duration — used by the coordinator
@@ -543,6 +558,31 @@ class WaterHeaterController:
             consumption_w,
         )
         await self._turn_off()
+        self._clear_session()
+
+    async def release_control(self) -> None:
+        """Hand the heater back on integration unload.
+
+        Anything *we* switched on gets switched off — Home Assistant may
+        not come back, and a BeemAI-started immersion heater would then
+        run unsupervised.  A session started outside BeemAI (a physical
+        flip, another automation) is left strictly alone.
+
+        This is the unload path only.  Disabling the Enabled switch is a
+        master off and goes through :py:meth:`stop` instead.
+        """
+        if self._is_switch_on() and self._commanded_on:
+            _LOGGER.info(
+                "Water heater: releasing control — turning off the "
+                "session BeemAI started",
+            )
+            await self._turn_off()
+        else:
+            _LOGGER.info(
+                "Water heater: releasing control — leaving switch as-is "
+                "(on=%s)",
+                self._is_switch_on(),
+            )
         self._clear_session()
 
     def _clear_session(self) -> None:

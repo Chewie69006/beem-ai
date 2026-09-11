@@ -183,6 +183,16 @@ class EvChargerController:
     # -- Public properties --
 
     @property
+    def entity_ids(self) -> tuple[str, str, str | None]:
+        """The entities this controller drives — used to decide whether
+        an options update actually re-points it at something new."""
+        return (
+            self._toggle_entity_id,
+            self._power_entity_id,
+            self._status_entity_id,
+        )
+
+    @property
     def is_charging(self) -> bool:
         """Return True if the toggle entity is on."""
         return self._is_switch_on()

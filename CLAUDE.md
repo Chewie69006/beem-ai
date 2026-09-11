@@ -26,6 +26,35 @@
   - If threshold == 0 (disabled): always allows discharge, no CFTG
 - Interacts with optimizer phases: when smart_cftg is enabled, phase callbacks defer CFTG control to the monitor loop instead of immediately enabling grid charging
 
+## System Enabled Switch
+- `state_store.enabled` (the System device's "Enabled" switch) is a hard
+  master off, and a hard gate on all outbound device control
+- Disabling calls `_stop_device_control()` — `EvChargerController.stop()` and
+  `WaterHeaterController.stop()`, unconditionally, whoever started the session
+- While disabled: `_evaluate_surplus_diverters()` returns immediately, so the
+  water heater rules, the EV amperage regulation and the 7 kW overload
+  coordination are all skipped; mode changes are stored but not applied;
+  `async_shutdown()` touches nothing
+- The switch is a `RestoreEntity`: the state survives restarts and config
+  entry reloads (the store defaults to enabled)
+- EV mode `Manual` is **not** "the user's own session" — it is a manual
+  trigger of piloted charging (e.g. leaving for the weekend).  Don't use
+  `_start_mode` to decide whether BeemAI "owns" a session
+
+## Nothing Else Stops a Running Session
+- An options change must never cut a charge: `_setup_ev_charger()` /
+  `_setup_water_heater()` touch a live controller **only** when its entity
+  IDs actually change (compare `ev_charger.entity_ids` /
+  `water_heater.switch_entity_id`), then `reconfigure()` in place — never
+  recreate, which would drop `_saved_amps` and `_start_mode`
+- Thresholds are passed into `evaluate()` on every tick, so a new value is
+  applied by the next MQTT update with no resync
+- `async_shutdown()` leaves the EV charger strictly alone — not stopped, and
+  not re-set to the saved amperage (a car jumping back to 32 A during a
+  restart is how you trip the 7 kW breaker unattended).  Only
+  `WaterHeaterController.release_control()` runs, turning off a session
+  BeemAI itself commanded (`_commanded_on`)
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power
