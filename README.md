@@ -102,7 +102,33 @@ Entities are organized into three HA devices:
 | Min SoC | Sensor | Active minimum SoC floor (%) |
 | MQTT Connected | Binary sensor | MQTT live-data connection status |
 | Grid Charging Recommended | Binary sensor | Whether grid charging is planned |
-| Enabled | Switch | Enable / disable the automation entirely |
+| Enabled | Switch | Enable / disable the automation entirely (see [Enabled switch](#enabled-switch--standing-down)) |
+
+---
+
+### Enabled Switch — Standing Down
+
+Turning `switch.beemai_system_enabled` **off** is a full stand-down, not a
+paused decision loop. While it is off BeemAI sends **no commands** to the
+water heater or the EV charger:
+
+- No amperage regulation — the charger keeps whatever current you set from
+  the Wallbox app.
+- No 7 kW overload trim, and no water-heater force-stop.
+- No surplus start/stop rules; EV / water-heater mode changes are recorded
+  but stay inert until BeemAI is enabled again.
+
+On the way down, each controller hands its device back:
+
+| Device | On disable |
+|---|---|
+| EV charger | Never stopped — an in-flight charge keeps running. The amperage BeemAI saved when it took over is restored, so the car is no longer clamped to 6 A. |
+| Water heater | A session **BeemAI** started is switched off (an immersion heater left running unsupervised is nobody's idea of a good outcome). A session you started is left alone. |
+
+The switch state survives Home Assistant restarts and config entry reloads,
+and unloading the integration while disabled leaves both devices untouched.
+Re-enabling resumes on the next MQTT tick, adopting whatever state the
+devices are in.
 
 ---
 

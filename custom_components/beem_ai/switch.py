@@ -8,6 +8,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -31,8 +32,14 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to enable/disable the BeemAI system."""
+class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
+    """Switch to enable/disable the BeemAI system.
+
+    The state is restored on restart / config entry reload: the
+    coordinator's store defaults to enabled, so without this a reload
+    would silently put BeemAI back in charge of the water heater and
+    the EV charger.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Enabled"
@@ -44,6 +51,18 @@ class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_enabled"
         self._entry = entry
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last known enabled state."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None or last_state.state not in ("on", "off"):
+            return
+        restored = last_state.state == "on"
+        if restored != self.coordinator.state_store.enabled:
+            _LOGGER.info("Restoring BeemAI enabled state: %s", restored)
+            await self.coordinator.async_set_enabled(restored)
+            self.async_write_ha_state()
 
     @property
     def device_info(self):

@@ -26,6 +26,21 @@
   - If threshold == 0 (disabled): always allows discharge, no CFTG
 - Interacts with optimizer phases: when smart_cftg is enabled, phase callbacks defer CFTG control to the monitor loop instead of immediately enabling grid charging
 
+## System Enabled Switch
+- `state_store.enabled` (exposed as the System device's "Enabled" switch) is a
+  hard gate on **all** outbound device control, not just the decision loop
+- While disabled: `_evaluate_surplus_diverters()` returns immediately, so the
+  water heater rules, the EV amperage regulation and the 7 kW overload
+  coordination are all skipped; mode changes are stored but not applied;
+  `async_shutdown()` leaves both devices untouched
+- Disabling calls `_release_device_control()`:
+  - `EvChargerController.release_control()` — never stops the charger,
+    restores the saved user amperage, clears session state
+  - `WaterHeaterController.release_control()` — turns off only a session
+    BeemAI itself commanded (`_commanded_on`), leaves user sessions alone
+- The switch is a `RestoreEntity`: the state survives restarts and config
+  entry reloads (the store defaults to enabled)
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

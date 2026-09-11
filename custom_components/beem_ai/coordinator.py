@@ -399,7 +399,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
     async def _evaluate_surplus_diverters(
         self, soc: float, export_w: float
     ) -> None:
-        """Evaluate water heater then EV charger sequentially."""
+        """Evaluate water heater then EV charger sequentially.
+
+        No-op while the system is disabled: the Enabled switch means
+        "BeemAI sends no commands to the water heater or the EV
+        charger", so the overload trim, the amperage regulation and
+        the start/stop rules all stay out of the way until it is
+        turned back on.
+        """
+        if not self.state_store.enabled:
+            _LOGGER.debug(
+                "Surplus diverters skipped — BeemAI is disabled",
+            )
+            return
+
         battery = self.state_store.battery
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
@@ -646,30 +659,76 @@ class BeemAICoordinator(DataUpdateCoordinator):
     # ---- EV charger mode control ----
 
     async def async_set_ev_charger_mode(self, mode: str) -> None:
-        """Change the EV charger mode and apply the immediate side effects."""
+        """Change the EV charger mode and apply the immediate side effects.
+
+        The mode is always recorded, but while BeemAI is disabled it
+        stays inert — no command reaches the charger until the system
+        is enabled again.
+        """
         self.ev_charger_mode = mode
         if self._ev_charger:
-            await self._ev_charger.handle_mode_change(mode)
+            if self.state_store.enabled:
+                await self._ev_charger.handle_mode_change(mode)
+            else:
+                _LOGGER.info(
+                    "EV charger mode set to %s while BeemAI is disabled "
+                    "— stored, no command sent",
+                    mode,
+                )
             self.async_update_listeners()
 
     # ---- Water heater mode control ----
 
     async def async_set_water_heater_mode(self, mode: str) -> None:
-        """Change the water heater mode and apply the immediate side effects."""
+        """Change the water heater mode and apply the immediate side effects.
+
+        As with the EV charger, the mode is recorded but inert while
+        BeemAI is disabled.
+        """
         self.water_heater_mode = mode
         if self._water_heater:
-            await self._water_heater.handle_mode_change(mode)
+            if self.state_store.enabled:
+                await self._water_heater.handle_mode_change(mode)
+            else:
+                _LOGGER.info(
+                    "Water heater mode set to %s while BeemAI is disabled "
+                    "— stored, no command sent",
+                    mode,
+                )
             self.async_update_listeners()
 
     # ---- Enable/disable ----
 
     async def async_set_enabled(self, enabled: bool) -> None:
-        """Toggle the system on/off."""
+        """Toggle the system on/off.
+
+        Disabling is a full stand-down, not just a pause of the
+        decision loop: every controller hands its device back to the
+        user (see ``_release_device_control``) so the EV charger can be
+        driven from the Wallbox app without BeemAI clamping amps or
+        enforcing the 7 kW ceiling.  Re-enabling resumes on the next
+        MQTT tick, adopting whatever state the devices are in.
+        """
+        if self.state_store.enabled == enabled:
+            return
+
         self.state_store.enabled = enabled
         if enabled:
-            _LOGGER.info("BeemAI enabled by user")
+            _LOGGER.info("BeemAI enabled by user — control resumes")
         else:
-            _LOGGER.info("BeemAI disabled by user")
+            _LOGGER.info(
+                "BeemAI disabled by user — releasing device control",
+            )
+            await self._release_device_control()
+        self.async_update_listeners()
+
+    async def _release_device_control(self) -> None:
+        """Stand down: let each controller hand its device back."""
+        self._overload_started_at = None
+        if self._ev_charger:
+            await self._ev_charger.release_control()
+        if self._water_heater:
+            await self._water_heater.release_control()
 
     # ---- Control parameter refresh ----
 
@@ -756,14 +815,22 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
 
-        # Turn off EV charger if charging (before water heater)
-        if self._ev_charger and self._ev_charger.is_charging:
-            await self._ev_charger.stop()
+        # Turn off the loads we may be driving — but only while we're
+        # actually in charge.  A disabled BeemAI has already stood down
+        # and must not touch the charger or the heater on the way out.
+        if self.state_store.enabled:
+            # EV charger first (before water heater)
+            if self._ev_charger and self._ev_charger.is_charging:
+                await self._ev_charger.stop()
 
-        # Turn off water heater if heating
-        if self._water_heater and self._water_heater.is_heating:
-            await self._water_heater._turn_off()
-            self._water_heater._clear_session()
+            if self._water_heater and self._water_heater.is_heating:
+                await self._water_heater._turn_off()
+                self._water_heater._clear_session()
+        else:
+            _LOGGER.info(
+                "Shutdown while disabled — leaving EV charger and water "
+                "heater untouched",
+            )
 
         # Stop MQTT
         if self._mqtt_client:
