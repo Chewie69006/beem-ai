@@ -125,10 +125,13 @@ On the way down, each controller hands its device back:
 | EV charger | Never stopped — an in-flight charge keeps running. The amperage BeemAI saved when it took over is restored, so the car is no longer clamped to 6 A. |
 | Water heater | A session **BeemAI** started is switched off (an immersion heater left running unsupervised is nobody's idea of a good outcome). A session you started is left alone. |
 
-The switch state survives Home Assistant restarts and config entry reloads,
-and unloading the integration while disabled leaves both devices untouched.
+The switch state survives Home Assistant restarts and config entry reloads.
 Re-enabling resumes on the next MQTT tick, adopting whatever state the
 devices are in.
+
+Unloading the integration (an HA restart, a reload) goes through the same
+release, so a restart no longer cuts an in-flight charge; while disabled
+there is nothing left to hand back and both devices are left untouched.
 
 ---
 

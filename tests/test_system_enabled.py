@@ -272,8 +272,8 @@ async def test_wh_commanded_on_cleared_by_external_off(mock_hass):
 
 
 @pytest.mark.asyncio
-async def test_shutdown_while_disabled_leaves_devices_alone(coordinator):
-    """Unloading a disabled BeemAI must not cut an in-flight charge."""
+async def test_shutdown_while_disabled_touches_nothing(coordinator):
+    """Unloading a disabled BeemAI has nothing left to hand back."""
     coordinator.state_store.enabled = False
     coordinator._ev_charger.is_charging = True
     coordinator._ev_charger.stop = AsyncMock()
@@ -281,20 +281,34 @@ async def test_shutdown_while_disabled_leaves_devices_alone(coordinator):
 
     await coordinator.async_shutdown()
 
+    coordinator._ev_charger.release_control.assert_not_called()
+    coordinator._water_heater.release_control.assert_not_called()
     coordinator._ev_charger.stop.assert_not_called()
     coordinator._water_heater._turn_off.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_shutdown_while_enabled_stops_devices(coordinator):
+async def test_shutdown_releases_rather_than_stops(coordinator):
+    """A reload must not cut an in-flight charge — release, don't stop."""
     coordinator._ev_charger.is_charging = True
     coordinator._ev_charger.stop = AsyncMock()
     coordinator._water_heater._turn_off = AsyncMock()
 
     await coordinator.async_shutdown()
 
-    coordinator._ev_charger.stop.assert_awaited_once()
-    coordinator._water_heater._turn_off.assert_awaited_once()
+    coordinator._ev_charger.release_control.assert_awaited_once()
+    coordinator._water_heater.release_control.assert_awaited_once()
+    coordinator._ev_charger.stop.assert_not_called()
+    coordinator._water_heater._turn_off.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_the_enabled_flag_alone(coordinator):
+    """Releasing on unload is not a user disable — the switch keeps its
+    state so the next start restores what the user chose."""
+    await coordinator.async_shutdown()
+
+    assert coordinator.state_store.enabled is True
 
 
 # ---- Enabled switch restores across reloads ----------------------------

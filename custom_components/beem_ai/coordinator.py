@@ -815,21 +815,19 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
 
-        # Turn off the loads we may be driving — but only while we're
-        # actually in charge.  A disabled BeemAI has already stood down
-        # and must not touch the charger or the heater on the way out.
+        # Hand the devices back rather than switching them off.  An
+        # unload is usually a reload — an HA restart, a config entry
+        # reload — and cutting an in-flight charge every time is not
+        # something the driver asked for.  Identical semantics to the
+        # Enabled switch: the charger keeps running at the user's own
+        # amperage, and only a water heater session BeemAI itself
+        # started is turned off.
         if self.state_store.enabled:
-            # EV charger first (before water heater)
-            if self._ev_charger and self._ev_charger.is_charging:
-                await self._ev_charger.stop()
-
-            if self._water_heater and self._water_heater.is_heating:
-                await self._water_heater._turn_off()
-                self._water_heater._clear_session()
+            await self._release_device_control()
         else:
             _LOGGER.info(
-                "Shutdown while disabled — leaving EV charger and water "
-                "heater untouched",
+                "Shutdown while disabled — already stood down, leaving "
+                "EV charger and water heater untouched",
             )
 
         # Stop MQTT

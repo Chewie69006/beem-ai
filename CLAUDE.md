@@ -33,7 +33,8 @@
   water heater rules, the EV amperage regulation and the 7 kW overload
   coordination are all skipped; mode changes are stored but not applied;
   `async_shutdown()` leaves both devices untouched
-- Disabling calls `_release_device_control()`:
+- Both disabling **and** `async_shutdown()` call `_release_device_control()` —
+  an unload is usually a reload, so it releases rather than stops:
   - `EvChargerController.release_control()` — never stops the charger,
     restores the saved user amperage, clears session state
   - `WaterHeaterController.release_control()` — turns off only a session
