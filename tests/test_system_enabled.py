@@ -1,20 +1,40 @@
-"""The Enabled switch is a real stand-down, not just a paused loop.
+"""The Enabled switch is a master off.
 
-With ``switch.beemai_system_enabled`` off, BeemAI must send no commands
-to the water heater or the EV charger — no amperage clamp, no 7 kW
-overload trim, no start/stop rules — so the charger can be driven from
-the Wallbox app without the integration fighting back.
+Turning ``switch.beemai_system_enabled`` off stops everything BeemAI
+drives and then issues no further commands at all — that's what makes it
+usable as an override: stop, then start the charge yourself from the
+Wallbox app with nothing clamping amps or enforcing the 7 kW ceiling.
+
+Everything else is *not* a master off.  An options change or an
+integration reload must leave a running session alone and let the next
+MQTT tick judge it against the current thresholds.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.beem_ai.const import (
+    OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_TOGGLE,
+    OPT_EV_TARGET_SOC,
+    OPT_WATER_HEATER_SWITCH,
+    OPT_WH_SOC_THRESHOLD,
+)
 from custom_components.beem_ai.coordinator import BeemAICoordinator
 from custom_components.beem_ai.ev_charger_controller import EvChargerController
 from custom_components.beem_ai.water_heater_controller import (
     WaterHeaterController,
 )
+
+
+def _controller_mock(**extra):
+    m = MagicMock()
+    for name in ("evaluate", "stop", "release_control", "handle_mode_change"):
+        setattr(m, name, AsyncMock())
+    for name, value in extra.items():
+        setattr(m, name, value)
+    return m
 
 
 @pytest.fixture
@@ -25,16 +45,13 @@ def coordinator(mock_hass, state_store):
     entry.entry_id = "test-entry"
     c = BeemAICoordinator(mock_hass, entry)
     c.state_store = state_store
-    c._ev_charger = MagicMock()
-    c._ev_charger.evaluate = AsyncMock()
-    c._ev_charger.release_control = AsyncMock()
-    c._ev_charger.handle_mode_change = AsyncMock()
-    c._water_heater = MagicMock()
-    c._water_heater.evaluate = AsyncMock()
-    c._water_heater.release_control = AsyncMock()
-    c._water_heater.handle_mode_change = AsyncMock()
+    c._ev_charger = _controller_mock(
+        is_charging=True, entity_ids=("switch.wallbox", "number.amps", None),
+    )
+    c._water_heater = _controller_mock(
+        is_heating=True, switch_entity_id="switch.water_heater",
+    )
     c._water_heater.force_stop_overload = AsyncMock()
-    c._water_heater.is_heating = True
     return c
 
 
@@ -76,40 +93,51 @@ async def test_enabled_evaluates_diverters(coordinator):
     coordinator._ev_charger.evaluate.assert_called_once()
 
 
-# ---- Stand-down on disable ---------------------------------------------
+# ---- Master off ---------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_disable_releases_device_control(coordinator):
+async def test_disable_stops_everything(coordinator):
     coordinator._overload_started_at = 1234.0
 
     await coordinator.async_set_enabled(False)
 
     assert coordinator.state_store.enabled is False
     assert coordinator._overload_started_at is None
-    coordinator._ev_charger.release_control.assert_awaited_once()
-    coordinator._water_heater.release_control.assert_awaited_once()
+    coordinator._ev_charger.stop.assert_awaited_once()
+    coordinator._water_heater.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_enable_does_not_release(coordinator):
+async def test_disable_stops_the_charge_whoever_started_it(coordinator):
+    """No exception for a session BeemAI started itself, nor for one it
+    adopted — the switch means stop."""
+    coordinator._ev_charger.stop = AsyncMock()
+
+    await coordinator.async_set_enabled(False)
+
+    coordinator._ev_charger.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_enable_does_not_command_anything(coordinator):
     coordinator.state_store.enabled = False
 
     await coordinator.async_set_enabled(True)
 
     assert coordinator.state_store.enabled is True
-    coordinator._ev_charger.release_control.assert_not_called()
+    coordinator._ev_charger.stop.assert_not_called()
+    coordinator._water_heater.stop.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_set_enabled_is_idempotent(coordinator):
-    """Already disabled — don't re-release on every switch write."""
+    """Already disabled — don't re-issue stops on every switch write."""
     coordinator.state_store.enabled = False
-    coordinator._ev_charger.release_control.reset_mock()
 
     await coordinator.async_set_enabled(False)
 
-    coordinator._ev_charger.release_control.assert_not_called()
+    coordinator._ev_charger.stop.assert_not_called()
 
 
 # ---- Mode changes are inert while disabled -----------------------------
@@ -144,7 +172,123 @@ async def test_ev_mode_change_applies_when_enabled(coordinator):
     )
 
 
-# ---- EV controller release semantics -----------------------------------
+# ---- An options change must not disturb a running session --------------
+
+
+OPTIONS = {
+    OPT_EV_CHARGER_TOGGLE: "switch.wallbox",
+    OPT_EV_CHARGER_POWER: "number.amps",
+    OPT_WATER_HEATER_SWITCH: "switch.water_heater",
+}
+
+
+@pytest.mark.asyncio
+async def test_threshold_change_keeps_the_same_controllers(coordinator):
+    """Editing a threshold used to recreate the EV controller, dropping
+    _saved_amps and _start_mode mid-charge."""
+    ev, wh = coordinator._ev_charger, coordinator._water_heater
+
+    coordinator._setup_ev_charger(dict(OPTIONS, **{OPT_EV_TARGET_SOC: 80.0}))
+    coordinator._setup_water_heater(dict(OPTIONS, **{OPT_WH_SOC_THRESHOLD: 80.0}))
+
+    assert coordinator._ev_charger is ev
+    assert coordinator._water_heater is wh
+    ev.reconfigure.assert_not_called()
+    wh.reconfigure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_entity_change_reconfigures_in_place(coordinator):
+    ev, wh = coordinator._ev_charger, coordinator._water_heater
+
+    coordinator._setup_ev_charger(
+        dict(OPTIONS, **{OPT_EV_CHARGER_POWER: "number.other_amps"})
+    )
+    coordinator._setup_water_heater(
+        dict(OPTIONS, **{OPT_WATER_HEATER_SWITCH: "switch.other"})
+    )
+
+    assert coordinator._ev_charger is ev
+    assert coordinator._water_heater is wh
+    ev.reconfigure.assert_called_once_with(
+        "switch.wallbox", "number.other_amps", None,
+    )
+    wh.reconfigure.assert_called_once_with("switch.other")
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_entities_drops_the_controller(coordinator):
+    coordinator._setup_ev_charger({})
+    coordinator._setup_water_heater({})
+
+    assert coordinator._ev_charger is None
+    assert coordinator._water_heater is None
+
+
+@pytest.mark.asyncio
+async def test_options_update_never_stops_a_session(coordinator):
+    await coordinator.async_options_updated(dict(OPTIONS, **{OPT_EV_TARGET_SOC: 80.0}))
+
+    coordinator._ev_charger.stop.assert_not_called()
+    coordinator._water_heater.stop.assert_not_called()
+    coordinator._ev_charger.release_control.assert_not_called()
+    coordinator._water_heater.release_control.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_new_threshold_reaches_the_next_tick(coordinator):
+    """The tick is where a changed value is judged — evaluate() gets the
+    new number, rather than the session being cut on the spot."""
+    await coordinator.async_options_updated(dict(OPTIONS, **{OPT_EV_TARGET_SOC: 80.0}))
+
+    await coordinator._evaluate_surplus_diverters(soc=90.0, export_w=0.0)
+
+    kwargs = coordinator._ev_charger.evaluate.call_args.kwargs
+    assert kwargs["target_soc"] == 80.0
+
+
+# ---- Shutdown -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_the_charger_strictly_alone(coordinator):
+    """A reload must not cut the charge — nor bump it back to 32 A during
+    the restart window, which is how you trip the breaker unattended."""
+    await coordinator.async_shutdown()
+
+    coordinator._ev_charger.stop.assert_not_called()
+    coordinator._ev_charger.release_control.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_the_water_heater(coordinator):
+    """HA may not come back — don't leave an immersion heater we started
+    running unsupervised."""
+    await coordinator.async_shutdown()
+
+    coordinator._water_heater.release_control.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_while_disabled_touches_nothing(coordinator):
+    coordinator.state_store.enabled = False
+
+    await coordinator.async_shutdown()
+
+    coordinator._water_heater.release_control.assert_not_called()
+    coordinator._ev_charger.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_the_enabled_flag_alone(coordinator):
+    """Unloading is not a user disable — the switch keeps its state so
+    the next start restores what the user chose."""
+    await coordinator.async_shutdown()
+
+    assert coordinator.state_store.enabled is True
+
+
+# ---- EV controller: stop restores the user's amperage ------------------
 
 
 def _ev(mock_hass, switch_on: bool, amps: int):
@@ -165,53 +309,39 @@ def _ev(mock_hass, switch_on: bool, amps: int):
 
 
 @pytest.mark.asyncio
-async def test_ev_release_never_stops_the_charger(mock_hass):
-    """Disabling BeemAI mid-session must not cut the car off."""
+async def test_ev_stop_turns_off_and_restores_amps(mock_hass):
     ev = _ev(mock_hass, switch_on=True, amps=6)
     ev._saved_amps = 32
 
-    await ev.release_control()
+    await ev.stop()
 
-    calls = [c.args[:2] for c in mock_hass.services.async_call.call_args_list]
-    assert ("homeassistant", "turn_off") not in calls
-
-
-@pytest.mark.asyncio
-async def test_ev_release_restores_user_amps(mock_hass):
-    ev = _ev(mock_hass, switch_on=True, amps=6)
-    ev._saved_amps = 32
-
-    await ev.release_control()
-
-    mock_hass.services.async_call.assert_awaited_once_with(
-        "number",
-        "set_value",
+    calls = [
+        (c.args[0], c.args[1], c.args[2])
+        for c in mock_hass.services.async_call.call_args_list
+    ]
+    assert (
+        "homeassistant", "turn_off", {"entity_id": "switch.wallbox"},
+    ) in calls
+    assert (
+        "number", "set_value",
         {"entity_id": "number.wallbox_amps", "value": 32},
-    )
+    ) in calls
     assert ev._saved_amps is None
     assert ev._start_mode is None
 
 
 @pytest.mark.asyncio
-async def test_ev_release_without_saved_amps_touches_nothing(mock_hass):
-    ev = _ev(mock_hass, switch_on=True, amps=10)
+async def test_ev_entity_ids_round_trip(mock_hass):
+    ev = _ev(mock_hass, switch_on=False, amps=16)
 
-    await ev.release_control()
+    assert ev.entity_ids == ("switch.wallbox", "number.wallbox_amps", None)
 
-    mock_hass.services.async_call.assert_not_called()
+    ev.reconfigure("switch.a", "number.b", "sensor.c")
 
-
-@pytest.mark.asyncio
-async def test_ev_release_skips_redundant_set(mock_hass):
-    ev = _ev(mock_hass, switch_on=True, amps=16)
-    ev._saved_amps = 16
-
-    await ev.release_control()
-
-    mock_hass.services.async_call.assert_not_called()
+    assert ev.entity_ids == ("switch.a", "number.b", "sensor.c")
 
 
-# ---- Water heater release semantics ------------------------------------
+# ---- Water heater release on unload ------------------------------------
 
 
 def _wh(mock_hass, switch_on: bool):
@@ -238,13 +368,28 @@ async def test_wh_release_stops_a_session_beemai_started(mock_hass):
 
 
 @pytest.mark.asyncio
-async def test_wh_release_leaves_a_user_session_alone(mock_hass):
+async def test_wh_release_leaves_an_external_session_alone(mock_hass):
     wh = _wh(mock_hass, switch_on=True)
     wh._commanded_on = False
 
     await wh.release_control()
 
     mock_hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wh_stop_does_not_care_who_started_it(mock_hass):
+    """The master off has no such exemption."""
+    wh = _wh(mock_hass, switch_on=True)
+    wh._commanded_on = False
+
+    await wh.stop()
+
+    mock_hass.services.async_call.assert_awaited_once_with(
+        "homeassistant",
+        "turn_off",
+        {"entity_id": "switch.water_heater"},
+    )
 
 
 @pytest.mark.asyncio
@@ -266,49 +411,6 @@ async def test_wh_commanded_on_cleared_by_external_off(mock_hass):
     )
 
     assert wh._commanded_on is False
-
-
-# ---- Shutdown ----------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_shutdown_while_disabled_touches_nothing(coordinator):
-    """Unloading a disabled BeemAI has nothing left to hand back."""
-    coordinator.state_store.enabled = False
-    coordinator._ev_charger.is_charging = True
-    coordinator._ev_charger.stop = AsyncMock()
-    coordinator._water_heater._turn_off = AsyncMock()
-
-    await coordinator.async_shutdown()
-
-    coordinator._ev_charger.release_control.assert_not_called()
-    coordinator._water_heater.release_control.assert_not_called()
-    coordinator._ev_charger.stop.assert_not_called()
-    coordinator._water_heater._turn_off.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_shutdown_releases_rather_than_stops(coordinator):
-    """A reload must not cut an in-flight charge — release, don't stop."""
-    coordinator._ev_charger.is_charging = True
-    coordinator._ev_charger.stop = AsyncMock()
-    coordinator._water_heater._turn_off = AsyncMock()
-
-    await coordinator.async_shutdown()
-
-    coordinator._ev_charger.release_control.assert_awaited_once()
-    coordinator._water_heater.release_control.assert_awaited_once()
-    coordinator._ev_charger.stop.assert_not_called()
-    coordinator._water_heater._turn_off.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_shutdown_leaves_the_enabled_flag_alone(coordinator):
-    """Releasing on unload is not a user disable — the switch keeps its
-    state so the next start restores what the user chose."""
-    await coordinator.async_shutdown()
-
-    assert coordinator.state_store.enabled is True
 
 
 # ---- Enabled switch restores across reloads ----------------------------

@@ -125,6 +125,12 @@ class WaterHeaterController:
     # -- Public properties --
 
     @property
+    def switch_entity_id(self) -> str:
+        """The switch this controller drives — used to decide whether an
+        options update actually re-points it at something new."""
+        return self._switch_entity_id
+
+    @property
     def is_heating(self) -> bool:
         """Return True if the switch entity is on."""
         return self._is_switch_on()
@@ -555,12 +561,15 @@ class WaterHeaterController:
         self._clear_session()
 
     async def release_control(self) -> None:
-        """Hand the heater back to the user (BeemAI disabled).
+        """Hand the heater back on integration unload.
 
-        Anything *we* switched on gets switched off — leaving a
-        BeemAI-started immersion heater running unsupervised is the one
-        outcome nobody wants.  A session the user (or another
-        automation) started is left strictly alone.
+        Anything *we* switched on gets switched off — Home Assistant may
+        not come back, and a BeemAI-started immersion heater would then
+        run unsupervised.  A session started outside BeemAI (a physical
+        flip, another automation) is left strictly alone.
+
+        This is the unload path only.  Disabling the Enabled switch is a
+        master off and goes through :py:meth:`stop` instead.
         """
         if self._is_switch_on() and self._commanded_on:
             _LOGGER.info(

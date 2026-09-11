@@ -106,32 +106,32 @@ Entities are organized into three HA devices:
 
 ---
 
-### Enabled Switch — Standing Down
+### Enabled Switch — Master Off
 
-Turning `switch.beemai_system_enabled` **off** is a full stand-down, not a
-paused decision loop. While it is off BeemAI sends **no commands** to the
-water heater or the EV charger:
+Turning `switch.beemai_system_enabled` **off** stops everything BeemAI
+drives — the EV charge and the water heater, whoever started them — and
+then BeemAI sends **no commands at all**:
 
-- No amperage regulation — the charger keeps whatever current you set from
-  the Wallbox app.
+- No amperage regulation — start the charge from the Wallbox app and it
+  keeps whatever current you set.
 - No 7 kW overload trim, and no water-heater force-stop.
 - No surplus start/stop rules; EV / water-heater mode changes are recorded
   but stay inert until BeemAI is enabled again.
 
-On the way down, each controller hands its device back:
+That's the whole point of the switch: stop, then do it yourself. The state
+survives Home Assistant restarts and config entry reloads, and re-enabling
+resumes on the next MQTT tick, adopting whatever state the devices are in.
 
-| Device | On disable |
-|---|---|
-| EV charger | Never stopped — an in-flight charge keeps running. The amperage BeemAI saved when it took over is restored, so the car is no longer clamped to 6 A. |
-| Water heater | A session **BeemAI** started is switched off (an immersion heater left running unsupervised is nobody's idea of a good outcome). A session you started is left alone. |
+**Nothing else stops a running session.** A value change (a threshold, a
+mode) never cuts the charge — the new number is simply what the next MQTT
+tick judges the session against:
 
-The switch state survives Home Assistant restarts and config entry reloads.
-Re-enabling resumes on the next MQTT tick, adopting whatever state the
-devices are in.
-
-Unloading the integration (an HA restart, a reload) goes through the same
-release, so a restart no longer cuts an in-flight charge; while disabled
-there is nothing left to hand back and both devices are left untouched.
+| Event | EV charger | Water heater |
+|---|---|---|
+| Enabled switch → off | **Stopped**, your amperage restored | **Stopped** |
+| Options changed (thresholds, modes) | Untouched — re-judged next tick | Untouched — re-judged next tick |
+| Charger / switch entity re-pointed in options | Controller re-pointed in place | Controller re-pointed in place |
+| HA restart, integration reload | Untouched — not stopped, and not bumped back to full amps mid-restart (that's how you trip the breaker unattended) | A session **BeemAI** started is switched off: HA may not come back, and an immersion heater shouldn't run unsupervised |
 
 ---
 

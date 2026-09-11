@@ -183,6 +183,16 @@ class EvChargerController:
     # -- Public properties --
 
     @property
+    def entity_ids(self) -> tuple[str, str, str | None]:
+        """The entities this controller drives — used to decide whether
+        an options update actually re-points it at something new."""
+        return (
+            self._toggle_entity_id,
+            self._power_entity_id,
+            self._status_entity_id,
+        )
+
+    @property
     def is_charging(self) -> bool:
         """Return True if the toggle entity is on."""
         return self._is_switch_on()
@@ -213,33 +223,6 @@ class EvChargerController:
             return
         _LOGGER.info("EV charger: stop requested")
         await self._turn_off_and_restore()
-        self._clear_session()
-
-    async def release_control(self) -> None:
-        """Hand the charger back to the user (BeemAI disabled).
-
-        Deliberately does *not* stop an in-flight session: the whole
-        point of disabling BeemAI is to let the driver run the charger
-        from the Wallbox app.  We only undo our own amperage clamp
-        (restoring the value we saved when we took over) and drop the
-        session bookkeeping so a later re-enable starts from a clean
-        read of the live entities.
-        """
-        if self._saved_amps is not None:
-            current = self._read_amps_clamped()
-            if current != self._saved_amps:
-                _LOGGER.info(
-                    "EV charger: releasing control — restoring user amps "
-                    "%dA → %dA",
-                    current, self._saved_amps,
-                )
-                await self._set_amps(self._saved_amps)
-        else:
-            _LOGGER.info(
-                "EV charger: releasing control — leaving charger as-is "
-                "(on=%s, %dA)",
-                self._is_switch_on(), self._read_amps_clamped(),
-            )
         self._clear_session()
 
     async def handle_mode_change(self, mode: str) -> None:

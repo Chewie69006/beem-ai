@@ -339,45 +339,69 @@ class BeemAICoordinator(DataUpdateCoordinator):
     def _setup_water_heater(self, options: dict) -> None:
         """Create, reconfigure, or destroy the water heater controller.
 
-        Reconfigures the existing controller in place when one already
-        exists — recreating it on every options update (e.g. a mode
-        switch, which also writes to config entry options) would wipe
-        its in-memory daily energy accumulator and fully-heated flag.
+        Touches the existing controller only when the switch entity
+        itself changes.  Editing any other option must not disturb a
+        session in progress — ``reconfigure()`` clears the sustain and
+        min-duration timers, and recreating the controller outright
+        would also wipe the daily energy accumulator and the
+        fully-heated flag.  Every threshold is passed into
+        ``evaluate()`` on each tick, so new values apply on the next
+        MQTT update without any resync here.
         """
         switch_id = options.get(OPT_WATER_HEATER_SWITCH, "")
+        if not switch_id:
+            self._water_heater = None
+            return
+
         if self._water_heater is not None:
-            if switch_id:
-                self._water_heater.reconfigure(switch_id)
-            else:
-                self._water_heater = None
-        elif switch_id:
-            self._water_heater = WaterHeaterController(
-                hass=self.hass,
-                switch_entity_id=switch_id,
-            )
-            _LOGGER.info(
-                "Water heater controller configured: switch=%s",
-                switch_id,
-            )
+            if self._water_heater.switch_entity_id == switch_id:
+                return
+            self._water_heater.reconfigure(switch_id)
+            return
+
+        self._water_heater = WaterHeaterController(
+            hass=self.hass,
+            switch_entity_id=switch_id,
+        )
+        _LOGGER.info(
+            "Water heater controller configured: switch=%s",
+            switch_id,
+        )
 
     def _setup_ev_charger(self, options: dict) -> None:
-        """Create or destroy the EV charger controller based on options."""
+        """Create, reconfigure, or destroy the EV charger controller.
+
+        Same rule as the water heater: only an entity change touches a
+        live controller.  Recreating it on every options update used to
+        drop ``_saved_amps`` (losing the user's pre-takeover amperage
+        for good) and reset ``_start_mode``, so changing an unrelated
+        threshold disturbed a charge that should simply have been
+        re-evaluated against the new value on the next tick.
+        """
         toggle_id = options.get(OPT_EV_CHARGER_TOGGLE, "")
         power_id = options.get(OPT_EV_CHARGER_POWER, "")
         status_id = options.get(OPT_EV_CHARGER_STATUS, "") or None
-        if toggle_id and power_id:
-            self._ev_charger = EvChargerController(
-                hass=self.hass,
-                toggle_entity_id=toggle_id,
-                power_entity_id=power_id,
-                status_entity_id=status_id,
-            )
-            _LOGGER.info(
-                "EV charger controller configured: toggle=%s, power=%s, status=%s",
-                toggle_id, power_id, status_id,
-            )
-        else:
+
+        if not (toggle_id and power_id):
             self._ev_charger = None
+            return
+
+        if self._ev_charger is not None:
+            if self._ev_charger.entity_ids == (toggle_id, power_id, status_id):
+                return
+            self._ev_charger.reconfigure(toggle_id, power_id, status_id)
+            return
+
+        self._ev_charger = EvChargerController(
+            hass=self.hass,
+            toggle_entity_id=toggle_id,
+            power_entity_id=power_id,
+            status_entity_id=status_id,
+        )
+        _LOGGER.info(
+            "EV charger controller configured: toggle=%s, power=%s, status=%s",
+            toggle_id, power_id, status_id,
+        )
 
     def _on_battery_update(self):
         """Handle battery data update from MQTT."""
@@ -609,10 +633,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._tariff:
             self._tariff.reconfigure(config)
 
-        # Reconfigure water heater and EV charger controllers.  The new
-        # controllers read the live entity state on every evaluate, so no
-        # explicit resync is needed after recreation — they pick up the
-        # current physical state of the switch automatically.
+        # Re-point the controllers if (and only if) their entities
+        # changed.  Thresholds below are re-read into the coordinator
+        # and handed to evaluate() on the next tick, so a value change
+        # never stops a running session — it just gets judged against
+        # the new numbers.
         self._setup_water_heater(options)
         self._setup_ev_charger(options)
 
@@ -702,12 +727,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
     async def async_set_enabled(self, enabled: bool) -> None:
         """Toggle the system on/off.
 
-        Disabling is a full stand-down, not just a pause of the
-        decision loop: every controller hands its device back to the
-        user (see ``_release_device_control``) so the EV charger can be
-        driven from the Wallbox app without BeemAI clamping amps or
-        enforcing the 7 kW ceiling.  Re-enabling resumes on the next
-        MQTT tick, adopting whatever state the devices are in.
+        Disabling is a hard master-off, not just a pause of the
+        decision loop: everything BeemAI drives stops, and from then on
+        it issues no commands at all.  That's what makes it usable as
+        an override — stop everything, then start the charge yourself
+        from the Wallbox app with nothing clamping amps or enforcing
+        the 7 kW ceiling.  Re-enabling resumes on the next MQTT tick,
+        adopting whatever state the devices are in.
         """
         if self.state_store.enabled == enabled:
             return
@@ -716,19 +742,17 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if enabled:
             _LOGGER.info("BeemAI enabled by user — control resumes")
         else:
-            _LOGGER.info(
-                "BeemAI disabled by user — releasing device control",
-            )
-            await self._release_device_control()
+            _LOGGER.info("BeemAI disabled by user — stopping everything")
+            await self._stop_device_control()
         self.async_update_listeners()
 
-    async def _release_device_control(self) -> None:
-        """Stand down: let each controller hand its device back."""
+    async def _stop_device_control(self) -> None:
+        """Master off: stop every load BeemAI drives."""
         self._overload_started_at = None
         if self._ev_charger:
-            await self._ev_charger.release_control()
+            await self._ev_charger.stop()
         if self._water_heater:
-            await self._water_heater.release_control()
+            await self._water_heater.stop()
 
     # ---- Control parameter refresh ----
 
@@ -815,20 +839,18 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
 
-        # Hand the devices back rather than switching them off.  An
-        # unload is usually a reload — an HA restart, a config entry
-        # reload — and cutting an in-flight charge every time is not
-        # something the driver asked for.  Identical semantics to the
-        # Enabled switch: the charger keeps running at the user's own
-        # amperage, and only a water heater session BeemAI itself
-        # started is turned off.
-        if self.state_store.enabled:
-            await self._release_device_control()
-        else:
-            _LOGGER.info(
-                "Shutdown while disabled — already stood down, leaving "
-                "EV charger and water heater untouched",
-            )
+        # An unload is almost always a reload — an HA restart, a config
+        # entry reload — so the EV charger is left strictly alone: not
+        # stopped, and not even re-set to the user's saved amperage,
+        # because a car jumping back to 32 A during the restart window
+        # is exactly how you trip the 7 kW breaker with nobody watching.
+        # The next MQTT tick re-evaluates and re-clamps if it needs to.
+        #
+        # The water heater is the exception: HA might not come back, and
+        # an immersion heater BeemAI itself switched on would then run
+        # unsupervised.  Only a BeemAI-commanded session is turned off.
+        if self.state_store.enabled and self._water_heater:
+            await self._water_heater.release_control()
 
         # Stop MQTT
         if self._mqtt_client:
