@@ -28,6 +28,7 @@ from .const import (
     DOMAIN,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
+    EV_MODE_FORCE,
     OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
     OPT_EV_CHARGER_STATUS,
@@ -503,7 +504,26 @@ class BeemAICoordinator(DataUpdateCoordinator):
         already hit its 6A floor or wasn't drawing much to begin with),
         we force-stop the water heater — bypassing its min-duration
         engagement.
+
+        Suspended entirely while the EV charger is in Force Charge: that
+        mode deliberately accepts going over the limit, so sacrificing
+        the water heater would buy nothing.  The grace timer is reset so
+        it starts fresh if Force ends while still overloaded.
         """
+        if (
+            self.ev_charger_mode == EV_MODE_FORCE
+            and self._ev_charger is not None
+            and self._ev_charger.is_charging
+        ):
+            if self._overload_started_at is not None:
+                _LOGGER.info(
+                    "Overload handling suspended — EV charger in %s "
+                    "(cons=%.0fW)",
+                    EV_MODE_FORCE, consumption_w,
+                )
+            self._overload_started_at = None
+            return
+
         now = time.monotonic()
         overloaded = (
             consumption_w >= OVERLOAD_THRESHOLD_W and import_w > 0

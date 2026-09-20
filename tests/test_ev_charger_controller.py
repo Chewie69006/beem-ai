@@ -23,6 +23,7 @@ from custom_components.beem_ai.ev_charger_controller import (
     START_HEADROOM_W,
     STATUS_NO_DEMAND_SUSTAIN_S,
     SUSTAIN_SECONDS,
+    EvMode,
     StartMode,
     WATTS_PER_AMP,
     EvChargerController,
@@ -1357,3 +1358,242 @@ async def test_no_status_entity_skips_check():
         await _eval(ctrl)
 
     assert ctrl.is_charging is True
+
+
+# ---------------------------------------------------------------------
+# Force Charge mode: start now, never touch the amperage
+# ---------------------------------------------------------------------
+
+FORCE = "Force Charge"
+
+
+def _set_amps_calls(hass):
+    """Every number.set_value call the controller issued."""
+    return [
+        c for c in hass.services.async_call.call_args_list
+        if c.args[:2] == ("number", "set_value")
+    ]
+
+
+def test_ev_modes_match_enum():
+    """EV_MODES and EvMode must stay in sync — a typo would silently
+    degrade Force Charge to Auto via _mode_from_str's fallback."""
+    from custom_components.beem_ai.const import EV_MODES
+
+    assert {m.value for m in EvMode} == set(EV_MODES)
+
+
+@pytest.mark.asyncio
+async def test_force_starts_without_touching_amps():
+    """Selecting Force while idle turns on and leaves amps alone."""
+    ctrl, hass = _make_controller(user_amps=20)
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    assert ctrl.is_charging is True
+    assert ctrl._start_mode == StartMode.FORCE
+    assert ctrl.current_amps == 20
+    assert _set_amps_calls(hass) == []
+    hass.services.async_call.assert_any_call(
+        "homeassistant", "turn_on", {"entity_id": SWITCH_ID},
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_starts_below_target_soc():
+    """Force ignores the SoC gate entirely (the user's 30%-car case)."""
+    ctrl, hass = _make_controller(user_amps=16)
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+        await _eval(ctrl, soc=30.0, mode=FORCE)
+
+    assert ctrl.is_charging is True
+    assert ctrl.current_amps == 16
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_holds_amps_with_large_headroom():
+    """Big export would ramp up in Auto — Force must hold."""
+    ctrl, hass = _make_controller(user_amps=16)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    with patch("time.monotonic", return_value=1000.0 + REGULATE_INTERVAL_S * 5):
+        await _eval(ctrl, meter_power_w=-6000.0, mode=FORCE)
+
+    assert ctrl.current_amps == 16
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_holds_amps_on_heavy_import():
+    """Emergency shrink must not leak past the Force short-circuit."""
+    ctrl, hass = _make_controller(user_amps=16)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(
+            ctrl,
+            meter_power_w=EMERGENCY_SHRINK_W + 1000.0,
+            battery_power_w=0.0,
+            mode=FORCE,
+        )
+
+    assert ctrl.is_charging is True
+    assert ctrl.current_amps == 16
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_ignores_no_demand_status():
+    """A slow-to-wake car must not be cut off 60s after a Force start."""
+    ctrl, hass = _make_controller(user_amps=16, with_status=True)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    hass.set_status("Waiting for car demand")
+    for t in (1005.0, 1005.0 + STATUS_NO_DEMAND_SUSTAIN_S + 30):
+        with patch("time.monotonic", return_value=t):
+            await _eval(ctrl, mode=FORCE)
+
+    assert ctrl.is_charging is True
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_keeps_charging_on_overload():
+    """Force accepts going over the 7kW household limit — no stop, no trim."""
+    ctrl, hass = _make_controller(user_amps=32)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    for t in (1005.0, 1005.0 + REGULATE_INTERVAL_S * 3):
+        with patch("time.monotonic", return_value=t):
+            await _eval(ctrl, consumption_w=MAX_CONSUMPTION_W + 2000, mode=FORCE)
+
+    assert ctrl.is_charging is True
+    assert ctrl.current_amps == 32
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_then_disabled_restores_nothing():
+    """Leaving Force must not write an amperage back over the user's."""
+    ctrl, hass = _make_controller(user_amps=16)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+    # User bumps the current from the Wallbox app.
+    hass.set_amps(24)
+
+    await ctrl.handle_mode_change("Disabled")
+
+    assert ctrl.is_charging is False
+    assert hass._amps == 24
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_auto_session_switched_to_force_drops_saved_amps():
+    """Entering Force from a live Auto session forgets saved amps, so a
+    later stop leaves whatever the user set in the Wallbox app."""
+    ctrl, hass = _make_controller(user_amps=32)
+    await _start_charging(ctrl, hass)
+    assert ctrl._saved_amps == 32
+
+    await ctrl.handle_mode_change(FORCE)
+    assert ctrl._saved_amps is None
+    assert ctrl._start_mode == StartMode.FORCE
+
+    hass.set_amps(24)
+    await ctrl.stop()
+
+    assert ctrl.is_charging is False
+    assert hass._amps == 24
+
+
+@pytest.mark.asyncio
+async def test_force_idle_after_external_off_does_not_restart():
+    """Force is one-shot: an externally stopped session stays stopped."""
+    ctrl, hass = _make_controller(user_amps=16)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+    hass.set_switch("off")
+    ctrl._pending_start_since = None
+
+    with patch("time.monotonic", return_value=2000.0):
+        await _eval(ctrl, mode=FORCE)
+
+    assert ctrl.is_charging is False
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_pending_start_survives_options_reload():
+    """Selecting a mode writes config entry options, which re-enters
+    _setup_ev_charger.  The pending-start window must survive it,
+    otherwise a slow Wallbox turn_on is abandoned and never retried."""
+    from custom_components.beem_ai.coordinator import BeemAICoordinator
+    from custom_components.beem_ai.const import (
+        OPT_EV_CHARGER_POWER,
+        OPT_EV_CHARGER_STATUS,
+        OPT_EV_CHARGER_TOGGLE,
+    )
+
+    coord = object.__new__(BeemAICoordinator)
+    coord.hass = FakeHass()
+    coord._ev_charger = None
+    options = {
+        OPT_EV_CHARGER_TOGGLE: SWITCH_ID,
+        OPT_EV_CHARGER_POWER: AMPS_ID,
+        OPT_EV_CHARGER_STATUS: "",
+    }
+    coord._setup_ev_charger(options)
+    ctrl = coord._ev_charger
+    assert ctrl is not None
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+    ctrl._hass.set_switch("off")  # Wallbox hasn't caught up yet
+    assert ctrl._pending_start_since is not None
+
+    coord._setup_ev_charger(options)
+
+    assert coord._ev_charger is ctrl
+    assert ctrl._pending_start_since is not None
+    assert ctrl._start_mode == StartMode.FORCE
+
+
+@pytest.mark.asyncio
+async def test_setup_ev_charger_reconfigures_on_entity_change():
+    """Changed entity IDs still reconfigure (and clear the session)."""
+    from custom_components.beem_ai.coordinator import BeemAICoordinator
+    from custom_components.beem_ai.const import (
+        OPT_EV_CHARGER_POWER,
+        OPT_EV_CHARGER_STATUS,
+        OPT_EV_CHARGER_TOGGLE,
+    )
+
+    coord = object.__new__(BeemAICoordinator)
+    coord.hass = FakeHass()
+    coord._ev_charger = None
+    coord._setup_ev_charger({
+        OPT_EV_CHARGER_TOGGLE: SWITCH_ID,
+        OPT_EV_CHARGER_POWER: AMPS_ID,
+        OPT_EV_CHARGER_STATUS: "",
+    })
+    ctrl = coord._ev_charger
+    ctrl._start_mode = StartMode.FORCE
+
+    coord._setup_ev_charger({
+        OPT_EV_CHARGER_TOGGLE: "switch.other_charger",
+        OPT_EV_CHARGER_POWER: AMPS_ID,
+        OPT_EV_CHARGER_STATUS: "",
+    })
+
+    assert coord._ev_charger is ctrl
+    assert ctrl._toggle_entity_id == "switch.other_charger"
+    assert ctrl._start_mode is None

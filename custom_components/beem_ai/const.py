@@ -48,7 +48,10 @@ DEFAULT_WATER_HEATER_MODE = WH_MODE_AUTO
 EV_MODE_DISABLED = "Disabled"
 EV_MODE_AUTO = "Auto"
 EV_MODE_MANUAL = "Manual"
-EV_MODES = [EV_MODE_DISABLED, EV_MODE_AUTO, EV_MODE_MANUAL]
+# Force: start the charger now and leave the amperage entirely to the
+# user (Wallbox app).  BeemAI never trims amps in this mode.
+EV_MODE_FORCE = "Force Charge"
+EV_MODES = [EV_MODE_DISABLED, EV_MODE_AUTO, EV_MODE_MANUAL, EV_MODE_FORCE]
 DEFAULT_EV_CHARGER_MODE = EV_MODE_AUTO
 
 # --- Water heater durations ---

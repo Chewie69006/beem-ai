@@ -97,6 +97,9 @@ class EvMode(enum.Enum):
     DISABLED = "Disabled"
     AUTO = "Auto"
     MANUAL = "Manual"
+    # Force: start now, never touch the amperage — the user drives the
+    # current from the Wallbox app.  Must match const.EV_MODE_FORCE.
+    FORCE = "Force Charge"
 
 
 class StartMode(enum.Enum):
@@ -104,6 +107,7 @@ class StartMode(enum.Enum):
 
     AUTO = "auto"
     MANUAL = "manual"
+    FORCE = "force"
 
 
 def _mode_from_str(mode: str) -> EvMode:
@@ -217,6 +221,27 @@ class EvChargerController:
         await self._set_amps(MIN_CHARGE_AMPS)
         await self._turn_on()
 
+    async def start_force(self) -> None:
+        """Start charging now, leaving the amperage untouched.
+
+        Unlike :meth:`start_manual` this never calls ``_set_amps`` — the
+        charger keeps whatever current the user set in the Wallbox app.
+        ``_saved_amps`` is deliberately left as ``None`` so the eventual
+        stop doesn't write an amperage back either.
+        """
+        if self._is_switch_on():
+            return
+        _LOGGER.info(
+            "EV charger: force start requested — keeping user amperage (%sA)",
+            self._read_amps(),
+        )
+        self._saved_amps = None
+        self._last_regulate_time = time.monotonic()
+        self._start_mode = StartMode.FORCE
+        self._export_sustained_since = None
+        self._last_headroom_ok_at = None
+        await self._turn_on()
+
     async def stop(self) -> None:
         """Stop charging (from any mode)."""
         if not self._is_switch_on() and self._start_mode is None:
@@ -228,9 +253,11 @@ class EvChargerController:
     async def handle_mode_change(self, mode: str) -> None:
         """React to a user-driven mode change from the select entity.
 
-        - ``Disabled``: stop immediately.
-        - ``Manual``:   start immediately at 6A if idle (no sustain wait).
-        - ``Auto``:     no immediate action; ``evaluate()`` will take over.
+        - ``Disabled``:     stop immediately.
+        - ``Manual``:       start immediately at 6A if idle (no sustain wait).
+        - ``Force Charge``: start immediately at the user's current amperage
+          and stop regulating it.
+        - ``Auto``:         no immediate action; ``evaluate()`` takes over.
         """
         ev_mode = _mode_from_str(mode)
         if ev_mode == EvMode.DISABLED:
@@ -245,6 +272,19 @@ class EvChargerController:
                     MIN_CHARGE_AMPS,
                 )
                 await self.start_manual()
+        elif ev_mode == EvMode.FORCE:
+            # Drop any saved amperage from a previous Auto/Manual session
+            # so stopping later never overwrites what the user sets in
+            # the Wallbox app while Force is active.
+            self._saved_amps = None
+            if not self._is_switch_on():
+                _LOGGER.info(
+                    "EV charger: mode set to Force Charge — starting, "
+                    "amperage left to the user",
+                )
+                await self.start_force()
+            else:
+                self._start_mode = StartMode.FORCE
 
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
@@ -291,12 +331,15 @@ class EvChargerController:
                 )
                 self._pending_start_since = None
             if self._start_mode is None:
-                self._start_mode = StartMode.MANUAL
+                self._start_mode = (
+                    StartMode.FORCE if ev_mode == EvMode.FORCE
+                    else StartMode.MANUAL
+                )
                 self._last_regulate_time = now
                 _LOGGER.info(
                     "EV charger: switch is on without active session — "
-                    "adopting MANUAL mode at %dA",
-                    amps,
+                    "adopting %s mode at %dA",
+                    self._start_mode.value.upper(), amps,
                 )
             decision = await self._evaluate_charging(
                 soc, amps, headroom_w, battery_power_w,
@@ -326,7 +369,9 @@ class EvChargerController:
                         water_heater_heating, target_soc, now,
                     )
                 else:
-                    decision = "idle: Manual mode — waiting for user start"
+                    decision = (
+                        f"idle: {ev_mode.value} mode — waiting for user start"
+                    )
             else:
                 if now - self._last_entity_refresh_at >= PENDING_REFRESH_INTERVAL_S:
                     self._last_entity_refresh_at = now
@@ -350,7 +395,9 @@ class EvChargerController:
                     water_heater_heating, target_soc, now,
                 )
             else:
-                decision = "idle: Manual mode — waiting for user start"
+                decision = (
+                    f"idle: {ev_mode.value} mode — waiting for user start"
+                )
 
         _LOGGER.debug(
             "EV eval: mode=%s on=%s amps=%d soc=%.1f%% target=%.1f%% "
@@ -448,6 +495,20 @@ class EvChargerController:
     ) -> str:
         """CHARGING state: regulate amps or stop on low SoC / overload."""
         stop_soc = target_soc - soc_hysteresis
+
+        # Force mode: the user owns this session end to end.  We never
+        # change the amperage, we don't second-guess the car's status,
+        # and we don't enforce the 7 kW household limit — going over it
+        # is an accepted consequence of the mode.  Only an explicit stop
+        # (Disabled, another mode, or the Wallbox app) ends the session.
+        if ev_mode == EvMode.FORCE:
+            if consumption_w >= MAX_CONSUMPTION_W:
+                _LOGGER.debug(
+                    "EV charger (Force): consumption %.0fW >= %dW — "
+                    "not intervening (user-controlled session)",
+                    consumption_w, MAX_CONSUMPTION_W,
+                )
+            return f"force: holding {amps}A (user-controlled)"
 
         # Car-not-drawing stop (Wallbox status entity).  Once the car's
         # BMS hits its own SoC target, the Wallbox stays in "resume"

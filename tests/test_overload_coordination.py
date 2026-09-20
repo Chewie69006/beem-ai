@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.beem_ai.const import EV_MODE_FORCE
 from custom_components.beem_ai.coordinator import (
     BeemAICoordinator,
     OVERLOAD_WH_FORCE_STOP_GRACE_S,
@@ -124,3 +125,68 @@ async def test_overload_requires_positive_import(coordinator):
         consumption_w=8000.0, import_w=0.0,
     )
     assert coordinator._overload_started_at is None
+
+
+# ---------------------------------------------------------------------
+# EV charger in Force Charge suspends overload handling entirely
+# ---------------------------------------------------------------------
+
+
+def _force_charging_ev(coordinator):
+    coordinator.ev_charger_mode = EV_MODE_FORCE
+    coordinator._ev_charger = MagicMock()
+    coordinator._ev_charger.is_charging = True
+    coordinator._water_heater = MagicMock()
+    coordinator._water_heater.is_heating = True
+    coordinator._water_heater.force_stop_overload = AsyncMock()
+
+
+@pytest.mark.asyncio
+async def test_force_charge_never_stops_water_heater(coordinator):
+    """Force accepts going over the limit, so the WH is left alone."""
+    _force_charging_ev(coordinator)
+
+    with patch("time.monotonic", return_value=500.0):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
+    with patch("time.monotonic",
+               return_value=500.0 + OVERLOAD_WH_FORCE_STOP_GRACE_S + 10):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
+
+    assert coordinator._overload_started_at is None
+    coordinator._water_heater.force_stop_overload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_charge_resets_armed_timer(coordinator):
+    """An overload armed before Force started is dropped, so leaving
+    Force gives the grace window a fresh start."""
+    _force_charging_ev(coordinator)
+    coordinator._overload_started_at = 100.0
+
+    await coordinator._handle_overload(consumption_w=9000.0, import_w=2000.0)
+
+    assert coordinator._overload_started_at is None
+    coordinator._water_heater.force_stop_overload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_mode_but_ev_not_charging_still_protects(coordinator):
+    """Force selected while the charger is off is not a free pass."""
+    _force_charging_ev(coordinator)
+    coordinator._ev_charger.is_charging = False
+
+    with patch("time.monotonic", return_value=500.0):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
+    with patch("time.monotonic",
+               return_value=500.0 + OVERLOAD_WH_FORCE_STOP_GRACE_S + 10):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
+
+    coordinator._water_heater.force_stop_overload.assert_called_once()
