@@ -7,7 +7,7 @@ import logging
 import logging.handlers
 import os
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import aiohttp
 
@@ -57,7 +57,10 @@ from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
 from .ev_charger_controller import EvChargerController
-from .water_heater_controller import WaterHeaterController
+from .water_heater_controller import (
+    OFFPEAK_START_DELAY_S,
+    WaterHeaterController,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -458,6 +461,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 mode=self.water_heater_mode,
                 power_entity_id=self.wh_power_entity or None,
                 fully_heated_threshold_wh=self.wh_fully_heated_threshold,
+                offpeak=self._wh_offpeak(),
             )
         # Note: the EV controller's per-tick overload reduction still
         # runs inside its evaluate() — that's the actual amps-trim
@@ -491,6 +495,19 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
+
+    def _wh_offpeak(self) -> bool:
+        """True once the cheapest tariff period has been running for
+        OFFPEAK_START_DELAY_S — the water heater's off-peak top-up window.
+        """
+        if not self._tariff:
+            return False
+        now = datetime.now()
+        return self._tariff.is_in_cheapest_period(
+            now
+        ) and self._tariff.is_in_cheapest_period(
+            now - timedelta(seconds=OFFPEAK_START_DELAY_S)
+        )
 
     async def _handle_overload(
         self, consumption_w: float, import_w: float

@@ -32,6 +32,10 @@ IMPORT_TOLERANCE_W = 50  # Small grid import below this is noise, not real defic
 FULLY_HEATED_POWER_W = 50
 FULLY_HEATED_SUSTAIN_S = 60
 
+# Off-peak top-up: how long the cheapest tariff period must have been
+# running before the heater is started from the grid.
+OFFPEAK_START_DELAY_S = 5 * 60
+
 
 class WhMode(enum.Enum):
     """User-selected controller mode (from the BeemAI select entity)."""
@@ -88,6 +92,16 @@ class WaterHeaterController:
         self._last_power_sample_time: float | None = None
         self._fully_heated: bool = False
         self._low_power_since: float | None = None
+
+        # Off-peak top-up.  ``_offpeak_session`` marks the running session
+        # as grid-heated (no SoC / surplus stop applies).  ``_offpeak_done``
+        # latches one decision per off-peak window — the daily reset lands
+        # inside the window and clears ``_fully_heated``, which must not
+        # restart a tank that was already full.
+        self._offpeak_session: bool = False
+        self._offpeak_drew_power: bool = False
+        self._offpeak_done: bool = False
+        self._prev_offpeak: bool = False
 
     # -- Entity reads --
 
@@ -161,6 +175,7 @@ class WaterHeaterController:
         mode: str = WhMode.AUTO.value,
         power_entity_id: str | None = None,
         fully_heated_threshold_wh: float = 0,
+        offpeak: bool = False,
     ) -> None:
         """Evaluate state machine and act.
 
@@ -168,6 +183,11 @@ class WaterHeaterController:
           - ``Disabled``: no-op; if heating, force-off.
           - ``Auto``:     sustained-surplus start, SoC-stop, overload-stop.
           - ``Manual``:   start on mode change; keeps running until user stops.
+
+        ``offpeak`` is True once the cheapest tariff period has been
+        running for ``OFFPEAK_START_DELAY_S``.  In Auto, a heater that is
+        not fully heated is then run from the grid until its thermostat
+        cuts or the period ends.
 
         Branches are driven by the live switch-entity state read at the
         top of the tick — never an in-memory copy.
@@ -192,17 +212,41 @@ class WaterHeaterController:
 
         # Fully-heated detection: ON + low power + accumulated > threshold
         # Skip in Manual mode — it's an explicit user override.
+        # An off-peak session ends on the thermostat cut alone (the daily
+        # reset zeroes the energy counter mid-window), but only once the
+        # heater has been seen drawing power — a lagging power sensor must
+        # not end a session that has just started.
+        if self._offpeak_session:
+            if wh_power is not None and wh_power >= FULLY_HEATED_POWER_W:
+                self._offpeak_drew_power = True
+            finished = self._offpeak_drew_power
+        else:
+            finished = (
+                fully_heated_threshold_wh > 0
+                and self._energy_today_wh >= fully_heated_threshold_wh
+            )
         if (
             wh_mode != WhMode.MANUAL
             and is_on
             and wh_power is not None
-            and fully_heated_threshold_wh > 0
-            and self._energy_today_wh >= fully_heated_threshold_wh
+            and finished
             and wh_power < FULLY_HEATED_POWER_W
         ):
             if self._low_power_since is None:
                 self._low_power_since = now
             elif now - self._low_power_since >= FULLY_HEATED_SUSTAIN_S:
+                if self._offpeak_session:
+                    # Doesn't set the day's fully-heated lockout: tomorrow's
+                    # solar surplus may still top the tank up.
+                    _LOGGER.info(
+                        "Water heater: off-peak heating finished "
+                        "(power %.1f W) — turning off",
+                        wh_power,
+                    )
+                    self._offpeak_done = True
+                    await self._turn_off()
+                    self._clear_session()
+                    return
                 if not self._fully_heated:
                     _LOGGER.info(
                         "Water heater: fully heated — consumed %.0f Wh today "
@@ -234,6 +278,10 @@ class WaterHeaterController:
                     now + COOLDOWN_AFTER_EXTERNAL_OFF_S
                 )
                 self._commanded_on = False
+                # Switched off by hand mid off-peak session: don't fight
+                # the user every cooldown until the period ends.
+                if self._offpeak_session:
+                    self._offpeak_done = True
                 self._clear_session()
             else:
                 _LOGGER.warning(
@@ -242,6 +290,16 @@ class WaterHeaterController:
                 )
                 self._commanded_on = False
         self._expected_state = observed
+
+        # One off-peak decision per window: a tank already full when the
+        # window opens stays off even after the daily reset.  Cleared on
+        # the window's closing edge only — reset_daily() may set the latch
+        # during the start delay, while ``offpeak`` is still False.
+        if self._prev_offpeak and not offpeak:
+            self._offpeak_done = False
+        elif offpeak and self._fully_heated:
+            self._offpeak_done = True
+        self._prev_offpeak = offpeak
 
         # Start rules — computed once here so both idle (fire-time
         # validation) and heating (symmetric stop) see the same view.
@@ -273,10 +331,38 @@ class WaterHeaterController:
                 self._clear_session()
             decision = "blocked: fully heated today"
         elif wh_mode == WhMode.MANUAL:
+            # Manual takes the session over — off-peak end won't stop it.
+            self._offpeak_session = False
             if is_on:
                 decision = "heating: manual mode"
             else:
                 decision = "idle: Manual mode — waiting for user start"
+        elif offpeak and not self._offpeak_done:
+            # Off-peak top-up — no SoC / surplus stop, the session runs
+            # until the thermostat cuts or the period ends.
+            if is_on:
+                self._offpeak_session = True
+                decision = "heating: off-peak"
+            elif (
+                self._cooldown_until_monotonic is not None
+                and now < self._cooldown_until_monotonic
+            ):
+                remaining = self._cooldown_until_monotonic - now
+                decision = f"idle: cooldown ({remaining:.0f}s remaining)"
+            else:
+                _LOGGER.info(
+                    "Water heater: off-peak and not fully heated — "
+                    "turning on (SoC=%.1f%%)",
+                    soc,
+                )
+                await self._turn_on()
+                self._offpeak_session = True
+                decision = "start: off-peak"
+        elif is_on and self._offpeak_session:
+            _LOGGER.info("Water heater: off-peak period ended — turning off")
+            await self._turn_off()
+            self._clear_session()
+            decision = "stop: off-peak ended"
         elif is_on:
             # Heating branch — initialize session state if this is the
             # first tick of a session we didn't start ourselves (external
@@ -559,6 +645,10 @@ class WaterHeaterController:
         )
         await self._turn_off()
         self._clear_session()
+        # Otherwise the off-peak rule would switch it straight back on.
+        self._cooldown_until_monotonic = (
+            time.monotonic() + COOLDOWN_AFTER_EXTERNAL_OFF_S
+        )
 
     async def release_control(self) -> None:
         """Hand the heater back on integration unload.
@@ -592,6 +682,8 @@ class WaterHeaterController:
         self._active_soc_threshold = None
         self._stop_armed_since = None
         self._low_power_since = None
+        self._offpeak_session = False
+        self._offpeak_drew_power = False
 
     # -- Manual mode control --
 
@@ -636,6 +728,9 @@ class WaterHeaterController:
 
     def reset_daily(self) -> None:
         """Reset daily accumulators (called by coordinator at daily reset)."""
+        # The reset lands at the start of the off-peak period: carry
+        # "already full" over so the top-up doesn't restart a full tank.
+        self._offpeak_done = self._offpeak_done or self._fully_heated
         self._energy_today_wh = 0.0
         self._fully_heated = False
         self._low_power_since = None

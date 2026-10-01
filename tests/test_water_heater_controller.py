@@ -985,3 +985,133 @@ def test_daily_reset_clears_energy_and_flag():
 
     assert ctrl._energy_today_wh == 0.0
     assert not ctrl._fully_heated
+
+
+# ==================================================================
+# Off-peak top-up
+# ==================================================================
+
+
+async def _offpeak_eval(ctrl, offpeak=True, soc=20.0, t=1000.0, **kwargs):
+    """Night-time tick: low SoC, no surplus, power entity wired."""
+    with patch("time.monotonic", return_value=t):
+        await ctrl.evaluate(
+            soc, 0.0, 0.0, 500.0, 0.0, SOC_THRESHOLD, CHARGE_POWER_THRESHOLD,
+            min_duration_s=0, power_entity_id=POWER_ENTITY_ID,
+            fully_heated_threshold_wh=500, offpeak=offpeak, **kwargs,
+        )
+
+
+@pytest.mark.asyncio
+async def test_offpeak_starts_and_ignores_soc_and_surplus_stops():
+    ctrl, hass = _make_controller()
+    await _offpeak_eval(ctrl)
+    assert ctrl.is_heating
+
+    hass.set_power(2000.0)
+    for t in (1100.0, 5000.0, 9000.0):
+        await _offpeak_eval(ctrl, t=t)
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_not_started_outside_auto():
+    for mode in ("Manual", "Disabled"):
+        ctrl, _ = _make_controller()
+        await _offpeak_eval(ctrl, mode=mode)
+        assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_stops_when_period_ends():
+    ctrl, _ = _make_controller()
+    await _offpeak_eval(ctrl)
+    await _offpeak_eval(ctrl, offpeak=False, t=1100.0)
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_stops_on_thermostat_cut_and_stays_off():
+    ctrl, hass = _make_controller()
+    await _offpeak_eval(ctrl)
+
+    # Power sensor still at 0 right after the start — not "finished".
+    hass.set_power(0.0)
+    await _offpeak_eval(ctrl, t=1010.0)
+    await _offpeak_eval(ctrl, t=1100.0)
+    assert ctrl.is_heating
+
+    hass.set_power(2000.0)
+    await _offpeak_eval(ctrl, t=1200.0)
+    hass.set_power(5.0)
+    await _offpeak_eval(ctrl, t=1300.0)
+    await _offpeak_eval(ctrl, t=1361.0)
+    assert not ctrl.is_heating
+    # No day lockout — tomorrow's solar may still top up.
+    assert not ctrl.fully_heated
+
+    # Daily reset inside the window must not restart it.
+    ctrl.reset_daily()
+    await _offpeak_eval(ctrl, t=1400.0)
+    assert not ctrl.is_heating
+
+    # Next window re-arms.
+    await _offpeak_eval(ctrl, offpeak=False, t=1500.0)
+    await _offpeak_eval(ctrl, t=1600.0)
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_skipped_when_fully_heated_even_after_daily_reset():
+    ctrl, _ = _make_controller()
+    ctrl._fully_heated = True
+    await _offpeak_eval(ctrl)
+    assert not ctrl.is_heating
+
+    ctrl.reset_daily()
+    await _offpeak_eval(ctrl, t=1100.0)
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_no_restart_right_after_overload_force_stop():
+    ctrl, _ = _make_controller()
+    await _offpeak_eval(ctrl)
+    with patch("time.monotonic", return_value=1100.0):
+        await ctrl.force_stop_overload(7500.0)
+    await _offpeak_eval(ctrl, t=1100.0)
+    assert not ctrl.is_heating
+
+    await _offpeak_eval(ctrl, t=1100.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S)
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_manual_takes_over_offpeak_session():
+    ctrl, _ = _make_controller()
+    await _offpeak_eval(ctrl)
+    await _offpeak_eval(ctrl, mode="Manual", t=1100.0)
+    await _offpeak_eval(ctrl, offpeak=False, mode="Manual", t=1200.0)
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_skipped_when_daily_reset_lands_in_start_delay():
+    """Period starting on the hour: reset fires before the flag goes True."""
+    ctrl, _ = _make_controller()
+    ctrl._fully_heated = True
+    await _offpeak_eval(ctrl, offpeak=False, t=900.0)
+    ctrl.reset_daily()
+    await _offpeak_eval(ctrl, offpeak=False, t=1000.0)
+    await _offpeak_eval(ctrl, t=1300.0)
+    assert not ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_manual_switch_off_is_not_overridden():
+    ctrl, hass = _make_controller()
+    await _offpeak_eval(ctrl)
+    hass.set_switch("off")
+    await _offpeak_eval(ctrl, t=1100.0)
+    await _offpeak_eval(ctrl, t=1100.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S + 1)
+    assert not ctrl.is_heating

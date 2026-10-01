@@ -190,3 +190,26 @@ async def test_force_mode_but_ev_not_charging_still_protects(coordinator):
         )
 
     coordinator._water_heater.force_stop_overload.assert_called_once()
+
+
+def test_wh_offpeak_only_after_start_delay(coordinator):
+    """Off-peak top-up flag: 5 min into the cheapest period, not before."""
+    from datetime import datetime
+
+    from custom_components.beem_ai.tariff_manager import TariffManager
+
+    assert coordinator._wh_offpeak() is False  # no tariff configured
+
+    coordinator._tariff = TariffManager(0.25, [
+        {"label": "HC", "start": "21:26", "end": "05:26", "price": 0.15},
+    ])
+    cases = {
+        (21, 20): False, (21, 30): False, (21, 31): True,
+        (0, 2): True, (5, 25): True, (5, 26): False,
+    }
+    for (h, m), expected in cases.items():
+        with patch(
+            "custom_components.beem_ai.coordinator.datetime"
+        ) as dt:
+            dt.now.return_value = datetime(2026, 10, 1, h, m)
+            assert coordinator._wh_offpeak() is expected, (h, m)

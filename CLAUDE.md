@@ -55,6 +55,24 @@
   `WaterHeaterController.release_control()` runs, turning off a session
   BeemAI itself commanded (`_commanded_on`)
 
+## Water Heater Off-Peak Top-Up
+- Auto mode only: once the cheapest tariff period has been running for
+  `OFFPEAK_START_DELAY_S` (5 min), a heater that is not `fully_heated` is
+  switched on from the grid — `coordinator._wh_offpeak()` passes the flag
+  into `evaluate(offpeak=...)` on every tick
+- The session ignores the SoC / surplus stops; it ends on the thermostat cut
+  (power < 50 W for 60 s, after power was seen) or when the period ends
+- `_offpeak_done` latches one decision per window: the daily reset happens
+  at the start of the period (inside the window, or inside the 5 min delay
+  for a period starting on the hour) and clears `_fully_heated`, which must
+  not restart a full tank — `reset_daily()` carries it into the latch, and
+  the latch clears only on the window's closing edge.  An off-peak session
+  never sets `_fully_heated`
+- Switching the heater off by hand during an off-peak session sets the latch:
+  no restart until the next window
+- `force_stop_overload()` arms the 15 min cooldown, otherwise the rule would
+  switch the heater straight back on
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power
