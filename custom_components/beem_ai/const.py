@@ -23,6 +23,7 @@ OPT_WATER_HEATER_SWITCH = "water_heater_switch_entity"
 OPT_EV_CHARGER_TOGGLE = "ev_charger_toggle_entity"
 OPT_EV_CHARGER_POWER = "ev_charger_power_entity"
 OPT_EV_CHARGER_STATUS = "ev_charger_status_entity"
+OPT_EV_CHARGER_RESUME_SCHEDULE = "ev_charger_resume_schedule_entity"
 OPT_WH_SOC_THRESHOLD = "wh_soc_threshold"
 OPT_WH_CHARGE_POWER_THRESHOLD = "wh_charge_power_threshold"
 OPT_EV_TARGET_SOC = "ev_target_soc"
@@ -48,7 +49,7 @@ DEFAULT_WATER_HEATER_MODE = WH_MODE_AUTO
 EV_MODE_DISABLED = "Disabled"
 EV_MODE_AUTO = "Auto"
 EV_MODE_MANUAL = "Manual"
-# Force: start the charger now and leave the amperage entirely to the
+# Force: start the charger now at 32 A, then leave the amperage to the
 # user (Wallbox app).  BeemAI never trims amps in this mode.
 EV_MODE_FORCE = "Force Charge"
 EV_MODES = [EV_MODE_DISABLED, EV_MODE_AUTO, EV_MODE_MANUAL, EV_MODE_FORCE]

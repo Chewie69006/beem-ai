@@ -26,6 +26,20 @@ watt of solar we're currently stashing in the battery.
 
 When a water heater is configured, the EV charger waits for it to be ON
 before starting.  Without a water heater, the EV starts on surplus alone.
+
+Wallbox schedule
+----------------
+In Auto, a charge the Wallbox starts by itself while it was waiting on
+its own schedule (status ``Scheduled``, or right after we handed it back
+to its schedule) is the schedule's, not ours: it is raised to
+``FULL_POWER_AMPS`` once and then left alone — no amperage regulation,
+no SoC / no-demand stop, no 7 kW trim — exactly like Force Charge.
+
+A pause sent through the API is a manual stop, after which the Wallbox
+skips its schedule until told to resume it.  When a "Resume schedule"
+button entity is configured, every stop the Auto rules make is followed
+by a press on it, so a solar session ending in the afternoon doesn't
+cancel the night's scheduled charge.
 """
 
 from __future__ import annotations
@@ -90,6 +104,16 @@ STATUS_NO_DEMAND_SUSTAIN_S = 60
 SOC_BIAS_AMPS = 3
 SOC_DEADBAND_PCT = 0.5
 
+# Amperage for a session meant to charge flat out: a Force Charge start,
+# or a charge the Wallbox's own schedule started.  Set once, at the
+# start — the user can still lower it from the Wallbox app afterwards.
+FULL_POWER_AMPS = MAX_CHARGE_AMPS
+
+# Wallbox status while the car is plugged in and the charger is waiting
+# for its schedule (HA Wallbox ``ChargerStatus.SCHEDULED``, lowercased).
+# The switch reads off in that state.
+SCHEDULED_STATUS = "scheduled"
+
 
 class EvMode(enum.Enum):
     """User-selected controller mode (from the BeemAI select entity)."""
@@ -97,8 +121,9 @@ class EvMode(enum.Enum):
     DISABLED = "Disabled"
     AUTO = "Auto"
     MANUAL = "Manual"
-    # Force: start now, never touch the amperage — the user drives the
-    # current from the Wallbox app.  Must match const.EV_MODE_FORCE.
+    # Force: start now at FULL_POWER_AMPS, then never touch the amperage
+    # again — the user can still change it from the Wallbox app.  Must
+    # match const.EV_MODE_FORCE.
     FORCE = "Force Charge"
 
 
@@ -108,6 +133,8 @@ class StartMode(enum.Enum):
     AUTO = "auto"
     MANUAL = "manual"
     FORCE = "force"
+    # Started by the Wallbox's own schedule, in Auto — see module docstring.
+    SCHEDULE = "schedule"
 
 
 def _mode_from_str(mode: str) -> EvMode:
@@ -127,11 +154,16 @@ class EvChargerController:
         toggle_entity_id: str,
         power_entity_id: str,
         status_entity_id: str | None = None,
+        resume_schedule_entity_id: str | None = None,
     ) -> None:
         self._hass = hass
         self._toggle_entity_id = toggle_entity_id
         self._power_entity_id = power_entity_id
         self._status_entity_id = status_entity_id or None
+        # Optional Wallbox "Resume schedule" button.  Not part of
+        # entity_ids: changing it must not reset a live session, so the
+        # coordinator just assigns it on every options update.
+        self.resume_schedule_entity_id = resume_schedule_entity_id or None
 
         # Session bookkeeping — only meaningful while charger is physically
         # on.  Cleared on every on→off transition (and re-initialized on
@@ -150,6 +182,15 @@ class EvChargerController:
         # in the current session. Cleared whenever the car resumes
         # drawing or the session ends.
         self._no_demand_since: float | None = None
+        # Whether the next charge the Wallbox starts on its own is its
+        # schedule's (see _adopt_session).  _idle_scheduled is refreshed
+        # on every idle tick: the status reads "Scheduled", or we pressed
+        # "Resume schedule" (_handed_back, kept until a session consumes
+        # it or we start one ourselves).  Requiring an idle tick means a
+        # switch still reading on right after our own pause is never
+        # mistaken for the schedule starting.
+        self._idle_scheduled: bool = False
+        self._handed_back: bool = False
 
     # -- Entity reads --
 
@@ -206,6 +247,21 @@ class EvChargerController:
         """Return the current charging amperage (read from the HA entity)."""
         return self._read_amps_clamped()
 
+    def is_hands_off(self, mode: str) -> bool:
+        """True while the running session is one BeemAI must not regulate:
+        Force Charge, or a charge the Wallbox schedule started in Auto.
+
+        Both run at full power and accept going over the 7 kW household
+        limit, so the coordinator suspends its overload handling too.
+        """
+        if not self._is_switch_on():
+            return False
+        ev_mode = _mode_from_str(mode)
+        return ev_mode == EvMode.FORCE or (
+            ev_mode == EvMode.AUTO
+            and self._start_mode == StartMode.SCHEDULE
+        )
+
     # -- Manual / mode control --
 
     async def start_manual(self) -> None:
@@ -222,24 +278,24 @@ class EvChargerController:
         await self._turn_on()
 
     async def start_force(self) -> None:
-        """Start charging now, leaving the amperage untouched.
+        """Start charging now at full power.
 
-        Unlike :meth:`start_manual` this never calls ``_set_amps`` — the
-        charger keeps whatever current the user set in the Wallbox app.
-        ``_saved_amps`` is deliberately left as ``None`` so the eventual
-        stop doesn't write an amperage back either.
+        The amperage is raised to ``FULL_POWER_AMPS`` once, before the
+        start, and never touched again — the user can still lower it
+        from the Wallbox app.  ``_saved_amps`` is deliberately left as
+        ``None`` so the eventual stop doesn't write an amperage back.
         """
         if self._is_switch_on():
             return
         _LOGGER.info(
-            "EV charger: force start requested — keeping user amperage (%sA)",
-            self._read_amps(),
+            "EV charger: force start requested at %dA", FULL_POWER_AMPS,
         )
         self._saved_amps = None
         self._last_regulate_time = time.monotonic()
         self._start_mode = StartMode.FORCE
         self._export_sustained_since = None
         self._last_headroom_ok_at = None
+        await self._set_full_power(self._read_amps())
         await self._turn_on()
 
     async def stop(self) -> None:
@@ -255,9 +311,10 @@ class EvChargerController:
 
         - ``Disabled``:     stop immediately.
         - ``Manual``:       start immediately at 6A if idle (no sustain wait).
-        - ``Force Charge``: start immediately at the user's current amperage
-          and stop regulating it.
-        - ``Auto``:         no immediate action; ``evaluate()`` takes over.
+        - ``Force Charge``: raise the amperage to 32A, start immediately if
+          idle, and stop regulating it.
+        - ``Auto``:         hand an idle charger back to its Wallbox
+          schedule; ``evaluate()`` takes over from there.
         """
         ev_mode = _mode_from_str(mode)
         if ev_mode == EvMode.DISABLED:
@@ -279,12 +336,20 @@ class EvChargerController:
             self._saved_amps = None
             if not self._is_switch_on():
                 _LOGGER.info(
-                    "EV charger: mode set to Force Charge — starting, "
-                    "amperage left to the user",
+                    "EV charger: mode set to Force Charge — starting at %dA",
+                    FULL_POWER_AMPS,
                 )
                 await self.start_force()
             else:
                 self._start_mode = StartMode.FORCE
+                await self._set_full_power(self._read_amps())
+        elif ev_mode == EvMode.AUTO:
+            # Whatever paused the charger before (Disabled, a Manual or
+            # Force session) also took it off its schedule.  Not while it
+            # is charging: resuming the schedule outside its window would
+            # stop the running session.
+            if not self._is_switch_on():
+                await self._resume_schedule()
 
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
@@ -311,6 +376,15 @@ class EvChargerController:
         is_on = self._is_switch_on()
         amps = self._read_amps_clamped()
 
+        # Remember whether the idle charger is waiting on its schedule:
+        # if it then turns on by itself, that's the schedule starting.
+        # Not refreshed while one of our own starts is pending.
+        if not is_on and self._pending_start_since is None:
+            self._idle_scheduled = (
+                self._handed_back
+                or self._read_status() == SCHEDULED_STATUS
+            )
+
         if ev_mode == EvMode.DISABLED:
             if is_on:
                 _LOGGER.info("EV charger: mode=Disabled and switch is on — stopping")
@@ -318,11 +392,9 @@ class EvChargerController:
             self._clear_session()
             decision = "disabled"
         elif is_on:
-            # Charging branch — initialize session bookkeeping if this is
-            # the first tick of a session we didn't start ourselves
-            # (external toggle, HA restart, options reload).  Conservative
-            # defaults: assume MANUAL (keeps charger at min on overload
-            # rather than stopping outright) and no saved amps.
+            # Charging branch — adopt the session first if we didn't
+            # start it ourselves (Wallbox schedule, external toggle, HA
+            # restart, options reload).
             if self._pending_start_since is not None:
                 _LOGGER.info(
                     "EV charger: pending start confirmed after %.0fs — "
@@ -331,16 +403,8 @@ class EvChargerController:
                 )
                 self._pending_start_since = None
             if self._start_mode is None:
-                self._start_mode = (
-                    StartMode.FORCE if ev_mode == EvMode.FORCE
-                    else StartMode.MANUAL
-                )
-                self._last_regulate_time = now
-                _LOGGER.info(
-                    "EV charger: switch is on without active session — "
-                    "adopting %s mode at %dA",
-                    self._start_mode.value.upper(), amps,
-                )
+                await self._adopt_session(ev_mode, amps, now)
+                amps = self._read_amps_clamped()
             decision = await self._evaluate_charging(
                 soc, amps, headroom_w, battery_power_w,
                 solar_power_w, consumption_w,
@@ -409,6 +473,37 @@ class EvChargerController:
             solar_power_w, consumption_w, water_heater_heating,
             decision,
         )
+
+    async def _adopt_session(
+        self, ev_mode: EvMode, amps: int, now: float,
+    ) -> None:
+        """Take on a charge that is running without us having started it.
+
+        - Force Charge: the user's session — amperage left as it is.
+        - Auto, with the Wallbox waiting on its schedule (idle in
+          ``Scheduled``, or just handed back to it): the schedule started
+          this charge.  Raise it to full power and stay out of its way.
+        - Anything else (HA restart, a resume from the Wallbox app):
+          conservatively MANUAL — overload trims to the floor rather
+          than stopping outright — and the mode's own rules apply.
+        """
+        from_schedule = self._idle_scheduled
+        self._idle_scheduled = False
+        if ev_mode == EvMode.FORCE:
+            self._start_mode = StartMode.FORCE
+        elif ev_mode == EvMode.AUTO and from_schedule:
+            self._start_mode = StartMode.SCHEDULE
+            self._handed_back = False
+        else:
+            self._start_mode = StartMode.MANUAL
+        self._last_regulate_time = now
+        _LOGGER.info(
+            "EV charger: switch is on without active session — "
+            "adopting %s mode at %dA",
+            self._start_mode.value.upper(), amps,
+        )
+        if self._start_mode == StartMode.SCHEDULE:
+            await self._set_full_power(amps)
 
     async def _evaluate_idle(
         self,
@@ -510,6 +605,15 @@ class EvChargerController:
                 )
             return f"force: holding {amps}A (user-controlled)"
 
+        # Wallbox schedule: same hands-off contract as Force.  The
+        # schedule ends the session itself; pausing it here would also
+        # take the Wallbox off its schedule.
+        if (
+            ev_mode == EvMode.AUTO
+            and self._start_mode == StartMode.SCHEDULE
+        ):
+            return f"schedule: holding {amps}A (Wallbox schedule)"
+
         # Car-not-drawing stop (Wallbox status entity).  Once the car's
         # BMS hits its own SoC target, the Wallbox stays in "resume"
         # state but reports e.g. "Waiting for car demand".  Holding the
@@ -533,8 +637,7 @@ class EvChargerController:
                     "stopping (car not drawing)",
                     status, elapsed,
                 )
-                await self._turn_off_and_restore()
-                self._clear_session()
+                await self._stop_session(ev_mode)
                 return f"stop: no car demand ({status!r})"
             return (
                 f"charging: no-demand sustaining "
@@ -556,8 +659,7 @@ class EvChargerController:
                     "stopping EV charging (safety override)",
                     consumption_w, MAX_CONSUMPTION_W,
                 )
-                await self._turn_off_and_restore()
-                self._clear_session()
+                await self._stop_session(ev_mode)
                 return f"stop: Manual overload (cons {consumption_w:.0f}W)"
 
             excess_w = consumption_w - OVERLOAD_TARGET_W
@@ -572,8 +674,7 @@ class EvChargerController:
                     consumption_w, MAX_CONSUMPTION_W,
                     amps_to_drop, MIN_CHARGE_AMPS,
                 )
-                await self._turn_off_and_restore()
-                self._clear_session()
+                await self._stop_session(ev_mode)
                 return f"stop: overload at min (cons {consumption_w:.0f}W)"
 
             _LOGGER.info(
@@ -595,8 +696,7 @@ class EvChargerController:
                     MIN_CHARGE_AMPS, soc, stop_soc,
                     target_soc, soc_hysteresis,
                 )
-                await self._turn_off_and_restore()
-                self._clear_session()
+                await self._stop_session(ev_mode)
                 return f"stop: SoC floor (SoC {soc:.1f}% < {stop_soc:.1f}%)"
 
         return await self._regulate_amps(
@@ -689,6 +789,39 @@ class EvChargerController:
 
     # -- Switch control --
 
+    async def _stop_session(self, ev_mode: EvMode) -> None:
+        """End a session on one of our own rules (SoC floor, no car
+        demand, overload).  In Auto, the charger then goes back to its
+        Wallbox schedule — our pause would otherwise cancel it."""
+        await self._turn_off_and_restore()
+        self._clear_session()
+        if ev_mode == EvMode.AUTO:
+            await self._resume_schedule()
+
+    async def _resume_schedule(self) -> None:
+        """Press the Wallbox "Resume schedule" button, if configured.
+
+        If the schedule window is already open the Wallbox starts
+        charging straight away; ``_handed_back`` makes us adopt that as
+        the schedule's session — once an idle tick has seen our pause
+        land — instead of piloting it, which would only stop it again.
+        """
+        if not self.resume_schedule_entity_id:
+            return
+        _LOGGER.info(
+            "EV charger: handing the charger back to its schedule (%s)",
+            self.resume_schedule_entity_id,
+        )
+        self._handed_back = True
+        try:
+            await self._hass.services.async_call(
+                "button",
+                "press",
+                {"entity_id": self.resume_schedule_entity_id},
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("EV charger: resume schedule failed: %s", err)
+
     async def _turn_on(self) -> None:
         """Turn on the EV charger toggle.
 
@@ -700,6 +833,9 @@ class EvChargerController:
         now = time.monotonic()
         self._pending_start_since = now
         self._last_entity_refresh_at = now
+        # Our own start — whatever the Wallbox was waiting for before.
+        self._idle_scheduled = False
+        self._handed_back = False
         try:
             await self._hass.services.async_call(
                 "homeassistant",
@@ -732,6 +868,15 @@ class EvChargerController:
                 self._read_amps_clamped(), self._saved_amps,
             )
             await self._set_amps(self._saved_amps)
+
+    async def _set_full_power(self, amps: int | None) -> None:
+        """Raise the charger to FULL_POWER_AMPS unless it's already there."""
+        if amps == FULL_POWER_AMPS:
+            return
+        _LOGGER.info(
+            "EV charger: setting full power %sA → %dA", amps, FULL_POWER_AMPS,
+        )
+        await self._set_amps(FULL_POWER_AMPS)
 
     async def _set_amps(self, amps: int) -> None:
         """Set the wallbox charging amperage."""
@@ -781,6 +926,8 @@ class EvChargerController:
         self._power_entity_id = power_entity_id
         self._status_entity_id = status_entity_id or None
         self._clear_session()
+        self._idle_scheduled = False
+        self._handed_back = False
         _LOGGER.info(
             "EV charger controller reconfigured: toggle=%s, power=%s, status=%s",
             toggle_entity_id, power_entity_id, status_entity_id,

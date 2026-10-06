@@ -255,6 +255,41 @@ thresholds so the heater doesn't toggle every 5 minutes near the boundary.
 
 ---
 
+### EV Charger Modes
+
+| Mode | What BeemAI does |
+|---|---|
+| Disabled | Keeps the charger off (stops it, including a scheduled charge) |
+| Auto | Starts at 6 A on sustained solar surplus and pilots the amperage; stops on the SoC floor, on overload, or when the car stops drawing. **Leaves a Wallbox-scheduled charge alone** (below) |
+| Manual | Starts now at 6 A, then pilots like Auto (no SoC gate) |
+| Force Charge | Starts now at **32 A**, then never touches the amperage again — no SoC gate, no 7 kW limit |
+
+#### Wallbox schedule (Auto)
+
+With the **status sensor** configured (Wallbox `status_description`), a charge
+the Wallbox starts by itself while it was waiting on its schedule (status
+`Scheduled`) belongs to the schedule: BeemAI raises it to **32 A once** and then
+stays out of the way, exactly like Force Charge — no amperage regulation, no
+SoC / no-demand stop, no 7 kW trim (32 A alone is 7.4 kW). Lower the current
+from the Wallbox app and it sticks. The session ends when the Wallbox ends it.
+
+A pause sent through the Wallbox API is a *manual stop*, and the Wallbox then
+skips its schedule until told to resume it — so a solar session BeemAI ended in
+the afternoon could cancel the night's scheduled charge. If you use a schedule,
+set the optional **Wallbox "Resume schedule" button** (`button.*_resume_schedule`,
+from the HA Wallbox integration) in the EV charger options: BeemAI presses it
+after every stop the Auto rules make, and when Auto is selected while the
+charger is off. If the schedule window is already open, the charge that
+restarts is treated as the schedule's too. Don't set it without a schedule.
+Disabled and the master Enabled switch never press it.
+
+Not detected as the schedule (piloted as before): a resume from `Paused` (e.g.
+from the Wallbox app), and a car plugged in *during* the window (the Wallbox
+goes straight to charging). With the button configured, the latter is handed
+back to the schedule at BeemAI's first stop.
+
+---
+
 ### Configurable Tariff Periods
 
 Define up to 6 custom tariff periods in Options. Each period has a label, start/end

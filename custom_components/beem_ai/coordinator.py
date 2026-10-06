@@ -28,9 +28,9 @@ from .const import (
     DOMAIN,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
-    EV_MODE_FORCE,
     OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_STATUS,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
@@ -385,12 +385,16 @@ class BeemAICoordinator(DataUpdateCoordinator):
         toggle_id = options.get(OPT_EV_CHARGER_TOGGLE, "")
         power_id = options.get(OPT_EV_CHARGER_POWER, "")
         status_id = options.get(OPT_EV_CHARGER_STATUS, "") or None
+        # The resume-schedule button only matters when a stop happens,
+        # so it is simply (re)assigned — never a reason to reconfigure.
+        resume_id = options.get(OPT_EV_CHARGER_RESUME_SCHEDULE, "") or None
 
         if not (toggle_id and power_id):
             self._ev_charger = None
             return
 
         if self._ev_charger is not None:
+            self._ev_charger.resume_schedule_entity_id = resume_id
             if self._ev_charger.entity_ids == (toggle_id, power_id, status_id):
                 return
             self._ev_charger.reconfigure(toggle_id, power_id, status_id)
@@ -401,10 +405,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
             toggle_entity_id=toggle_id,
             power_entity_id=power_id,
             status_entity_id=status_id,
+            resume_schedule_entity_id=resume_id,
         )
         _LOGGER.info(
-            "EV charger controller configured: toggle=%s, power=%s, status=%s",
-            toggle_id, power_id, status_id,
+            "EV charger controller configured: toggle=%s, power=%s, "
+            "status=%s, resume_schedule=%s",
+            toggle_id, power_id, status_id, resume_id,
         )
 
     def _on_battery_update(self):
@@ -522,21 +528,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
         we force-stop the water heater — bypassing its min-duration
         engagement.
 
-        Suspended entirely while the EV charger is in Force Charge: that
-        mode deliberately accepts going over the limit, so sacrificing
+        Suspended entirely while the EV charges hands-off at full power
+        — Force Charge, or a charge the Wallbox schedule started in Auto:
+        those deliberately accept going over the limit, so sacrificing
         the water heater would buy nothing.  The grace timer is reset so
-        it starts fresh if Force ends while still overloaded.
+        it starts fresh if that session ends while still overloaded.
         """
-        if (
-            self.ev_charger_mode == EV_MODE_FORCE
-            and self._ev_charger is not None
-            and self._ev_charger.is_charging
+        if self._ev_charger is not None and self._ev_charger.is_hands_off(
+            self.ev_charger_mode
         ):
             if self._overload_started_at is not None:
                 _LOGGER.info(
-                    "Overload handling suspended — EV charger in %s "
-                    "(cons=%.0fW)",
-                    EV_MODE_FORCE, consumption_w,
+                    "Overload handling suspended — EV charging hands-off "
+                    "at full power (mode=%s, cons=%.0fW)",
+                    self.ev_charger_mode, consumption_w,
                 )
             self._overload_started_at = None
             return

@@ -23,6 +23,7 @@ from custom_components.beem_ai.ev_charger_controller import (
     START_HEADROOM_W,
     STATUS_NO_DEMAND_SUSTAIN_S,
     SUSTAIN_SECONDS,
+    FULL_POWER_AMPS,
     EvMode,
     StartMode,
     WATTS_PER_AMP,
@@ -878,11 +879,17 @@ async def test_externally_turned_on_then_soc_drop_stops_auto():
 async def test_externally_turned_off_clears_session():
     """Switch turned off externally → controller clears session bookkeeping."""
     ctrl, hass = _make_controller()
-    await _start_charging(ctrl, hass)
+    t = await _start_charging(ctrl, hass)
     assert ctrl._start_mode is not None
+    # Explicit clock: on a host booted < ~2 min ago the real monotonic
+    # clock still sits inside the pending-start grace of the t=1000
+    # start, and the off reading was taken for the Wallbox lagging.
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl, soc=92.0)  # the entity confirms the start
 
     hass.set_switch("off")
-    await _eval(ctrl, soc=92.0)
+    with patch("time.monotonic", return_value=t + 2):
+        await _eval(ctrl, soc=92.0)
 
     assert ctrl.is_charging is False
     assert ctrl._start_mode is None
@@ -1361,7 +1368,7 @@ async def test_no_status_entity_skips_check():
 
 
 # ---------------------------------------------------------------------
-# Force Charge mode: start now, never touch the amperage
+# Force Charge mode: start now at 32A, then never touch the amperage
 # ---------------------------------------------------------------------
 
 FORCE = "Force Charge"
@@ -1375,6 +1382,20 @@ def _set_amps_calls(hass):
     ]
 
 
+async def _force_start(ctrl, hass, user_amps_after: int | None = None):
+    """Select Force at t=1000 and forget the start's own calls.
+
+    ``user_amps_after`` simulates the user changing the current from
+    the Wallbox app once the session is running.
+    """
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+    assert ctrl.current_amps == FULL_POWER_AMPS
+    if user_amps_after is not None:
+        hass.set_amps(user_amps_after)
+    hass.services.async_call.reset_mock()
+
+
 def test_ev_modes_match_enum():
     """EV_MODES and EvMode must stay in sync — a typo would silently
     degrade Force Charge to Auto via _mode_from_str's fallback."""
@@ -1384,8 +1405,8 @@ def test_ev_modes_match_enum():
 
 
 @pytest.mark.asyncio
-async def test_force_starts_without_touching_amps():
-    """Selecting Force while idle turns on and leaves amps alone."""
+async def test_force_starts_at_full_power():
+    """Selecting Force while idle sets 32A, then turns on."""
     ctrl, hass = _make_controller(user_amps=20)
 
     with patch("time.monotonic", return_value=1000.0):
@@ -1393,33 +1414,58 @@ async def test_force_starts_without_touching_amps():
 
     assert ctrl.is_charging is True
     assert ctrl._start_mode == StartMode.FORCE
-    assert ctrl.current_amps == 20
-    assert _set_amps_calls(hass) == []
-    hass.services.async_call.assert_any_call(
-        "homeassistant", "turn_on", {"entity_id": SWITCH_ID},
+    assert ctrl.current_amps == FULL_POWER_AMPS == 32
+    assert ctrl._saved_amps is None
+    calls = [c.args[:2] for c in hass.services.async_call.call_args_list]
+    assert calls.index(("number", "set_value")) < calls.index(
+        ("homeassistant", "turn_on")
     )
+
+
+@pytest.mark.asyncio
+async def test_force_start_already_at_full_power_writes_nothing():
+    ctrl, hass = _make_controller(user_amps=32)
+
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change(FORCE)
+
+    assert ctrl.is_charging is True
+    assert _set_amps_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_force_on_running_session_raises_to_full_power():
+    """Force selected over a live Auto session (6A) goes to 32A."""
+    ctrl, hass = _make_controller(user_amps=32)
+    await _start_charging(ctrl, hass)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+
+    await ctrl.handle_mode_change(FORCE)
+
+    assert ctrl._start_mode == StartMode.FORCE
+    assert ctrl.current_amps == FULL_POWER_AMPS
 
 
 @pytest.mark.asyncio
 async def test_force_starts_below_target_soc():
     """Force ignores the SoC gate entirely (the user's 30%-car case)."""
     ctrl, hass = _make_controller(user_amps=16)
+    await _force_start(ctrl, hass)
 
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    with patch("time.monotonic", return_value=1005.0):
         await _eval(ctrl, soc=30.0, mode=FORCE)
 
     assert ctrl.is_charging is True
-    assert ctrl.current_amps == 16
+    assert ctrl.current_amps == FULL_POWER_AMPS
     assert _set_amps_calls(hass) == []
 
 
 @pytest.mark.asyncio
-async def test_force_holds_amps_with_large_headroom():
-    """Big export would ramp up in Auto — Force must hold."""
+async def test_force_holds_user_amps_with_large_headroom():
+    """Big export would ramp up in Auto — Force holds whatever the
+    user set in the Wallbox app after the start."""
     ctrl, hass = _make_controller(user_amps=16)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    await _force_start(ctrl, hass, user_amps_after=16)
 
     with patch("time.monotonic", return_value=1000.0 + REGULATE_INTERVAL_S * 5):
         await _eval(ctrl, meter_power_w=-6000.0, mode=FORCE)
@@ -1432,8 +1478,7 @@ async def test_force_holds_amps_with_large_headroom():
 async def test_force_holds_amps_on_heavy_import():
     """Emergency shrink must not leak past the Force short-circuit."""
     ctrl, hass = _make_controller(user_amps=16)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    await _force_start(ctrl, hass, user_amps_after=16)
 
     with patch("time.monotonic", return_value=1005.0):
         await _eval(
@@ -1452,8 +1497,7 @@ async def test_force_holds_amps_on_heavy_import():
 async def test_force_ignores_no_demand_status():
     """A slow-to-wake car must not be cut off 60s after a Force start."""
     ctrl, hass = _make_controller(user_amps=16, with_status=True)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    await _force_start(ctrl, hass)
 
     hass.set_status("Waiting for car demand")
     for t in (1005.0, 1005.0 + STATUS_NO_DEMAND_SUSTAIN_S + 30):
@@ -1468,8 +1512,7 @@ async def test_force_ignores_no_demand_status():
 async def test_force_keeps_charging_on_overload():
     """Force accepts going over the 7kW household limit — no stop, no trim."""
     ctrl, hass = _make_controller(user_amps=32)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    await _force_start(ctrl, hass)
 
     for t in (1005.0, 1005.0 + REGULATE_INTERVAL_S * 3):
         with patch("time.monotonic", return_value=t):
@@ -1484,10 +1527,8 @@ async def test_force_keeps_charging_on_overload():
 async def test_force_then_disabled_restores_nothing():
     """Leaving Force must not write an amperage back over the user's."""
     ctrl, hass = _make_controller(user_amps=16)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
-    # User bumps the current from the Wallbox app.
-    hass.set_amps(24)
+    # User changes the current from the Wallbox app.
+    await _force_start(ctrl, hass, user_amps_after=24)
 
     await ctrl.handle_mode_change("Disabled")
 
@@ -1519,8 +1560,7 @@ async def test_auto_session_switched_to_force_drops_saved_amps():
 async def test_force_idle_after_external_off_does_not_restart():
     """Force is one-shot: an externally stopped session stays stopped."""
     ctrl, hass = _make_controller(user_amps=16)
-    with patch("time.monotonic", return_value=1000.0):
-        await ctrl.handle_mode_change(FORCE)
+    await _force_start(ctrl, hass)
     hass.set_switch("off")
     ctrl._pending_start_since = None
 
@@ -1528,6 +1568,21 @@ async def test_force_idle_after_external_off_does_not_restart():
         await _eval(ctrl, mode=FORCE)
 
     assert ctrl.is_charging is False
+    assert hass.services.async_call.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_force_adopted_session_keeps_user_amps():
+    """A charge found running in Force (HA restart, a resume from the
+    Wallbox app) is adopted as-is — no jump to 32A."""
+    ctrl, hass = _make_controller(user_amps=16)
+    hass.set_switch("on")
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, mode=FORCE)
+
+    assert ctrl._start_mode == StartMode.FORCE
+    assert ctrl.current_amps == 16
     assert _set_amps_calls(hass) == []
 
 
@@ -1597,3 +1652,414 @@ async def test_setup_ev_charger_reconfigures_on_entity_change():
     assert coord._ev_charger is ctrl
     assert ctrl._toggle_entity_id == "switch.other_charger"
     assert ctrl._start_mode is None
+
+
+# ---------------------------------------------------------------------
+# Wallbox schedule (Auto): a charge the Wallbox's own schedule starts is
+# raised to 32A once, then left alone exactly like Force Charge
+# ---------------------------------------------------------------------
+
+RESUME_ID = "button.ev_charger_resume_schedule"
+
+# A night tick: no sun, the whole house (car included) on the grid,
+# battery well under the EV floor — everything Auto would act on.
+NIGHT = dict(
+    soc=30.0,
+    meter_power_w=MAX_CONSUMPTION_W + 2000.0,
+    battery_power_w=0.0,
+    solar_power_w=0.0,
+    consumption_w=MAX_CONSUMPTION_W + 2000.0,
+)
+# A quiet night tick: importing, but under every stop rule — a piloted
+# session survives it (only the amps move).
+QUIET_NIGHT = dict(
+    soc=80.0,
+    meter_power_w=2500.0,
+    battery_power_w=0.0,
+    solar_power_w=0.0,
+    consumption_w=2500.0,
+)
+
+
+def _schedule_controller(user_amps=10, resume=False):
+    """Controller with a status entity, the charger plugged in and
+    waiting for its schedule.  ``user_amps=10`` stands for whatever a
+    previous solar session left on the Wallbox."""
+    ctrl, hass = _make_controller(user_amps=user_amps, with_status=True)
+    if resume:
+        ctrl.resume_schedule_entity_id = RESUME_ID
+    hass.set_status("Scheduled")
+    return ctrl, hass
+
+
+async def _schedule_fires(ctrl, hass, t=1000.0):
+    """One idle tick in 'Scheduled', then the Wallbox starts by itself."""
+    with patch("time.monotonic", return_value=t):
+        await _eval(ctrl, **NIGHT)
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)
+
+
+def _press_calls(hass):
+    return [
+        c for c in hass.services.async_call.call_args_list
+        if c.args[:2] == ("button", "press")
+    ]
+
+
+def _service_names(hass):
+    return [c.args[:2] for c in hass.services.async_call.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_schedule_start_is_raised_to_full_power():
+    ctrl, hass = _schedule_controller(user_amps=10)
+
+    await _schedule_fires(ctrl, hass)
+
+    assert ctrl.is_charging is True
+    assert ctrl._start_mode == StartMode.SCHEDULE
+    assert ctrl.current_amps == FULL_POWER_AMPS == 32
+    assert ctrl._saved_amps is None
+    assert _service_names(hass) == [("number", "set_value")]
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_is_hands_off_through_the_night():
+    """SoC floor, 7 kW overload, emergency shrink, a car that is slow
+    to draw: none of them touch a scheduled charge."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+    hass.services.async_call.reset_mock()
+
+    hass.set_status("Waiting for car demand")
+    for t in (1010.0, 1100.0, 1200.0, 1000.0 + STATUS_NO_DEMAND_SUSTAIN_S * 5):
+        with patch("time.monotonic", return_value=t):
+            await _eval(ctrl, **NIGHT)
+
+    assert ctrl.is_charging is True
+    assert ctrl.current_amps == 32
+    assert hass.services.async_call.call_args_list == []
+    assert ctrl.is_hands_off("Auto") is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_keeps_the_users_amps_after_the_start():
+    """32A is set once; lowering it from the Wallbox app sticks."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+    hass.set_amps(16)
+    hass.services.async_call.reset_mock()
+
+    with patch("time.monotonic", return_value=1200.0):
+        await _eval(ctrl, meter_power_w=-6000.0)
+
+    assert ctrl.current_amps == 16
+    assert hass.services.async_call.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_ends_with_the_wallbox():
+    """The window closes: the Wallbox stops itself and goes back to
+    Scheduled.  Nothing is written back."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+    hass.services.async_call.reset_mock()
+
+    hass.set_switch("off")
+    hass.set_status("Scheduled")
+    with patch("time.monotonic", return_value=5000.0):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode is None
+    assert ctrl.current_amps == 32
+    assert hass.services.async_call.call_args_list == []
+
+
+@pytest.mark.asyncio
+async def test_resume_after_a_pause_is_still_piloted():
+    """A resume from 'Paused' (the user, from the Wallbox app) is not
+    the schedule: Auto keeps piloting it."""
+    ctrl, hass = _schedule_controller(user_amps=32)
+    hass.set_status("Paused")
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, **NIGHT)
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl.current_amps < 32  # overload trim
+    assert ctrl.is_hands_off("Auto") is False
+
+
+@pytest.mark.asyncio
+async def test_own_solar_start_from_scheduled_is_piloted():
+    """BeemAI starting a solar session while the Wallbox waits for its
+    schedule is our session, not the schedule's."""
+    ctrl, hass = _schedule_controller(user_amps=32)
+
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl)
+
+    assert ctrl._start_mode == StartMode.AUTO
+    assert ctrl.current_amps < FULL_POWER_AMPS
+    assert ctrl._saved_amps == 32
+
+
+@pytest.mark.asyncio
+async def test_schedule_detection_needs_the_status_entity():
+    ctrl, hass = _make_controller(user_amps=10, with_status=False)
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, **QUIET_NIGHT)
+    hass.set_switch("on")
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, **QUIET_NIGHT)
+
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl.current_amps < 10  # piloted down, not raised
+
+
+@pytest.mark.asyncio
+async def test_schedule_start_in_manual_mode_is_piloted():
+    """Only Auto defers to the schedule."""
+    ctrl, hass = _schedule_controller()
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, mode="Manual", **QUIET_NIGHT)
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, mode="Manual", **QUIET_NIGHT)
+
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl.current_amps < 10
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_switched_to_manual_is_piloted():
+    """Manual takes the session over: its overload stop applies."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+
+    with patch("time.monotonic", return_value=1100.0):
+        await _eval(ctrl, mode="Manual", **NIGHT)
+
+    assert ctrl.is_charging is False
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_disabled_stops_it():
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+
+    await ctrl.handle_mode_change("Disabled")
+
+    assert ctrl.is_charging is False
+    assert ctrl.current_amps == 32  # nothing saved, nothing restored
+
+
+# ---- Handing the charger back to its schedule ------------------------
+
+
+async def _solar_session_hits_soc_floor(ctrl, hass, mode="Auto"):
+    """A piloted session pinned at 6A whose battery drops under the
+    floor — the Auto SoC stop."""
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 1):
+        await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1, mode=mode,
+                    meter_power_w=0.0)
+    return t + 1
+
+
+@pytest.mark.asyncio
+async def test_auto_stop_hands_back_to_schedule():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+
+    await _solar_session_hits_soc_floor(ctrl, hass)
+
+    assert ctrl.is_charging is False
+    names = _service_names(hass)
+    # Pause first, then the user's amps back, then the schedule.
+    assert names.index(("homeassistant", "turn_off")) < names.index(
+        ("button", "press")
+    )
+    assert _press_calls(hass) == [
+        call("button", "press", {"entity_id": RESUME_ID}),
+    ]
+    assert hass._amps == 32
+
+
+@pytest.mark.asyncio
+async def test_no_button_configured_presses_nothing():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=False)
+
+    await _solar_session_hits_soc_floor(ctrl, hass)
+
+    assert ctrl.is_charging is False
+    assert _press_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_resume_schedule_failure_is_tolerated():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    real_call = hass._service_call
+
+    async def flaky(domain, service, data):
+        if domain == "button":
+            raise HomeAssistantError("Error communicating with Wallbox API")
+        await real_call(domain, service, data)
+
+    hass.services.async_call.side_effect = flaky
+
+    await _solar_session_hits_soc_floor(ctrl, hass)
+
+    assert ctrl.is_charging is False
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_does_not_hand_back():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+    hass.set_status("Charging")
+
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, mode="Manual",
+                    consumption_w=MAX_CONSUMPTION_W + 500)
+
+    assert ctrl.is_charging is False
+    assert _press_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_user_stops_do_not_hand_back():
+    """Disabled and the master switch mean off — not 'off until the
+    schedule says otherwise'."""
+    for stop in ("Disabled", "master"):
+        ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+        await _start_charging(ctrl, hass)
+
+        if stop == "Disabled":
+            await ctrl.handle_mode_change("Disabled")
+        else:
+            await ctrl.stop()
+
+        assert ctrl.is_charging is False
+        assert _press_calls(hass) == [], stop
+
+
+@pytest.mark.asyncio
+async def test_selecting_auto_hands_an_idle_charger_back():
+    """Disabled paused the charger, which took it off its schedule."""
+    ctrl, hass = _schedule_controller(resume=True)
+    hass.set_status("Paused")
+
+    await ctrl.handle_mode_change("Auto")
+
+    assert _press_calls(hass) == [
+        call("button", "press", {"entity_id": RESUME_ID}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_selecting_auto_leaves_a_running_charge_alone():
+    """Resuming the schedule outside its window would stop the charge."""
+    ctrl, hass = _schedule_controller(resume=True)
+    with patch("time.monotonic", return_value=1000.0):
+        await ctrl.handle_mode_change("Manual")
+
+    await ctrl.handle_mode_change("Auto")
+
+    assert ctrl.is_charging is True
+    assert _press_calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_hand_back_inside_the_window_is_the_schedule():
+    """Resuming the schedule while its window is open restarts the
+    charge from 'Paused' — that is the schedule, not a user resume, so
+    it is honoured at 32A rather than piloted (and stopped) again."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _solar_session_hits_soc_floor(ctrl, hass)
+    hass.set_amps(10)  # say the session left a lower current
+
+    hass.set_status("Paused")  # our pause landed
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)
+    hass.set_switch("on")  # the schedule picks it up
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 10):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode == StartMode.SCHEDULE
+    assert ctrl.current_amps == 32
+    assert ctrl._handed_back is False
+
+
+@pytest.mark.asyncio
+async def test_switch_still_on_after_our_pause_is_not_the_schedule():
+    """The Wallbox cloud can report 'on' for a few ticks after a pause
+    (or the pause failed).  Without an idle tick in between, that must
+    not turn into a 32A hands-off session."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _solar_session_hits_soc_floor(ctrl, hass)
+    hass.set_switch("on")  # stale / failed pause
+    hass.services.async_call.reset_mock()
+
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode != StartMode.SCHEDULE
+    assert call(
+        "number", "set_value", {"entity_id": AMPS_ID, "value": 32},
+    ) not in hass.services.async_call.call_args_list
+
+
+@pytest.mark.asyncio
+async def test_own_start_clears_the_hand_back():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    hass.set_status("Paused")
+    await ctrl.handle_mode_change("Auto")
+    assert ctrl._handed_back is True
+
+    await _start_charging(ctrl, hass)
+
+    assert ctrl._handed_back is False
+    assert ctrl._start_mode == StartMode.AUTO
+
+
+@pytest.mark.asyncio
+async def test_setup_ev_charger_assigns_resume_button_without_reset():
+    """The button is plain configuration: changing it must not clear a
+    live session the way an entity change does."""
+    from custom_components.beem_ai.coordinator import BeemAICoordinator
+    from custom_components.beem_ai.const import (
+        OPT_EV_CHARGER_POWER,
+        OPT_EV_CHARGER_RESUME_SCHEDULE,
+        OPT_EV_CHARGER_TOGGLE,
+    )
+
+    coord = object.__new__(BeemAICoordinator)
+    coord.hass = FakeHass()
+    coord._ev_charger = None
+    options = {
+        OPT_EV_CHARGER_TOGGLE: SWITCH_ID,
+        OPT_EV_CHARGER_POWER: AMPS_ID,
+        OPT_EV_CHARGER_RESUME_SCHEDULE: RESUME_ID,
+    }
+    coord._setup_ev_charger(options)
+    ctrl = coord._ev_charger
+    assert ctrl.resume_schedule_entity_id == RESUME_ID
+    ctrl._start_mode = StartMode.SCHEDULE
+
+    coord._setup_ev_charger(dict(options, **{OPT_EV_CHARGER_RESUME_SCHEDULE: ""}))
+
+    assert coord._ev_charger is ctrl
+    assert ctrl.resume_schedule_entity_id is None
+    assert ctrl._start_mode == StartMode.SCHEDULE

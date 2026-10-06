@@ -19,6 +19,7 @@ from .const import (
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_STATUS,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
@@ -173,6 +174,9 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_EV_CHARGER_STATUS] = user_input.get(
                 OPT_EV_CHARGER_STATUS, ""
             )
+            self._options[OPT_EV_CHARGER_RESUME_SCHEDULE] = user_input.get(
+                OPT_EV_CHARGER_RESUME_SCHEDULE, ""
+            )
             self._options[OPT_EV_REQUIRE_WATER_HEATER] = user_input.get(
                 OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
             )
@@ -194,6 +198,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_EV_CHARGER_STATUS,
                     default=current.get(OPT_EV_CHARGER_STATUS, ""),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    OPT_EV_CHARGER_RESUME_SCHEDULE,
+                    default=current.get(OPT_EV_CHARGER_RESUME_SCHEDULE, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="button")),
                 vol.Optional(
                     OPT_EV_REQUIRE_WATER_HEATER,
                     default=current.get(
