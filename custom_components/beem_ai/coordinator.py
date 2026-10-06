@@ -28,11 +28,13 @@ from .const import (
     DOMAIN,
     OPT_TARIFF_DEFAULT_PRICE,
     OPT_TARIFF_PERIODS_JSON,
-    EV_MODE_FORCE,
     OPT_EV_CHARGER_MODE,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_STATUS,
     OPT_EV_CHARGER_TOGGLE,
+    OPT_EV_FOLLOW_SCHEDULE,
+    DEFAULT_EV_FOLLOW_SCHEDULE,
     OPT_EV_REQUIRE_WATER_HEATER,
     OPT_EV_TARGET_SOC,
     OPT_EV_SOC_HYSTERESIS,
@@ -47,6 +49,7 @@ from .const import (
     OPT_WH_FULLY_HEATED_THRESHOLD,
     DEFAULT_WH_FULLY_HEATED_THRESHOLD,
     DEFAULT_EV_CHARGER_MODE,
+    EV_MODE_AUTO,
     DEFAULT_EV_REQUIRE_WATER_HEATER,
     DEFAULT_WATER_HEATER_MODE,
     DEFAULT_WH_MIN_DURATION_S,
@@ -385,12 +388,21 @@ class BeemAICoordinator(DataUpdateCoordinator):
         toggle_id = options.get(OPT_EV_CHARGER_TOGGLE, "")
         power_id = options.get(OPT_EV_CHARGER_POWER, "")
         status_id = options.get(OPT_EV_CHARGER_STATUS, "") or None
+        # The resume-schedule button and the Follow Wallbox Schedule
+        # switch are judged tick by tick, so they are simply
+        # (re)assigned — never a reason to reconfigure.
+        resume_id = options.get(OPT_EV_CHARGER_RESUME_SCHEDULE, "") or None
+        follow_schedule = bool(
+            options.get(OPT_EV_FOLLOW_SCHEDULE, DEFAULT_EV_FOLLOW_SCHEDULE)
+        )
 
         if not (toggle_id and power_id):
             self._ev_charger = None
             return
 
         if self._ev_charger is not None:
+            self._ev_charger.resume_schedule_entity_id = resume_id
+            self._ev_charger.follow_schedule = follow_schedule
             if self._ev_charger.entity_ids == (toggle_id, power_id, status_id):
                 return
             self._ev_charger.reconfigure(toggle_id, power_id, status_id)
@@ -401,10 +413,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
             toggle_entity_id=toggle_id,
             power_entity_id=power_id,
             status_entity_id=status_id,
+            resume_schedule_entity_id=resume_id,
+            follow_schedule=follow_schedule,
         )
         _LOGGER.info(
-            "EV charger controller configured: toggle=%s, power=%s, status=%s",
-            toggle_id, power_id, status_id,
+            "EV charger controller configured: toggle=%s, power=%s, "
+            "status=%s, resume_schedule=%s",
+            toggle_id, power_id, status_id, resume_id,
         )
 
     def _on_battery_update(self):
@@ -522,21 +537,20 @@ class BeemAICoordinator(DataUpdateCoordinator):
         we force-stop the water heater — bypassing its min-duration
         engagement.
 
-        Suspended entirely while the EV charger is in Force Charge: that
-        mode deliberately accepts going over the limit, so sacrificing
+        Suspended entirely while the EV charges hands-off at full power
+        — Force Charge, or a charge the Wallbox schedule started in Auto:
+        those deliberately accept going over the limit, so sacrificing
         the water heater would buy nothing.  The grace timer is reset so
-        it starts fresh if Force ends while still overloaded.
+        it starts fresh if that session ends while still overloaded.
         """
-        if (
-            self.ev_charger_mode == EV_MODE_FORCE
-            and self._ev_charger is not None
-            and self._ev_charger.is_charging
+        if self._ev_charger is not None and self._ev_charger.is_hands_off(
+            self.ev_charger_mode
         ):
             if self._overload_started_at is not None:
                 _LOGGER.info(
-                    "Overload handling suspended — EV charger in %s "
-                    "(cons=%.0fW)",
-                    EV_MODE_FORCE, consumption_w,
+                    "Overload handling suspended — EV charging hands-off "
+                    "at full power (mode=%s, cons=%.0fW)",
+                    self.ev_charger_mode, consumption_w,
                 )
             self._overload_started_at = None
             return
@@ -738,6 +752,39 @@ class BeemAICoordinator(DataUpdateCoordinator):
                     mode,
                 )
             self.async_update_listeners()
+
+    @property
+    def ev_follow_schedule(self) -> bool:
+        """The Follow Wallbox Schedule switch (lives on the controller)."""
+        if self._ev_charger is None:
+            return bool(
+                self._entry.options.get(
+                    OPT_EV_FOLLOW_SCHEDULE, DEFAULT_EV_FOLLOW_SCHEDULE,
+                )
+            )
+        return self._ev_charger.follow_schedule
+
+    async def async_set_ev_follow_schedule(self, follow: bool) -> None:
+        """Turn Follow Wallbox Schedule on or off.
+
+        Off, Auto goes back to piloting every session it finds running —
+        a scheduled charge in progress included, from the next tick.
+        On, an idle charger in Auto is handed back to its schedule right
+        away (as when Auto is selected): our pauses while the switch was
+        off took it off its schedule.  Like a mode change, that command
+        is skipped while BeemAI is disabled.
+        """
+        if self._ev_charger is None:
+            return
+        self._ev_charger.follow_schedule = follow
+        _LOGGER.info("EV charger: follow Wallbox schedule %s", follow)
+        if (
+            follow
+            and self.state_store.enabled
+            and self.ev_charger_mode == EV_MODE_AUTO
+        ):
+            await self._ev_charger.resume_schedule_if_idle()
+        self.async_update_listeners()
 
     # ---- Water heater mode control ----
 

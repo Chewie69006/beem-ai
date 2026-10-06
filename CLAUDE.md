@@ -73,6 +73,31 @@
 - `force_stop_overload()` arms the 15 min cooldown, otherwise the rule would
   switch the heater straight back on
 
+## EV Wallbox Schedule (Auto) and Full Power
+- Force Charge sets `FULL_POWER_AMPS` (32 A) once at start (or when selected
+  on a running session), then never writes the amperage again.  A session
+  merely *adopted* in Force (restart, resume from the app) keeps its amps
+- In Auto, a charge the Wallbox starts by itself is `StartMode.SCHEDULE` when
+  the last idle tick saw status `Scheduled` or we pressed "Resume schedule"
+  since (`_idle_scheduled`, refreshed on idle ticks only — a switch still
+  reading on right after our own pause must never become a 32 A session).
+  It gets 32 A once, then the Force contract: no regulation, no SoC /
+  no-demand stop, no 7 kW trim, and `is_hands_off()` suspends the
+  coordinator's `_handle_overload()`.  Under Manual it is piloted again
+- A pause via the API takes the Wallbox off its schedule.  When
+  `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, `_stop_session()` presses
+  it after every Auto-rule stop, and so does selecting Auto while the
+  charger is off.  Never on Disabled / master off / Manual stops.  The button
+  is plain config, assigned on every options update — not in `entity_ids`
+- All of the schedule behaviour is gated by the "Follow Wallbox Schedule"
+  switch (`OPT_EV_FOLLOW_SCHEDULE`, default on, stored in the options like
+  the mode selects, assigned to `controller.follow_schedule`).  Read live:
+  off pilots a running scheduled session from the next tick and never
+  presses the button; turning it on in Auto (BeemAI enabled) calls
+  `resume_schedule_if_idle()`.  Force's 32 A does not depend on it
+- The options flow starts from the stored options, so saving the form
+  keeps what the entities wrote (modes, thresholds, this switch)
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

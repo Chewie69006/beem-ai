@@ -13,10 +13,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.beem_ai.const import EV_MODE_FORCE
+from custom_components.beem_ai.const import (
+    EV_MODE_AUTO,
+    EV_MODE_FORCE,
+    EV_MODE_MANUAL,
+)
 from custom_components.beem_ai.coordinator import (
     BeemAICoordinator,
     OVERLOAD_WH_FORCE_STOP_GRACE_S,
+)
+from custom_components.beem_ai.ev_charger_controller import (
+    EvChargerController,
+    StartMode,
 )
 
 
@@ -128,17 +136,54 @@ async def test_overload_requires_positive_import(coordinator):
 
 
 # ---------------------------------------------------------------------
-# EV charger in Force Charge suspends overload handling entirely
+# EV charging hands-off at full power (Force Charge, or a Wallbox
+# schedule session in Auto) suspends overload handling entirely
 # ---------------------------------------------------------------------
 
 
-def _force_charging_ev(coordinator):
-    coordinator.ev_charger_mode = EV_MODE_FORCE
-    coordinator._ev_charger = MagicMock()
-    coordinator._ev_charger.is_charging = True
+def _charging_ev(coordinator, mode, start_mode=None):
+    """A real EV controller on a charging Wallbox, plus a heating WH.
+
+    Returns the dict backing the entity states, so a test can flip the
+    switch off.
+    """
+    states = {"switch.wallbox": "on", "number.wallbox_amps": "32"}
+
+    def get_state(entity_id):
+        if entity_id not in states:
+            return None
+        state = MagicMock()
+        state.state = states[entity_id]
+        return state
+
+    coordinator.hass.states.get.side_effect = get_state
+    coordinator.ev_charger_mode = mode
+    coordinator._ev_charger = EvChargerController(
+        hass=coordinator.hass,
+        toggle_entity_id="switch.wallbox",
+        power_entity_id="number.wallbox_amps",
+    )
+    coordinator._ev_charger._start_mode = start_mode
     coordinator._water_heater = MagicMock()
     coordinator._water_heater.is_heating = True
     coordinator._water_heater.force_stop_overload = AsyncMock()
+    return states
+
+
+def _force_charging_ev(coordinator):
+    return _charging_ev(coordinator, EV_MODE_FORCE, StartMode.FORCE)
+
+
+async def _overload_past_grace(coordinator):
+    with patch("time.monotonic", return_value=500.0):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
+    with patch("time.monotonic",
+               return_value=500.0 + OVERLOAD_WH_FORCE_STOP_GRACE_S + 10):
+        await coordinator._handle_overload(
+            consumption_w=9000.0, import_w=2000.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -176,8 +221,8 @@ async def test_force_charge_resets_armed_timer(coordinator):
 @pytest.mark.asyncio
 async def test_force_mode_but_ev_not_charging_still_protects(coordinator):
     """Force selected while the charger is off is not a free pass."""
-    _force_charging_ev(coordinator)
-    coordinator._ev_charger.is_charging = False
+    states = _force_charging_ev(coordinator)
+    states["switch.wallbox"] = "off"
 
     with patch("time.monotonic", return_value=500.0):
         await coordinator._handle_overload(
@@ -188,6 +233,39 @@ async def test_force_mode_but_ev_not_charging_still_protects(coordinator):
         await coordinator._handle_overload(
             consumption_w=9000.0, import_w=2000.0,
         )
+
+    coordinator._water_heater.force_stop_overload.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_never_stops_water_heater(coordinator):
+    """A charge the Wallbox schedule started runs at 32A like Force —
+    the 7 kW rule is suspended for it too."""
+    _charging_ev(coordinator, EV_MODE_AUTO, StartMode.SCHEDULE)
+
+    await _overload_past_grace(coordinator)
+
+    assert coordinator._overload_started_at is None
+    coordinator._water_heater.force_stop_overload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_piloted_session_still_protects(coordinator):
+    """A session BeemAI pilots in Auto keeps the overload rule."""
+    _charging_ev(coordinator, EV_MODE_AUTO, StartMode.AUTO)
+
+    await _overload_past_grace(coordinator)
+
+    coordinator._water_heater.force_stop_overload.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_under_manual_mode_protects(coordinator):
+    """Switching to Manual hands the session back to BeemAI's piloting,
+    overload rule included."""
+    _charging_ev(coordinator, EV_MODE_MANUAL, StartMode.SCHEDULE)
+
+    await _overload_past_grace(coordinator)
 
     coordinator._water_heater.force_stop_overload.assert_called_once()
 

@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, OPT_EV_FOLLOW_SCHEDULE
 from .sensor import _battery_device_info, _system_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ async def async_setup_entry(
         BeemAIAllowGridChargeSwitch(coordinator, entry),
         BeemAIPreventDischargeSwitch(coordinator, entry),
     ]
+    if coordinator.ev_charger is not None:
+        entities.append(BeemAIEvFollowScheduleSwitch(coordinator, entry))
     async_add_entities(entities)
 
 
@@ -83,6 +85,58 @@ class BeemAIEnabledSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         """Disable BeemAI."""
         await self.coordinator.async_set_enabled(False)
         self.async_write_ha_state()
+
+
+class BeemAIEvFollowScheduleSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch: should EV Auto follow the Wallbox's own schedule?
+
+    On: a charge the Wallbox schedule starts is left alone at 32 A, and
+    the charger is handed back to its schedule after BeemAI's stops.
+    Off: Auto pilots every session it finds running, as it used to.
+    Persisted in the config entry options, like the mode selects.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Follow Wallbox Schedule"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_translation_key = "ev_follow_schedule"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_ev_follow_schedule"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info for grouping entities."""
+        return _system_device_info(self._entry)
+
+    @property
+    def available(self) -> bool:
+        """Available while an EV charger is configured."""
+        return self.coordinator.ev_charger is not None
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if Auto follows the Wallbox schedule."""
+        return self.coordinator.ev_follow_schedule
+
+    async def _set(self, follow: bool) -> None:
+        await self.coordinator.async_set_ev_follow_schedule(follow)
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_EV_FOLLOW_SCHEDULE: follow},
+        )
+        self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Follow the Wallbox schedule in Auto."""
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Pilot every session in Auto, schedule or not."""
+        await self._set(False)
 
 
 class BeemAIAllowGridChargeSwitch(CoordinatorEntity, SwitchEntity):

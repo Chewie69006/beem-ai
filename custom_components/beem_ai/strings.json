@@ -54,12 +54,14 @@
         "data": {
           "ev_charger_toggle_entity": "EV charger start/stop switch",
           "ev_charger_power_entity": "EV charger amperage control",
-          "ev_charger_status_entity": "EV charger status sensor (optional)"
+          "ev_charger_status_entity": "EV charger status sensor (optional)",
+          "ev_charger_resume_schedule_entity": "Wallbox 'Resume schedule' button (optional)"
         },
         "data_description": {
           "ev_charger_toggle_entity": "A switch entity that starts/stops EV charging.",
           "ev_charger_power_entity": "A number entity (6-32A) that controls the wallbox charging amperage.",
-          "ev_charger_status_entity": "Optional. A sensor reporting the charger status (e.g. Wallbox 'status_description'). When it reports 'Waiting for car demand' / 'Ready' / 'Paused' for 60s, BeemAI stops the switch so it doesn't sit on while the car refuses current."
+          "ev_charger_status_entity": "Optional. A sensor reporting the charger status (e.g. Wallbox 'status_description'). When it reports 'Waiting for car demand' / 'Ready' / 'Paused' for 60s, BeemAI stops the switch so it doesn't sit on while the car refuses current. In Auto, with 'Follow Wallbox Schedule' on, a charge the Wallbox starts while this sensor reads 'Scheduled' is left to the schedule at 32 A.",
+          "ev_charger_resume_schedule_entity": "Optional — set it only if you use a schedule in the Wallbox app. A pause sent by BeemAI takes the Wallbox off its schedule; While 'Follow Wallbox Schedule' is on, BeemAI presses this button after each Auto stop (and when Auto is selected) so the scheduled charge still starts."
         }
       },
       "tariffs": {

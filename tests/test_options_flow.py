@@ -14,6 +14,7 @@ from custom_components.beem_ai.const import (
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_SWITCH,
 )
@@ -80,6 +81,34 @@ async def test_step_init_proceeds_to_tariffs():
     flow.async_step_tariffs.assert_called_once()
     assert flow._tariff_period_count == DEFAULT_TARIFF_PERIOD_COUNT
     assert flow._options == VALID_INIT_INPUT
+
+
+@pytest.mark.asyncio
+async def test_saving_the_form_keeps_entity_written_options():
+    """Modes, thresholds and the Follow Wallbox Schedule switch live in
+    the options too; saving the form used to reset them to defaults."""
+    stored = {
+        "ev_charger_mode": "Force Charge",
+        "ev_target_soc": 80.0,
+        "ev_follow_schedule": False,
+        OPT_EV_CHARGER_TOGGLE: "switch.old",
+    }
+    flow = _make_flow(options=stored)
+
+    await flow.async_step_init(user_input=VALID_INIT_INPUT)
+    await flow.async_step_tariffs(user_input={})
+    await flow.async_step_water_heater(user_input={})
+    await flow.async_step_ev_charger(user_input={
+        OPT_EV_CHARGER_TOGGLE: "switch.new",
+    })
+
+    saved = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved["ev_charger_mode"] == "Force Charge"
+    assert saved["ev_target_soc"] == 80.0
+    assert saved["ev_follow_schedule"] is False
+    # Fields shown in the form still win.
+    assert saved[OPT_EV_CHARGER_TOGGLE] == "switch.new"
+    assert saved[OPT_EV_CHARGER_POWER] == ""
 
 
 # ------------------------------------------------------------------
@@ -283,6 +312,36 @@ async def test_step_ev_charger_empty_creates_entry():
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
     assert saved_data[OPT_EV_CHARGER_TOGGLE] == ""
     assert saved_data[OPT_EV_CHARGER_POWER] == ""
+    assert saved_data[OPT_EV_CHARGER_RESUME_SCHEDULE] == ""
+
+
+@pytest.mark.asyncio
+async def test_step_ev_charger_stores_resume_schedule_button():
+    """The optional Wallbox 'Resume schedule' button is saved and shown
+    back as the form default."""
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_ev_charger(user_input={
+        OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
+        OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
+        OPT_EV_CHARGER_RESUME_SCHEDULE: "button.wallbox_resume_schedule",
+    })
+
+    saved_data = flow.async_create_entry.call_args.kwargs["data"]
+    assert (
+        saved_data[OPT_EV_CHARGER_RESUME_SCHEDULE]
+        == "button.wallbox_resume_schedule"
+    )
+
+    flow = _make_flow(options=saved_data)
+    await flow.async_step_ev_charger(user_input=None)
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    defaults = {str(k): k.default() for k in schema.schema}
+    assert (
+        defaults[OPT_EV_CHARGER_RESUME_SCHEDULE]
+        == "button.wallbox_resume_schedule"
+    )
 
 
 # ------------------------------------------------------------------

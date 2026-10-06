@@ -19,6 +19,7 @@ from .const import (
     OPT_TARIFF_PERIOD_COUNT,
     OPT_TARIFF_PERIODS_JSON,
     OPT_EV_CHARGER_POWER,
+    OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_STATUS,
     OPT_EV_CHARGER_TOGGLE,
     OPT_EV_REQUIRE_WATER_HEATER,
@@ -46,7 +47,11 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._tariff_period_count = user_input.get(
                 OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
             )
-            self._options = user_input
+            # Start from the stored options: the entities write theirs
+            # there too (modes, thresholds, Follow Wallbox Schedule), and
+            # saving this form must not reset them to their defaults.
+            # Every field the form shows is written back explicitly.
+            self._options = {**self.config_entry.options, **user_input}
             return await self.async_step_tariffs()
 
         current = self.config_entry.options
@@ -173,6 +178,9 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_EV_CHARGER_STATUS] = user_input.get(
                 OPT_EV_CHARGER_STATUS, ""
             )
+            self._options[OPT_EV_CHARGER_RESUME_SCHEDULE] = user_input.get(
+                OPT_EV_CHARGER_RESUME_SCHEDULE, ""
+            )
             self._options[OPT_EV_REQUIRE_WATER_HEATER] = user_input.get(
                 OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
             )
@@ -194,6 +202,10 @@ class BeemAIOptionsFlow(OptionsFlow):
                     OPT_EV_CHARGER_STATUS,
                     default=current.get(OPT_EV_CHARGER_STATUS, ""),
                 ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    OPT_EV_CHARGER_RESUME_SCHEDULE,
+                    default=current.get(OPT_EV_CHARGER_RESUME_SCHEDULE, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="button")),
                 vol.Optional(
                     OPT_EV_REQUIRE_WATER_HEATER,
                     default=current.get(
