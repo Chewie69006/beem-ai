@@ -30,6 +30,10 @@ OPT_EV_TARGET_SOC = "ev_target_soc"
 OPT_EV_SOC_HYSTERESIS = "ev_soc_hysteresis"
 OPT_EV_CHARGER_MODE = "ev_charger_mode"
 OPT_EV_REQUIRE_WATER_HEATER = "ev_require_water_heater"
+# "Follow Wallbox Schedule" switch: in Auto, leave a Wallbox-scheduled
+# charge alone at 32 A and hand the charger back to its schedule after
+# our own stops.  Off = Auto pilots every session it finds running.
+OPT_EV_FOLLOW_SCHEDULE = "ev_follow_schedule"
 OPT_WATER_HEATER_MODE = "water_heater_mode"
 OPT_WH_MIN_DURATION_S = "wh_min_duration_s"
 OPT_WH_SUSTAIN_S = "wh_sustain_s"
@@ -37,6 +41,7 @@ OPT_WH_POWER_ENTITY = "wh_power_entity"
 OPT_WH_FULLY_HEATED_THRESHOLD = "wh_fully_heated_threshold"
 
 DEFAULT_EV_REQUIRE_WATER_HEATER = True
+DEFAULT_EV_FOLLOW_SCHEDULE = True
 
 # --- Water heater modes ---
 WH_MODE_DISABLED = "Disabled"

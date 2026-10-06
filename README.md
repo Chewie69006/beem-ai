@@ -103,6 +103,7 @@ Entities are organized into three HA devices:
 | MQTT Connected | Binary sensor | MQTT live-data connection status |
 | Grid Charging Recommended | Binary sensor | Whether grid charging is planned |
 | Enabled | Switch | Enable / disable the automation entirely (see [Enabled switch](#enabled-switch--standing-down)) |
+| Follow Wallbox Schedule | Switch | EV Auto: leave a Wallbox-scheduled charge alone at 32 A (see [Wallbox schedule](#wallbox-schedule-auto)). On by default; only with an EV charger configured |
 
 ---
 
@@ -265,6 +266,12 @@ thresholds so the heater doesn't toggle every 5 minutes near the boundary.
 | Force Charge | Starts now at **32 A**, then never touches the amperage again — no SoC gate, no 7 kW limit |
 
 #### Wallbox schedule (Auto)
+
+Everything below applies while the **Follow Wallbox Schedule** switch (System
+device) is **on** — the default. Turn it off and Auto goes back to piloting
+every session it finds running, scheduled or not, and never presses "Resume
+schedule"; a scheduled charge in progress is piloted from the next tick.
+Turning it back on in Auto hands an idle charger back to its schedule.
 
 With the **status sensor** configured (Wallbox `status_description`), a charge
 the Wallbox starts by itself while it was waiting on its schedule (status

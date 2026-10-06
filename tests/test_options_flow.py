@@ -83,6 +83,34 @@ async def test_step_init_proceeds_to_tariffs():
     assert flow._options == VALID_INIT_INPUT
 
 
+@pytest.mark.asyncio
+async def test_saving_the_form_keeps_entity_written_options():
+    """Modes, thresholds and the Follow Wallbox Schedule switch live in
+    the options too; saving the form used to reset them to defaults."""
+    stored = {
+        "ev_charger_mode": "Force Charge",
+        "ev_target_soc": 80.0,
+        "ev_follow_schedule": False,
+        OPT_EV_CHARGER_TOGGLE: "switch.old",
+    }
+    flow = _make_flow(options=stored)
+
+    await flow.async_step_init(user_input=VALID_INIT_INPUT)
+    await flow.async_step_tariffs(user_input={})
+    await flow.async_step_water_heater(user_input={})
+    await flow.async_step_ev_charger(user_input={
+        OPT_EV_CHARGER_TOGGLE: "switch.new",
+    })
+
+    saved = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved["ev_charger_mode"] == "Force Charge"
+    assert saved["ev_target_soc"] == 80.0
+    assert saved["ev_follow_schedule"] is False
+    # Fields shown in the form still win.
+    assert saved[OPT_EV_CHARGER_TOGGLE] == "switch.new"
+    assert saved[OPT_EV_CHARGER_POWER] == ""
+
+
 # ------------------------------------------------------------------
 # async_step_tariffs
 # ------------------------------------------------------------------

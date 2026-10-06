@@ -29,6 +29,10 @@ before starting.  Without a water heater, the EV starts on surplus alone.
 
 Wallbox schedule
 ----------------
+Only while ``follow_schedule`` is on (the "Follow Wallbox Schedule"
+switch); off, Auto pilots every session it finds running, schedule or
+not, and never presses "Resume schedule".
+
 In Auto, a charge the Wallbox starts by itself while it was waiting on
 its own schedule (status ``Scheduled``, or right after we handed it back
 to its schedule) is the schedule's, not ours: it is raised to
@@ -155,6 +159,7 @@ class EvChargerController:
         power_entity_id: str,
         status_entity_id: str | None = None,
         resume_schedule_entity_id: str | None = None,
+        follow_schedule: bool = True,
     ) -> None:
         self._hass = hass
         self._toggle_entity_id = toggle_entity_id
@@ -164,6 +169,10 @@ class EvChargerController:
         # entity_ids: changing it must not reset a live session, so the
         # coordinator just assigns it on every options update.
         self.resume_schedule_entity_id = resume_schedule_entity_id or None
+        # "Follow Wallbox Schedule" switch, assigned the same way.  Read
+        # live: turning it off mid-session hands a scheduled charge back
+        # to the Auto rules on the next tick.
+        self.follow_schedule = follow_schedule
 
         # Session bookkeeping — only meaningful while charger is physically
         # on.  Cleared on every on→off transition (and re-initialized on
@@ -257,10 +266,26 @@ class EvChargerController:
         if not self._is_switch_on():
             return False
         ev_mode = _mode_from_str(mode)
-        return ev_mode == EvMode.FORCE or (
-            ev_mode == EvMode.AUTO
+        return ev_mode == EvMode.FORCE or self._schedule_owns_session(ev_mode)
+
+    def _schedule_owns_session(self, ev_mode: EvMode) -> bool:
+        """A Wallbox-scheduled charge we follow rather than pilot."""
+        return (
+            self.follow_schedule
+            and ev_mode == EvMode.AUTO
             and self._start_mode == StartMode.SCHEDULE
         )
+
+    async def resume_schedule_if_idle(self) -> None:
+        """Hand an idle charger back to its Wallbox schedule.
+
+        Whatever paused it before (Disabled, a Manual or Force session,
+        Auto stops while the schedule wasn't followed) also took it off
+        its schedule.  Not while it is charging: resuming the schedule
+        outside its window would stop the running session.
+        """
+        if self.follow_schedule and not self._is_switch_on():
+            await self._resume_schedule()
 
     # -- Manual / mode control --
 
@@ -344,12 +369,7 @@ class EvChargerController:
                 self._start_mode = StartMode.FORCE
                 await self._set_full_power(self._read_amps())
         elif ev_mode == EvMode.AUTO:
-            # Whatever paused the charger before (Disabled, a Manual or
-            # Force session) also took it off its schedule.  Not while it
-            # is charging: resuming the schedule outside its window would
-            # stop the running session.
-            if not self._is_switch_on():
-                await self._resume_schedule()
+            await self.resume_schedule_if_idle()
 
     # -- Core evaluate (called on every MQTT update, after water heater) --
 
@@ -491,7 +511,7 @@ class EvChargerController:
         self._idle_scheduled = False
         if ev_mode == EvMode.FORCE:
             self._start_mode = StartMode.FORCE
-        elif ev_mode == EvMode.AUTO and from_schedule:
+        elif ev_mode == EvMode.AUTO and from_schedule and self.follow_schedule:
             self._start_mode = StartMode.SCHEDULE
             self._handed_back = False
         else:
@@ -608,10 +628,7 @@ class EvChargerController:
         # Wallbox schedule: same hands-off contract as Force.  The
         # schedule ends the session itself; pausing it here would also
         # take the Wallbox off its schedule.
-        if (
-            ev_mode == EvMode.AUTO
-            and self._start_mode == StartMode.SCHEDULE
-        ):
+        if self._schedule_owns_session(ev_mode):
             return f"schedule: holding {amps}A (Wallbox schedule)"
 
         # Car-not-drawing stop (Wallbox status entity).  Once the car's
@@ -795,7 +812,7 @@ class EvChargerController:
         Wallbox schedule — our pause would otherwise cancel it."""
         await self._turn_off_and_restore()
         self._clear_session()
-        if ev_mode == EvMode.AUTO:
+        if ev_mode == EvMode.AUTO and self.follow_schedule:
             await self._resume_schedule()
 
     async def _resume_schedule(self) -> None:

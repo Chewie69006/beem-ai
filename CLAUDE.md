@@ -89,6 +89,14 @@
   it after every Auto-rule stop, and so does selecting Auto while the
   charger is off.  Never on Disabled / master off / Manual stops.  The button
   is plain config, assigned on every options update — not in `entity_ids`
+- All of the schedule behaviour is gated by the "Follow Wallbox Schedule"
+  switch (`OPT_EV_FOLLOW_SCHEDULE`, default on, stored in the options like
+  the mode selects, assigned to `controller.follow_schedule`).  Read live:
+  off pilots a running scheduled session from the next tick and never
+  presses the button; turning it on in Auto (BeemAI enabled) calls
+  `resume_schedule_if_idle()`.  Force's 32 A does not depend on it
+- The options flow starts from the stored options, so saving the form
+  keeps what the entities wrote (modes, thresholds, this switch)
 
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:

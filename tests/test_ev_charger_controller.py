@@ -2063,3 +2063,71 @@ async def test_setup_ev_charger_assigns_resume_button_without_reset():
     assert coord._ev_charger is ctrl
     assert ctrl.resume_schedule_entity_id is None
     assert ctrl._start_mode == StartMode.SCHEDULE
+
+
+# ---- Follow Wallbox Schedule switch off: the previous Auto behaviour --
+
+
+@pytest.mark.asyncio
+async def test_not_following_schedule_pilots_a_scheduled_start():
+    ctrl, hass = _schedule_controller(user_amps=10, resume=True)
+    ctrl.follow_schedule = False
+
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, **QUIET_NIGHT)
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, **QUIET_NIGHT)
+
+    assert ctrl._start_mode == StartMode.MANUAL
+    assert ctrl.current_amps < 10  # piloted down, never raised to 32
+    assert ctrl.is_hands_off("Auto") is False
+
+
+@pytest.mark.asyncio
+async def test_not_following_schedule_never_presses_resume():
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    ctrl.follow_schedule = False
+
+    await _solar_session_hits_soc_floor(ctrl, hass)
+    assert ctrl.is_charging is False
+    hass.set_status("Paused")
+    await ctrl.handle_mode_change("Auto")
+    await ctrl.resume_schedule_if_idle()
+
+    assert _press_calls(hass) == []
+    assert ctrl._handed_back is False
+
+
+@pytest.mark.asyncio
+async def test_turning_follow_off_mid_session_hands_it_to_auto_rules():
+    """Judged live: the next tick pilots the scheduled charge again —
+    here the 7 kW rule trims it."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+    assert ctrl.current_amps == 32
+
+    ctrl.follow_schedule = False
+    with patch("time.monotonic", return_value=1100.0):
+        await _eval(ctrl, **dict(NIGHT, soc=80.0,
+                                 consumption_w=MAX_CONSUMPTION_W + 500.0))
+
+    assert ctrl.is_hands_off("Auto") is False
+    assert ctrl.current_amps < 32
+
+    ctrl.follow_schedule = True
+    assert ctrl.is_hands_off("Auto") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_schedule_if_idle():
+    ctrl, hass = _schedule_controller(resume=True)
+    hass.set_status("Paused")
+
+    await ctrl.resume_schedule_if_idle()
+    assert len(_press_calls(hass)) == 1
+
+    hass.set_switch("on")
+    await ctrl.resume_schedule_if_idle()
+    assert len(_press_calls(hass)) == 1  # never while charging

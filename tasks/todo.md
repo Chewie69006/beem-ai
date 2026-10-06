@@ -34,3 +34,19 @@ deterministic: it read the real monotonic clock and failed on a host booted
 less than ~2 min before (pre-existing).  Full suite: 397 passed.  Not yet
 tried on the real HA instance — Wallbox pause / resume-schedule behaviour is
 from the HA integration source and its GitHub discussion, not observed here.
+
+## Follow-up: "Follow Wallbox Schedule" switch
+Per user: a switch to turn the schedule behaviour on/off — on keeps it,
+off restores the previous Auto behaviour.
+- [x] `OPT_EV_FOLLOW_SCHEDULE` (default on), `BeemAIEvFollowScheduleSwitch`
+      on the System device, only with an EV charger; persisted in the
+      options like the mode selects
+- [x] Gates: SCHEDULE adoption, the hands-off branch / `is_hands_off()`,
+      the hand-back after Auto stops and on Auto selection
+- [x] Read live: off mid-session → piloted from the next tick.  On in
+      Auto (BeemAI enabled) → `resume_schedule_if_idle()`
+- [x] Force Charge's 32 A is independent of the switch
+- [x] Options flow now starts from the stored options: saving the form
+      used to reset every entity-written option (modes, thresholds, this
+      switch) to its default — pre-existing
+Full suite: 417 passed.

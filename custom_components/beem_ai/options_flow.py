@@ -47,7 +47,11 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._tariff_period_count = user_input.get(
                 OPT_TARIFF_PERIOD_COUNT, DEFAULT_TARIFF_PERIOD_COUNT
             )
-            self._options = user_input
+            # Start from the stored options: the entities write theirs
+            # there too (modes, thresholds, Follow Wallbox Schedule), and
+            # saving this form must not reset them to their defaults.
+            # Every field the form shows is written back explicitly.
+            self._options = {**self.config_entry.options, **user_input}
             return await self.async_step_tariffs()
 
         current = self.config_entry.options
