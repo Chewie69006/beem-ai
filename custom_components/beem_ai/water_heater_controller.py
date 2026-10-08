@@ -26,6 +26,10 @@ HYSTERESIS_PCT = 10.0  # SoC hysteresis to prevent cycling
 MAX_CONSUMPTION_W = 7000  # Threshold used by the coordinator for overload coordination
 DEFAULT_MIN_DURATION_S = 15 * 60  # Default minimum heating duration (user-configurable)
 COOLDOWN_AFTER_EXTERNAL_OFF_S = 15 * 60  # Block restart after an unexpected OFF
+# How long the switch may keep reporting its old state after one of our own
+# commands before the mismatch counts as an external toggle.  The plug
+# confirms within one 5 s tick; raise it for a slower (cloud) switch.
+COMMAND_SETTLE_S = 15
 IMPORT_TOLERANCE_W = 50  # Small grid import below this is noise, not real deficit
 
 # Fully-heated detection: power must stay below this for FULLY_HEATED_SUSTAIN_S
@@ -78,6 +82,11 @@ class WaterHeaterController:
         # external transition (auto-off timer on the plug, manual flip,
         # integration glitch).
         self._expected_state: str | None = None
+        # When we last commanded the switch.  It keeps reporting its old
+        # state for a moment afterwards; until COMMAND_SETTLE_S has
+        # passed that mismatch is our own command in flight, not an
+        # external transition.
+        self._commanded_at: float | None = None
         # True while the heater is on *because we turned it on*.  An
         # externally started session (manual flip, another automation)
         # leaves this False so releasing control never kills a run we
@@ -196,6 +205,22 @@ class WaterHeaterController:
         wh_mode = _mode_from_str(mode)
         is_on = self._is_switch_on()
         observed = "on" if is_on else "off"
+
+        # Our own command is still in flight and the switch reports its
+        # old state.  Deciding on it would read our stop as an external
+        # on, then as an external off — which arms the cooldown and
+        # latches the off-peak window.  Skip the tick until it settles.
+        if self._commanded_at is not None:
+            if (
+                observed != self._expected_state
+                and now - self._commanded_at < COMMAND_SETTLE_S
+            ):
+                _LOGGER.debug(
+                    "WH eval: switch still %s after our turn_%s — waiting",
+                    observed, self._expected_state,
+                )
+                return
+            self._commanded_at = None
 
         # Accumulate energy from power entity
         wh_power = self._read_power_w(power_entity_id)
@@ -621,6 +646,7 @@ class WaterHeaterController:
             {"entity_id": self._switch_entity_id},
         )
         self._expected_state = "on"
+        self._commanded_at = time.monotonic()
         self._commanded_on = True
 
     async def _turn_off(self) -> None:
@@ -631,6 +657,7 @@ class WaterHeaterController:
             {"entity_id": self._switch_entity_id},
         )
         self._expected_state = "off"
+        self._commanded_at = time.monotonic()
         self._commanded_on = False
 
     async def force_stop_overload(self, consumption_w: float) -> None:

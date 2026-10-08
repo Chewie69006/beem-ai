@@ -26,6 +26,12 @@ from custom_components.beem_ai.ev_charger_controller import (
     EvChargerController,
     StartMode,
 )
+from custom_components.beem_ai.water_heater_controller import (
+    COOLDOWN_AFTER_EXTERNAL_OFF_S,
+    WaterHeaterController,
+)
+
+from .test_water_heater_controller import SWITCH_ID, FakeHass
 
 
 @pytest.fixture
@@ -291,3 +297,45 @@ def test_wh_offpeak_only_after_start_delay(coordinator):
         ) as dt:
             dt.now.return_value = datetime(2026, 10, 1, h, m)
             assert coordinator._wh_offpeak() is expected, (h, m)
+
+
+@pytest.mark.asyncio
+async def test_force_stop_on_slow_plug_keeps_offpeak_window_open(coordinator):
+    """7 Oct, 22:07 replayed through the real tick: the overload handler
+    force-stops the heater, then ``evaluate()`` runs in the same tick
+    while the plug still reads "on".  The top-up must resume after the
+    cooldown instead of staying locked until the end of the window."""
+    hass = FakeHass()
+    wh = WaterHeaterController(hass, SWITCH_ID)
+    coordinator._water_heater = wh
+    coordinator.water_heater_mode = "Auto"
+    battery = coordinator.state_store.battery
+
+    async def tick(t, meter_w):
+        battery.meter_power_w = meter_w
+        with patch("time.monotonic", return_value=t), patch.object(
+            coordinator, "_wh_offpeak", return_value=True
+        ):
+            await coordinator._evaluate_surplus_diverters(
+                soc=9.0, export_w=0.0,
+            )
+
+    await tick(1000.0, 700.0)
+    assert wh.is_heating
+
+    hass.lag = True
+    await tick(1200.0, 7688.0)  # the car starts charging: overload armed
+    await tick(1200.0 + OVERLOAD_WH_FORCE_STOP_GRACE_S, 9451.0)
+    hass.flush()
+    await tick(1220.0, 7570.0)
+    assert not wh.is_heating
+    assert not wh._offpeak_done
+
+    # The car is done; the cooldown armed by the force-stop has expired.
+    await tick(
+        1200.0 + OVERLOAD_WH_FORCE_STOP_GRACE_S
+        + COOLDOWN_AFTER_EXTERNAL_OFF_S,
+        700.0,
+    )
+    hass.flush()
+    assert wh.is_heating

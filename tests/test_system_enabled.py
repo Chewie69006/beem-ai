@@ -24,6 +24,7 @@ from custom_components.beem_ai.const import (
 from custom_components.beem_ai.coordinator import BeemAICoordinator
 from custom_components.beem_ai.ev_charger_controller import EvChargerController
 from custom_components.beem_ai.water_heater_controller import (
+    COMMAND_SETTLE_S,
     WaterHeaterController,
 )
 
@@ -395,20 +396,23 @@ async def test_wh_stop_does_not_care_who_started_it(mock_hass):
 @pytest.mark.asyncio
 async def test_wh_commanded_on_cleared_by_external_off(mock_hass):
     wh = _wh(mock_hass, switch_on=True)
-    await wh._turn_on()
+    with patch("time.monotonic", return_value=1000.0):
+        await wh._turn_on()
     assert wh._commanded_on is True
 
-    # Switch goes off behind our back (plug timer, manual flip).
+    # Switch goes off behind our back (plug timer, manual flip), once
+    # our own command has settled.
     mock_hass.states.get.return_value.state = "off"
-    await wh.evaluate(
-        soc=90.0,
-        export_w=0.0,
-        charge_power_w=0.0,
-        consumption_w=1000.0,
-        import_w=0.0,
-        soc_threshold=95.0,
-        charge_power_threshold=500.0,
-    )
+    with patch("time.monotonic", return_value=1000.0 + COMMAND_SETTLE_S):
+        await wh.evaluate(
+            soc=90.0,
+            export_w=0.0,
+            charge_power_w=0.0,
+            consumption_w=1000.0,
+            import_w=0.0,
+            soc_threshold=95.0,
+            charge_power_threshold=500.0,
+        )
 
     assert wh._commanded_on is False
 

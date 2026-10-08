@@ -50,3 +50,20 @@ off restores the previous Auto behaviour.
       used to reset every entity-written option (modes, thresholds, this
       switch) to its default — pre-existing
 Full suite: 417 passed.
+
+## Fix: water heater locked out for the night after an overload force-stop
+7 Oct, 22:07 — 36 min of off-peak heating, then nothing until 05:26.
+- [x] Root cause: `_handle_overload()` → `force_stop_overload()` then
+      `evaluate()` in the same tick; the plug still read "on", so our own
+      stop was taken for an external on, then an external off mid-session
+      → `_offpeak_done` latched
+- [x] `COMMAND_SETTLE_S` (15 s): `evaluate()` skips the tick while the
+      switch still shows the pre-command state; past it the old
+      external-transition handling applies unchanged
+- [x] Tests: `FakeHass.lag` / `flush()`; slow-switch stop and start,
+      command that never lands, manual off inside the settle window, and
+      the 22:07 replay through `_evaluate_surplus_diverters`.  All four
+      lag tests fail with the guard disabled
+- [ ] Not done: the ~45 s before a Wallbox-scheduled charge is adopted as
+      hands-off still costs one pointless 15 min pause
+Full suite: 422 passed.  Not deployed to the HA box.

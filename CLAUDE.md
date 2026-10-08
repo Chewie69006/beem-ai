@@ -72,6 +72,11 @@
   no restart until the next window
 - `force_stop_overload()` arms the 15 min cooldown, otherwise the rule would
   switch the heater straight back on
+- The plug reports a command a moment late, and the coordinator runs
+  `_handle_overload()` then `evaluate()` in the same tick: `evaluate()`
+  skips the tick while the switch still shows the pre-command state
+  (`COMMAND_SETTLE_S`, 15 s).  Without it our own force-stop reads as a
+  manual off mid-session and latches the window for the night
 
 ## EV Wallbox Schedule (Auto) and Full Power
 - Force Charge sets `FULL_POWER_AMPS` (32 A) once at start (or when selected

@@ -8,6 +8,7 @@ enough that the controller's branching logic exercises the same code
 paths as in production.
 """
 
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.beem_ai.water_heater_controller import (
+    COMMAND_SETTLE_S,
     COOLDOWN_AFTER_EXTERNAL_OFF_S,
     EXPORT_SOC_THRESHOLD,
     HYSTERESIS_PCT,
@@ -35,6 +37,10 @@ class FakeHass:
         self._switch_state = "off"
         self._switch_last_changed = datetime.now(timezone.utc)
         self._power_w: float | None = None
+        # A real plug reports its new state a moment after the command:
+        # with ``lag`` set, a service call only lands on ``flush()``.
+        self.lag = False
+        self._pending_switch_state: str | None = None
         self.services = MagicMock()
         self.services.async_call = AsyncMock(side_effect=self._service_call)
         self.states = MagicMock()
@@ -43,9 +49,17 @@ class FakeHass:
     async def _service_call(self, domain, service, data):
         if domain == "homeassistant":
             new = "on" if service == "turn_on" else "off"
-            if new != self._switch_state:
+            if self.lag:
+                self._pending_switch_state = new
+            elif new != self._switch_state:
                 self._switch_state = new
                 self._switch_last_changed = datetime.now(timezone.utc)
+
+    def flush(self) -> None:
+        """Let the last lagging command reach the switch."""
+        if self._pending_switch_state is not None:
+            self.set_switch(self._pending_switch_state)
+            self._pending_switch_state = None
 
     def _states_get(self, entity_id):
         if entity_id == SWITCH_ID:
@@ -1084,6 +1098,97 @@ async def test_offpeak_no_restart_right_after_overload_force_stop():
 
     await _offpeak_eval(ctrl, t=1100.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S)
     assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_restarts_after_force_stop_on_slow_switch(caplog):
+    """The plug still reads "on" in the tick that follows our own
+    force-stop.  That used to be read as an external on, then an
+    external off mid-session — which latched the whole off-peak window
+    (36 minutes of heating for the night)."""
+    ctrl, hass = _make_controller()
+    await _offpeak_eval(ctrl)
+    hass.set_power(2000.0)
+    await _offpeak_eval(ctrl, t=1100.0)
+
+    hass.lag = True
+    with caplog.at_level(logging.WARNING):
+        with patch("time.monotonic", return_value=1200.0):
+            await ctrl.force_stop_overload(9451.0)
+        # Same tick as the force-stop: the switch has not reported yet.
+        await _offpeak_eval(ctrl, t=1200.0)
+        assert ctrl.is_heating
+        hass.flush()
+        await _offpeak_eval(ctrl, t=1205.0)
+
+    assert not ctrl.is_heating
+    assert "externally" not in caplog.text
+    assert not ctrl._offpeak_done
+    # A stale "on" must not re-mark the stopped heater as an off-peak
+    # session either: the flag would outlive the window.
+    assert not ctrl._offpeak_session
+
+    # Still held back by the overload cooldown, armed at the force-stop...
+    restart_at = 1200.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S
+    await _offpeak_eval(ctrl, t=restart_at - 1)
+    hass.flush()
+    assert not ctrl.is_heating
+    # ...then the top-up resumes in the same window.
+    await _offpeak_eval(ctrl, t=restart_at)
+    hass.flush()
+    assert ctrl.is_heating
+
+
+@pytest.mark.asyncio
+async def test_offpeak_start_on_slow_switch_is_not_an_external_off(caplog):
+    """Same lag on the way up: our own start must not arm the cooldown
+    nor latch the window while the switch still reads "off"."""
+    ctrl, hass = _make_controller()
+    hass.lag = True
+    with caplog.at_level(logging.WARNING):
+        await _offpeak_eval(ctrl)
+        await _offpeak_eval(ctrl, t=1005.0)
+        assert not ctrl.is_heating
+        hass.flush()
+        await _offpeak_eval(ctrl, t=1010.0)
+
+    assert ctrl.is_heating
+    assert "externally" not in caplog.text
+    assert ctrl._cooldown_until_monotonic is None
+    assert not ctrl._offpeak_done
+    # One command was enough — no re-send while it was in flight.
+    assert hass.services.async_call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_command_that_never_lands_is_still_an_external_state():
+    """The settle window is bounded: a plug that never obeys (offline,
+    lost command) falls back to the unexpected-OFF handling."""
+    ctrl, hass = _make_controller()
+    hass.lag = True
+    await _offpeak_eval(ctrl)
+    await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S - 1)
+    assert ctrl._cooldown_until_monotonic is None
+
+    await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S)
+    assert ctrl._cooldown_until_monotonic is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_off_right_after_offpeak_start_is_still_honoured():
+    """A hand switch-off inside the settle window is only seen a few
+    seconds late — it still latches the window."""
+    ctrl, hass = _make_controller()
+    await _offpeak_eval(ctrl)
+    hass.set_switch("off")
+    await _offpeak_eval(ctrl, t=1005.0)
+    await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S)
+    assert ctrl._offpeak_done
+
+    await _offpeak_eval(
+        ctrl, t=1000.0 + COMMAND_SETTLE_S + COOLDOWN_AFTER_EXTERNAL_OFF_S + 1,
+    )
+    assert not ctrl.is_heating
 
 
 @pytest.mark.asyncio
