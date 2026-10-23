@@ -221,16 +221,11 @@ application.
 - **Tariffs** — tonight's off-peak end and tomorrow's next off-peak start
   (`TariffManager`); battery capacity, `min_soc`, round-trip efficiency.
 
-### Off-peak night: hold the battery or not
-Night heating runs inside off-peak (21:26–05:26).  Two options:
-1. **Hold** (preferred): `prevent_discharge` during off-peak, so the night
-   (heating included) runs on the grid at the off-peak price and the
-   battery starts the day at the target.  The night drops out of the
-   computation.
-2. **Let it discharge**: the night load comes out of the battery, so the
-   charge must cover it too, with the battery's losses on top.
-What the Beem app does today shows on the SoC history: does the battery go
-back down after reaching the target, before 05:26?
+### Off-peak night
+Night heating runs inside off-peak (21:26–05:26).  It should run on the grid
+at the off-peak price — not out of a battery that is then recharged the same
+night, with its losses on top — unless the battery holds more than tomorrow
+needs (see "Driving the battery during off-peak").
 
 ### Algorithm
 Hour-by-hour simulation over the peak window `[05:26, 21:26)`:
@@ -253,13 +248,48 @@ and P10 (shown as the cautious value).  No grid charge when
   listens to the `mobile_app_notification_action` event; a `tag` lets an
   update (forecast moved, stove switched on) replace the notification.
 
-### Applying the target (phase 3+)
-BeemAI drives the charge with its battery controls: at off-peak start,
-advanced mode + allow charge from grid (+ prevent discharge), charge power
-sized to finish within the window; CFTG off once SoC reaches the target
-(or Max SoC = target, if that's what the app's % does — to confirm); back
-to auto at 05:26 so the sun can fill the battery to 100 %.  Auto mode:
-apply unless refused before 21:26.
+### Driving the battery during off-peak (phase 3+)
+**Observed (user, 23 Oct):** with the Beem app's off-peak charge set, the
+battery never powers the house for the whole window — while charging, once
+at the target, and even when the window opens *above* the target (50 % set,
+65 % at 21:30: held at 65 % all night, the house on the grid).  So the
+battery must never be left in grid-charge mode for the whole window.
+
+BeemAI decides every 5 min during off-peak, against the target recomputed
+from the latest forecast:
+- **SoC above the target:** normal operation — the battery powers the house
+  (night heating included) down to the target, then holds (no discharge).
+  The excess was going to sit there all night; spent at night it saves the
+  off-peak kWh and leaves room for tomorrow's sun.
+- **SoC below the target:** hold (no discharge), and charge **just in
+  time**: start at `05:26 − missing kWh / (charge power × efficiency) −
+  margin`, so the target uses the latest forecast and the battery doesn't
+  sit charged for hours.
+- **Charge power:** the smallest step (500 / 1000 / 2500 / 5000 W) that
+  still fits the time left; keep clear of the EV schedule at 32 A and the
+  water heater's off-peak top-up (7 kW).
+- **05:26:** back to auto, so the sun can fill the battery to 100 %.
+- Auto mode (phase 4): apply unless refused before 21:26.
+
+Candidate native mechanism, to verify first: advanced mode with
+`minSoc` = target (discharge down to the target, then stop) and CFTG with
+`maxSoc` = target to charge up.  BeemAI's Min SoC entity is limited to
+10–50 % today (CharlesP44's goes to 80 %).
+
+**Experiments on the box first** (one off-peak night each, read from the
+MQTT lines of `beem_ai.log`):
+1. Advanced, CFTG off, prevent discharge off, `minSoc` below the SoC: does
+   the battery power the house, and stop at `minSoc`?
+2. Advanced, CFTG on, `maxSoc` above the SoC: does it charge straight away,
+   at `chargeFromGridMaxPower`, stop at `maxSoc` — and then power the house
+   or hold?
+3. Does `maxSoc` < 100 also cap the solar charge in the day?
+4. Which accepted range for `minSoc` / `maxSoc`?
+
+Once the target exists, the diverters' grid-charge reserve should key off
+"a target was planned for today" rather than off a detected grid charge
+alone: a battery already above the target holds energy planned for the
+house too.
 
 ### Feedback loop
 Logged daily (`beem_ai_data/target_history.json`): forecast P10/P50/P90 vs
@@ -278,7 +308,6 @@ custom values show where the user's judgement and the model disagree.
 4. Auto mode, learned corrections.
 
 ### Open questions
-- Which API field does the Beem app's percentage write (Max SoC?), and does
-  the battery discharge again during off-peak once it reaches it?
+- Which API field does the Beem app's percentage write (Max SoC?)
 - Daikin entities: energy (per unit? heating and cooling apart?) and the
   outdoor temperature sensor.
