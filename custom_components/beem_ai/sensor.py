@@ -175,6 +175,20 @@ async def async_setup_entry(
             extra_fn=_energy_history_attrs,
             device_type="system",
         ),
+        BeemAISensor(
+            coordinator, entry,
+            key="charge_target_suggestion",
+            name="Charge Target Suggestion",
+            icon="mdi:battery-clock",
+            device_class=None,
+            state_class=None,
+            unit="%",
+            value_fn=lambda c: (
+                c.suggestion.target_soc if c.suggestion else None
+            ),
+            extra_fn=_suggestion_attrs,
+            device_type="system",
+        ),
     ]
 
     # --- Per-array solar sensors (creates a device per panel array) ---
@@ -294,6 +308,13 @@ def _energy_history_attrs(coordinator) -> dict[str, Any]:
         "missing_statistics": history.missing,
         "last_days": [d.as_dict() for d in history.complete_days()[-7:]],
     }
+
+
+def _suggestion_attrs(coordinator) -> dict[str, Any]:
+    """What tonight's target was computed from, or why there is none."""
+    if coordinator.suggestion is None:
+        return {"reason": coordinator.suggestion_reason}
+    return coordinator.suggestion.as_attributes()
 
 
 class BeemAISensor(CoordinatorEntity, SensorEntity):

@@ -92,6 +92,7 @@ _ha_ce.OptionsFlow = _OptionsFlow
 _ha_ev = _mod("homeassistant.helpers.event")
 _ha_ev.async_call_later = MagicMock(return_value=MagicMock())
 _ha_ev.async_track_time_interval = MagicMock(return_value=MagicMock())
+_ha_ev.async_track_time_change = MagicMock(return_value=MagicMock())
 
 # homeassistant.util.dt — local "now" in the tests' time zone
 _mod("homeassistant.util")
@@ -207,6 +208,44 @@ class _EntitySelector:
 
 _ha_sel.EntitySelector = _EntitySelector
 _ha_sel.EntitySelectorConfig = _EntitySelectorConfig
+
+
+class _SelectSelectorConfig:
+    def __init__(self, options=None, mode=None, **kwargs):
+        self.options = list(options or [])
+        self.mode = mode
+
+
+class _SelectSelector:
+    """Validates against the configured options, like HA's."""
+
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        if value not in self.config.options:
+            import voluptuous as vol
+            raise vol.Invalid(f"{value!r} is not an option")
+        return value
+
+
+class _SelectSelectorMode:
+    DROPDOWN = "dropdown"
+    LIST = "list"
+
+
+class _TimeSelector:
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return str(value)
+
+
+_ha_sel.SelectSelector = _SelectSelector
+_ha_sel.SelectSelectorConfig = _SelectSelectorConfig
+_ha_sel.SelectSelectorMode = _SelectSelectorMode
+_ha_sel.TimeSelector = _TimeSelector
 
 # homeassistant.helpers.entity_platform
 _ha_ep = _mod("homeassistant.helpers.entity_platform")

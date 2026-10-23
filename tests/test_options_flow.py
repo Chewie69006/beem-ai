@@ -23,6 +23,11 @@ from custom_components.beem_ai.const import (
     OPT_COOLING_ENERGY_ENTITIES,
     OPT_OUTDOOR_TEMP_ENTITY,
     OPT_BASE_LOAD_OVERRIDE_W,
+    OPT_SOLAR_FORECAST_ENTITIES,
+    OPT_WEATHER_ENTITY,
+    OPT_NOTIFY_SERVICE,
+    OPT_SUGGESTION_TIME,
+    DEFAULT_SUGGESTION_TIME,
 )
 
 
@@ -48,6 +53,10 @@ def _make_flow(options=None, panel_arrays=None):
     ]
     flow.hass = MagicMock()
     flow.hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+    flow.hass.services.async_services.return_value = {
+        "notify": {"mobile_app_pixel": None, "persistent_notification": None},
+        "light": {"turn_on": None},
+    }
 
     flow.async_show_form = MagicMock()
     flow.async_create_entry = MagicMock()
@@ -108,6 +117,7 @@ async def test_saving_the_form_keeps_entity_written_options():
         OPT_EV_CHARGER_TOGGLE: "switch.new",
     })
     await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     saved = flow.async_create_entry.call_args.kwargs["data"]
     assert saved["ev_charger_mode"] == "Force Charge"
@@ -305,6 +315,8 @@ async def test_step_ev_charger_proceeds_to_consumption():
     flow.async_create_entry.assert_not_called()
 
     await flow.async_step_consumption(user_input={})
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "suggestion"
+    await flow.async_step_suggestion(user_input={})
     flow.async_create_entry.assert_called_once()
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
     assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
@@ -323,6 +335,7 @@ async def test_step_ev_charger_empty_creates_entry():
 
     await flow.async_step_ev_charger(user_input={})
     await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     flow.async_create_entry.assert_called_once()
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
@@ -344,6 +357,7 @@ async def test_step_ev_charger_stores_resume_schedule_button():
         OPT_EV_CHARGER_RESUME_SCHEDULE: "button.wallbox_resume_schedule",
     })
     await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
     assert (
@@ -414,6 +428,13 @@ async def test_full_flow():
         OPT_HEATING_ENERGY_ENTITIES: ["sensor.salon_heating"],
         OPT_OUTDOOR_TEMP_ENTITY: "sensor.outdoor",
     })
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "suggestion"
+
+    # Step 6: suggestion -> creates entry
+    await flow.async_step_suggestion(user_input={
+        OPT_SOLAR_FORECAST_ENTITIES: ["sensor.solcast_tomorrow"],
+        OPT_NOTIFY_SERVICE: "mobile_app_pixel",
+    })
 
     # Should create entry
     flow.async_create_entry.assert_called_once()
@@ -426,6 +447,9 @@ async def test_full_flow():
     assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
     assert saved_data[OPT_HEATING_ENERGY_ENTITIES] == ["sensor.salon_heating"]
     assert saved_data[OPT_OUTDOOR_TEMP_ENTITY] == "sensor.outdoor"
+    assert saved_data[OPT_SOLAR_FORECAST_ENTITIES] == ["sensor.solcast_tomorrow"]
+    assert saved_data[OPT_NOTIFY_SERVICE] == "mobile_app_pixel"
+    assert saved_data[OPT_SUGGESTION_TIME] == DEFAULT_SUGGESTION_TIME
 
     # Verify tariff periods
     periods = json.loads(saved_data[OPT_TARIFF_PERIODS_JSON])
@@ -459,6 +483,7 @@ async def test_step_consumption_defaults_and_saved_values():
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
     await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
     saved = flow.async_create_entry.call_args.kwargs["data"]
     assert saved[OPT_HEATING_ENERGY_ENTITIES] == []
     assert saved[OPT_COOLING_ENERGY_ENTITIES] == []
@@ -481,3 +506,50 @@ async def test_step_consumption_schema_validates():
     assert out[OPT_BASE_LOAD_OVERRIDE_W] == 300
     with pytest.raises(vol.Invalid):
         schema({OPT_BASE_LOAD_OVERRIDE_W: 9000})
+
+
+# ------------------------------------------------------------------
+# async_step_suggestion
+# ------------------------------------------------------------------
+
+
+def _schema_key(schema, name):
+    return next(k for k in schema.schema if str(k) == name)
+
+
+@pytest.mark.asyncio
+async def test_step_suggestion_lists_notify_services():
+    flow = _make_flow(options={
+        OPT_NOTIFY_SERVICE: "mobile_app_pixel",
+        OPT_SUGGESTION_TIME: "19:45:00",
+    })
+
+    await flow.async_step_suggestion(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    notify = _schema_key(schema, OPT_NOTIFY_SERVICE)
+    assert schema.schema[notify].config.options == [
+        "mobile_app_pixel", "persistent_notification",
+    ]
+    # Suggested, not a default: clearing the field stops the notification.
+    assert notify.description == {"suggested_value": "mobile_app_pixel"}
+    assert _schema_key(schema, OPT_SUGGESTION_TIME).default() == "19:45:00"
+
+    out = schema({OPT_NOTIFY_SERVICE: "persistent_notification"})
+    assert out[OPT_NOTIFY_SERVICE] == "persistent_notification"
+    with pytest.raises(vol.Invalid):
+        schema({OPT_NOTIFY_SERVICE: "turn_on"})
+
+
+@pytest.mark.asyncio
+async def test_step_suggestion_empty_saves_no_notification():
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_suggestion(user_input={})
+
+    saved = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved[OPT_SOLAR_FORECAST_ENTITIES] == []
+    assert saved[OPT_WEATHER_ENTITY] == ""
+    assert saved[OPT_NOTIFY_SERVICE] == ""
+    assert saved[OPT_SUGGESTION_TIME] == DEFAULT_SUGGESTION_TIME

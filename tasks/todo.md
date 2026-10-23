@@ -107,3 +107,22 @@ Per user: start ROADMAP §10, phase 1 (inputs + history, nothing driven).
       at +60 s, hourly, and 5 s after an options update; warning on failure
 - [x] Sensors "Base Load" and "Energy History" (System)
 - [x] Solcast / weather / notify service moved to phase 2, where they're used
+
+## Charge-target suggestion — phase 2: suggestion + notification
+- [x] `charge_planner.py`, pure: peak window from the tariff, Solcast
+      hourly / half-hourly parsing, forecast mean temperature, heating fit
+      (least squares vs heating degrees, slope ≥ 0), consumption model from
+      the history (base per clock hour, heating / cooling shapes), hourly
+      battery simulation with losses and saturation, P50 / P10 targets
+      rounded up to 5 %, notification text (fr / en)
+- [x] Hour totals clamped, not the base: a lagging heat-pump counter
+      makes some hours' base negative and its heating share carries it back
+- [x] Coordinator: suggestion after each history refresh; notification at
+      the configured time (`async_track_time_change`, re-armed on options
+      update); a missing suggestion is notified with its reason
+- [x] Options step "suggestion"; notify services listed from HA; the
+      field is a suggested value so it can be cleared
+- [x] Sensor "Charge Target Suggestion" (System)
+- [x] Checked on a real HA 2026.10 (scratch): `weather.get_forecasts`
+      response parsed, notify payload with `data.tag` accepted
+- [ ] Next (phase 3): actions on the notification, applying the target

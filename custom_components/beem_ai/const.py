@@ -48,6 +48,14 @@ OPT_OUTDOOR_TEMP_ENTITY = "outdoor_temperature_entity"
 # Fixed base load (W) instead of the learned one; 0 = learned.
 OPT_BASE_LOAD_OVERRIDE_W = "base_load_override_w"
 DEFAULT_BASE_LOAD_OVERRIDE_W = 0
+# Charge-target suggestion: solar forecast entities (Solcast Forecast
+# Today / Tomorrow, with their detailed attributes), a weather entity for
+# tomorrow's temperature, and the evening notification.
+OPT_SOLAR_FORECAST_ENTITIES = "solar_forecast_entities"
+OPT_WEATHER_ENTITY = "weather_entity"
+OPT_NOTIFY_SERVICE = "notify_service"
+OPT_SUGGESTION_TIME = "suggestion_time"
+DEFAULT_SUGGESTION_TIME = "20:00:00"
 
 DEFAULT_EV_REQUIRE_WATER_HEATER = True
 DEFAULT_EV_FOLLOW_SCHEDULE = True

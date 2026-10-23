@@ -318,8 +318,11 @@ custom values show where the user's judgement and the model disagree.
    (bootstrap and log are the same thing), inputs in the options (heating /
    cooling counters, outdoor temperature, EV power sensor, base-load
    override), System sensors "Base Load" and "Energy History".
-2. Solcast, weather and notify-service options; suggestion sensor +
-   evening notification (information only).
+2. ✓ **Suggestion + evening notification** — implemented:
+   `charge_planner.py` (pure), options step "suggestion" (Solcast sensors,
+   weather entity, notify service, time — an option rather than a `time`
+   entity), System sensor "Charge Target Suggestion".  Not yet: the
+   pellet-stove switch, the daily feedback log and yesterday's recap.
 3. Notification actions + applying the target.
 4. Auto mode, learned corrections.
 

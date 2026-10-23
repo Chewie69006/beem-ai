@@ -113,6 +113,22 @@
           "outdoor_temperature_entity": "Outdoor temperature, for the heating vs temperature history (e.g. a Daikin unit's outdoor temperature).",
           "base_load_override_w": "The always-on consumption, learned from the night hours (01:00-05:00) once a few nights are available. Set a value to use it instead."
         }
+      },
+      "suggestion": {
+        "title": "Charge suggestion",
+        "description": "Optional. Every evening BeemAI suggests the battery level to reach by the end of the off-peak window, from tomorrow's solar forecast and the consumption model. Information only: no battery setting is changed.",
+        "data": {
+          "solar_forecast_entities": "Solar forecast sensors",
+          "weather_entity": "Weather forecast",
+          "notify_service": "Notification service",
+          "suggestion_time": "Notification time"
+        },
+        "data_description": {
+          "solar_forecast_entities": "Solcast 'Forecast Today' and 'Forecast Tomorrow' (any sensor with a 'detailedHourly' or 'detailedForecast' attribute).",
+          "weather_entity": "For tomorrow's temperature (heating). Without it, the last days' temperature is used.",
+          "notify_service": "Where to send the evening suggestion (e.g. mobile_app_<phone>). Leave empty for no notification.",
+          "suggestion_time": "When to send it — before the off-peak window starts."
+        }
       }
     }
   }

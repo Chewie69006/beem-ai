@@ -295,6 +295,27 @@ power sensor. Two System sensors show the result:
 
 Nothing is controlled from this yet.
 
+### Tonight's charge suggestion
+
+Every evening (20:00 by default) BeemAI can send a notification to the HA
+mobile app with the battery level to reach by the end of the off-peak window:
+
+> Charge conseillée : 55 % à 05:26 (prudent : 70 %).
+> Soleil : 6,2 kWh (3,9 – 8,1).
+> Conso 05:26–21:26 : 14,0 kWh, dont chauffage 4,1 kWh (6 °C).
+> Batterie maintenant : 32 %.
+
+It simulates the battery hour by hour over the next peak window (the
+consumption model above, tomorrow's Solcast forecast, tomorrow's temperature
+for the heating) and keeps the smallest level that never goes under the
+battery's Min SoC. "Prudent" is the same with the pessimistic (P10) sun.
+
+Options, last step **Charge suggestion**: the Solcast *Forecast Today* and
+*Forecast Tomorrow* sensors, a weather entity, the notification service and
+time. The **Charge Target Suggestion** sensor (System device) shows the value
+and what it was computed from. Information only — no battery setting is
+changed.
+
 ### EV Charger Modes
 
 | Mode | What BeemAI does |

@@ -113,6 +113,22 @@
           "outdoor_temperature_entity": "La température extérieure, pour l'historique chauffage / température (ex. la température extérieure d'une unité Daikin).",
           "base_load_override_w": "La consommation permanente, apprise sur les heures de nuit (01h-05h) dès que quelques nuits sont disponibles. Indiquez une valeur pour l'imposer."
         }
+      },
+      "suggestion": {
+        "title": "Suggestion de charge",
+        "description": "Optionnel. Chaque soir, BeemAI suggère le niveau de batterie à atteindre à la fin des heures creuses, d'après la prévision solaire du lendemain et le modèle de consommation. Pour information seulement : aucun réglage de la batterie n'est modifié.",
+        "data": {
+          "solar_forecast_entities": "Capteurs de prévision solaire",
+          "weather_entity": "Prévision météo",
+          "notify_service": "Service de notification",
+          "suggestion_time": "Heure de la notification"
+        },
+        "data_description": {
+          "solar_forecast_entities": "Les capteurs Solcast « Forecast Today » et « Forecast Tomorrow » (ou tout capteur avec un attribut « detailedHourly » ou « detailedForecast »).",
+          "weather_entity": "Pour la température du lendemain (chauffage). Sans elle, la température des derniers jours est utilisée.",
+          "notify_service": "Où envoyer la suggestion du soir (ex. mobile_app_<téléphone>). Laisser vide pour ne pas être notifié.",
+          "suggestion_time": "Quand l'envoyer — avant le début des heures creuses."
+        }
       }
     }
   }

@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_call_later,
+    async_track_time_change,
     async_track_time_interval,
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -65,6 +66,21 @@ from .const import (
     OPT_OUTDOOR_TEMP_ENTITY,
     OPT_BASE_LOAD_OVERRIDE_W,
     DEFAULT_BASE_LOAD_OVERRIDE_W,
+    OPT_SOLAR_FORECAST_ENTITIES,
+    OPT_WEATHER_ENTITY,
+    OPT_NOTIFY_SERVICE,
+    OPT_SUGGESTION_TIME,
+    DEFAULT_SUGGESTION_TIME,
+)
+from .charge_planner import (
+    Suggestion,
+    build_consumption_model,
+    mean_temperature,
+    no_suggestion_notification,
+    notification,
+    peak_window,
+    plan,
+    solar_by_hour,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
 from .energy_history import EnergyHistory, HistorySources, recorder_fetch
@@ -90,6 +106,8 @@ OVERLOAD_WH_FORCE_STOP_GRACE_S = 15.0
 # read waits a minute so the recorder and our own sensors are up.
 HISTORY_REFRESH_INTERVAL = timedelta(hours=1)
 HISTORY_FIRST_REFRESH_DELAY_S = 60
+# Evening notification: replaced in place on the phone by the next one.
+SUGGESTION_NOTIFY_TAG = "beem_ai_charge_target"
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -183,6 +201,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._daily_reset_unsub = None
         self._history_unsub = None
         self._history_first_unsub = None
+        self._suggestion_unsub = None
+
+        # Tonight's charge suggestion (information only), or why there
+        # is none.
+        self.suggestion: Suggestion | None = None
+        self.suggestion_reason: str | None = "not computed yet"
         self._last_reset_date = None
 
         # Persistence directory (set in async_setup)
@@ -235,6 +259,18 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W,
             ) or 0
         )
+        self.solar_forecast_entities: list[str] = list(
+            options.get(OPT_SOLAR_FORECAST_ENTITIES) or []
+        )
+        self.weather_entity: str = str(
+            options.get(OPT_WEATHER_ENTITY, "") or ""
+        )
+        self.notify_service: str = str(
+            options.get(OPT_NOTIFY_SERVICE, "") or ""
+        )
+        self.suggestion_time: str = str(
+            options.get(OPT_SUGGESTION_TIME) or DEFAULT_SUGGESTION_TIME
+        )
 
     def _history_sources(self) -> HistorySources:
         """Statistic IDs: our own consumption / solar sensors, plus the
@@ -256,8 +292,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
             outdoor_temp=self.outdoor_temp_entity or None,
         )
 
-    async def _refresh_history(self, _now=None) -> None:
-        """Re-read the energy history from the recorder.
+    async def _refresh_history(self, _now=None) -> bool:
+        """Re-read the energy history from the recorder, then recompute
+        the charge suggestion.  Returns False if the read failed.
 
         A failure (recorder not loaded, database busy) only costs this
         refresh — the next one is an hour away, and nothing depends on
@@ -270,7 +307,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             )
         except Exception:  # noqa: BLE001
             _LOGGER.warning("Energy history refresh failed", exc_info=True)
-            return
+            return False
         hvac_days, hvac_since = history.hvac_history()
         _LOGGER.info(
             "Energy history: %d complete days of hourly data, %d days of "
@@ -280,7 +317,139 @@ class BeemAICoordinator(DataUpdateCoordinator):
             f" — no statistics for {history.missing}" if history.missing
             else "",
         )
+        await self._update_suggestion()
         self.async_update_listeners()
+        return True
+
+    # ---- Charge suggestion (information only) ----
+
+    async def _update_suggestion(self) -> None:
+        """Recompute tonight's suggested target from the latest inputs."""
+        try:
+            self.suggestion, self.suggestion_reason = (
+                await self._compute_suggestion()
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Charge suggestion failed", exc_info=True)
+            self.suggestion, self.suggestion_reason = None, "error"
+            return
+        if self.suggestion is None:
+            _LOGGER.info("Charge suggestion: none — %s", self.suggestion_reason)
+            return
+        s = self.suggestion
+        _LOGGER.info(
+            "Charge suggestion: %d %% at %s (cautious %s %%) — sun %.1f kWh "
+            "(P10 %.1f), use %.1f kWh of which heating %.1f kWh at %s °C "
+            "(%s, %s)",
+            s.target_soc, s.window.start.strftime("%H:%M"), s.cautious_soc,
+            s.solar_kwh, s.solar_p10_kwh, s.consumption_kwh, s.heating_kwh,
+            None if s.outdoor_temp_c is None else round(s.outdoor_temp_c, 1),
+            s.temp_source, s.heating_method,
+        )
+
+    async def _compute_suggestion(self) -> tuple[Suggestion | None, str | None]:
+        now = dt_util.now()
+        if self._tariff is None:
+            return None, "no tariff"
+        window = peak_window(self._tariff.is_in_cheapest_period, now)
+        if window is None:
+            return None, "no off-peak period configured"
+        model = build_consumption_model(self._energy_history)
+        if model is None:
+            return None, "not enough consumption history"
+        attrs = [
+            state.attributes
+            for entity_id in self.solar_forecast_entities
+            if (state := self.hass.states.get(entity_id)) is not None
+        ]
+        solar = solar_by_hour(attrs, now.tzinfo)
+        if not any(window.start <= h < window.end for h in solar):
+            return None, (
+                f"no solar forecast for {window.start.date().isoformat()}"
+            )
+        temp = await self._forecast_temperature(window.start.date(), now.tzinfo)
+        battery = self.state_store.battery
+        capacity = battery.capacity_kwh * (
+            battery.soh / 100.0 if battery.soh > 0 else 1.0
+        )
+        return plan(
+            window, solar, model, temp, capacity,
+            float(self.state_store.control.min_soc), now,
+        ), None
+
+    async def _forecast_temperature(self, day, tz) -> float | None:
+        """Mean forecast temperature of ``day``, from the weather entity."""
+        if not self.weather_entity:
+            return None
+        try:
+            resp = await self.hass.services.async_call(
+                "weather", "get_forecasts",
+                {"entity_id": self.weather_entity, "type": "hourly"},
+                blocking=True, return_response=True,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Weather forecast from %s failed", self.weather_entity,
+                exc_info=True,
+            )
+            return None
+        forecast = (resp or {}).get(self.weather_entity, {}).get("forecast", [])
+        return mean_temperature(forecast, day, tz)
+
+    def _schedule_suggestion(self) -> None:
+        """(Re-)arm the evening notification at the configured time."""
+        if self._suggestion_unsub:
+            self._suggestion_unsub()
+        parts = (self.suggestion_time.split(":") + ["0", "0"])[:3]
+        try:
+            hour, minute, second = (int(p) for p in parts)
+        except ValueError:
+            _LOGGER.warning(
+                "Invalid suggestion time %r — using %s",
+                self.suggestion_time, DEFAULT_SUGGESTION_TIME,
+            )
+            hour, minute, second = 20, 0, 0
+        self._suggestion_unsub = async_track_time_change(
+            self.hass, self._send_suggestion,
+            hour=hour, minute=minute, second=second,
+        )
+
+    async def _send_suggestion(self, _now=None) -> None:
+        """Evening notification: tonight's suggested charge, or why
+        there is none.  Information only — no battery setting changes.
+
+        The history is re-read first: fresher, and a restart just before
+        the time would otherwise find it still empty.
+        """
+        if not await self._refresh_history():
+            await self._update_suggestion()
+            self.async_update_listeners()
+        service = self.notify_service.removeprefix("notify.")
+        if not service:
+            return
+        lang = "fr" if str(self.hass.config.language).startswith("fr") else "en"
+        if self.suggestion is not None:
+            title, message = notification(
+                self.suggestion, self.state_store.battery.soc, lang,
+            )
+        else:
+            title, message = no_suggestion_notification(
+                self.suggestion_reason, lang,
+            )
+        try:
+            await self.hass.services.async_call(
+                "notify", service,
+                {
+                    "title": title,
+                    "message": message,
+                    "data": {"tag": SUGGESTION_NOTIFY_TAG},
+                },
+                blocking=False,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Notification via notify.%s failed", service, exc_info=True,
+            )
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -454,6 +623,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._history_first_unsub = async_call_later(
             self.hass, HISTORY_FIRST_REFRESH_DELAY_S, self._refresh_history,
         )
+        self._schedule_suggestion()
 
     # ---- Coordinator update ----
 
@@ -881,6 +1051,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._history_first_unsub = async_call_later(
             self.hass, 5, self._refresh_history,
         )
+        self._schedule_suggestion()
 
     # ---- EV charger mode control ----
 
@@ -1072,7 +1243,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
-        for unsub in (self._history_unsub, self._history_first_unsub):
+        for unsub in (
+            self._history_unsub, self._history_first_unsub,
+            self._suggestion_unsub,
+        ):
             if unsub:
                 unsub()
 

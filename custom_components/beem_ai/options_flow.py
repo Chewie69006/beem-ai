@@ -10,7 +10,14 @@ import voluptuous as vol
 
 from homeassistant.config_entries import OptionsFlow, ConfigFlowResult
 
-from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TimeSelector,
+)
 
 from .const import (
     DEFAULT_TARIFF_DEFAULT_PRICE,
@@ -32,6 +39,11 @@ from .const import (
     OPT_OUTDOOR_TEMP_ENTITY,
     OPT_BASE_LOAD_OVERRIDE_W,
     DEFAULT_BASE_LOAD_OVERRIDE_W,
+    OPT_SOLAR_FORECAST_ENTITIES,
+    OPT_WEATHER_ENTITY,
+    OPT_NOTIFY_SERVICE,
+    OPT_SUGGESTION_TIME,
+    DEFAULT_SUGGESTION_TIME,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -258,7 +270,7 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_BASE_LOAD_OVERRIDE_W] = user_input.get(
                 OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W
             )
-            return self.async_create_entry(title="", data=self._options)
+            return await self.async_step_suggestion()
 
         current = self.config_entry.options
 
@@ -293,5 +305,70 @@ class BeemAIOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="consumption",
+            data_schema=schema,
+        )
+
+    async def async_step_suggestion(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Last step — tonight's charge suggestion and its notification.
+
+        Information only: BeemAI computes a target and, if a notify
+        service is picked, sends it at the chosen time.  It doesn't change
+        any battery setting.
+        """
+        if user_input is not None:
+            self._options[OPT_SOLAR_FORECAST_ENTITIES] = list(
+                user_input.get(OPT_SOLAR_FORECAST_ENTITIES) or []
+            )
+            self._options[OPT_WEATHER_ENTITY] = user_input.get(
+                OPT_WEATHER_ENTITY, ""
+            )
+            self._options[OPT_NOTIFY_SERVICE] = user_input.get(
+                OPT_NOTIFY_SERVICE, ""
+            )
+            self._options[OPT_SUGGESTION_TIME] = user_input.get(
+                OPT_SUGGESTION_TIME, DEFAULT_SUGGESTION_TIME
+            )
+            return self.async_create_entry(title="", data=self._options)
+
+        current = self.config_entry.options
+        notify_services = sorted(
+            self.hass.services.async_services().get("notify", {})
+        )
+        notify = current.get(OPT_NOTIFY_SERVICE, "")
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    OPT_SOLAR_FORECAST_ENTITIES,
+                    default=current.get(OPT_SOLAR_FORECAST_ENTITIES, []),
+                ): EntitySelector(EntitySelectorConfig(
+                    domain="sensor", multiple=True,
+                )),
+                vol.Optional(
+                    OPT_WEATHER_ENTITY,
+                    default=current.get(OPT_WEATHER_ENTITY, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="weather")),
+                # Suggested, not default: the field can be cleared to
+                # stop the notification.
+                vol.Optional(
+                    OPT_NOTIFY_SERVICE,
+                    description={"suggested_value": notify or None},
+                ): SelectSelector(SelectSelectorConfig(
+                    options=notify_services,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )),
+                vol.Optional(
+                    OPT_SUGGESTION_TIME,
+                    default=current.get(
+                        OPT_SUGGESTION_TIME, DEFAULT_SUGGESTION_TIME,
+                    ),
+                ): TimeSelector(),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="suggestion",
             data_schema=schema,
         )
