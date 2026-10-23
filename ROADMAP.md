@@ -169,10 +169,28 @@ Implemented `async_refresh_battery_from_api()` in `coordinator.py` — ready to 
 
 ## 10. Overnight Charge Target Suggestion (planned — not implemented)
 
-**Goal:** at a configurable time (default 20:00), send a notification to the
-HA mobile app with tomorrow's solar forecast and a suggested battery target
-for tonight's off-peak charge.  Later: actionable buttons (apply / refuse /
-custom value), then automatic application.
+**Goal:** at a configurable time (default 20:00, before off-peak starts at
+21:26), send a notification to the HA mobile app with tomorrow's solar
+forecast and a suggested battery target for tonight's off-peak charge.
+Then actionable buttons (apply / refuse / custom value), then automatic
+application.
+
+### User setup (answers, 23 Oct)
+- Today the target is set by hand in the Beem app.  BeemAI already drives
+  the same API fields as the CharlesP44 integration (mode, allow charge from
+  grid, prevent discharge, charge power, min / max SoC): no extra
+  integration needed.  To find which field the app's percentage writes,
+  change it in the app and read the next "Control params refreshed from
+  API" line in `beem_ai.log` (every 2 min).
+- Off-peak 21:26 → 05:26 (configured in BeemAI): the battery has to carry
+  the house from 05:26 to 21:26.
+- Notify service unknown: the options flow will list the
+  `notify.mobile_app_*` services to pick from.
+- Weather: HA's default Met.no entity is enough for a temperature forecast
+  (hourly via `weather.get_forecasts`); Météo-France optional.
+- Heating: Daikin reversible heat pumps, already in HA (energy sensors and
+  an outdoor temperature sensor), plus a pellet stove that isn't connected.
+- Wallbox power is available through its integration.
 
 ### Inputs
 - **Solar** — the HA Solcast integration (BJReplay/ha-solcast-solar), entity
@@ -181,67 +199,86 @@ custom value), then automatic application.
   `detailedHourly` (`period_start`, `pv_estimate10/pv_estimate/pv_estimate90`
   in kW) — the hourly breakdown must be enabled in the Solcast options.  No
   extra Solcast API calls (the hobbyist quota stays with that integration).
-- **Base load** — a new hourly energy log (kWh per hour, last ~28 days),
-  integrated from MQTT consumption **minus** the water heater (power entity)
-  and the EV (Wallbox power / amps × 230 V): both run on surplus or at
-  off-peak straight from the grid, never on the battery's planned energy.
-  `ConsumptionAnalyzer` can't serve: its EMA (α = 0.1 per MQTT sample)
-  follows the last ~minute of each weekday-hour bucket, and its Welford mean
-  is all-time (no season).
-- **Talon** (always-on floor) — learned as the median night base load
-  (01:00–05:00, 14 days); a configurable override (W) while there's no data.
-- **Heating** — daily base load vs heating degree-days
-  (`HDD = max(0, 17 − T_mean)`): least-squares `E_day = a + b·HDD` over 30
-  days (needs ≥ 10 days with some spread in temperature), tomorrow's
-  `T_mean` from a weather entity (`weather.get_forecasts`, daily).  Without
-  a weather entity: average of the last 7 days (adapts with a lag).
+- **Base load** — hourly energy (last ~28 days) of the Beem consumption
+  **minus** the water heater (plug power), the EV (Wallbox power) and the
+  Daikin units: the first two run on surplus or off-peak straight from the
+  grid, the Daikin is modelled on its own (below).  `ConsumptionAnalyzer`
+  can't serve: its EMA (α = 0.1 per MQTT sample) follows the last ~minute of
+  each weekday-hour bucket, and its Welford mean is all-time (no season).
+- **Talon** (always-on floor) — median night base load (01:00–05:00, 14
+  days); a configurable override (W) as a fallback.
+- **Heating** — Daikin energy per hour vs outdoor temperature, learned from
+  the Daikin's own outdoor sensor (history) and forecast from the weather
+  entity (tomorrow, hourly).  Heating degree-hours
+  (`max(0, 17 − T)`), plus cooling degree-hours for summer.
+  The pellet stove: a "Pellet stove" switch on the System device — days it
+  is on are left out of the learning, and when it's on for tomorrow the
+  heating forecast drops (learned ratio, 0 to begin with).
+- **Bootstrap from the HA recorder** — long-term statistics (hourly) of the
+  Daikin energy and outdoor temperature, BeemAI consumption / solar, the
+  water-heater plug and the Wallbox: the model can start from last winter
+  instead of waiting weeks for data.
 - **Tariffs** — tonight's off-peak end and tomorrow's next off-peak start
   (`TariffManager`); battery capacity, `min_soc`, round-trip efficiency.
 
+### Off-peak night: hold the battery or not
+Night heating runs inside off-peak (21:26–05:26).  Two options:
+1. **Hold** (preferred): `prevent_discharge` during off-peak, so the night
+   (heating included) runs on the grid at the off-peak price and the
+   battery starts the day at the target.  The night drops out of the
+   computation.
+2. **Let it discharge**: the night load comes out of the battery, so the
+   charge must cover it too, with the battery's losses on top.
+What the Beem app does today shows on the SoC history: does the battery go
+back down after reaching the target, before 05:26?
+
 ### Algorithm
-Hour-by-hour simulation over the peak window `[HC end, next HC start)`:
-`E(h+1) = min(capacity, E(h) − (cons(h) − solar(h)))`.  The suggested target
-is the smallest start energy for which `E(h) ≥ min_soc` all the way to the
-next off-peak window, rounded up to 5 %, clamped to `[min_soc, 100]`.
-Solving it per hour (not on daily totals) catches the morning and evening
-deficits that a sunny midday can't carry over once the battery is full.
-Run with solar P50 × learned correction (suggested) and P10 (shown as the
-cautious value).  No grid charge when `HC price / efficiency ≥ HP price`.
+Hour-by-hour simulation over the peak window `[05:26, 21:26)`:
+`E(h+1) = min(capacity, E(h) − (base(h) + heating(h) − solar(h)))`.  The
+suggested target is the smallest start energy for which `E(h) ≥ min_soc`
+all the way to 21:26, rounded up to 5 %, clamped to `[min_soc, 100]`.
+Solving it per hour (not on daily totals) catches the cold morning before
+sunrise and the evening peak, which a sunny midday can't carry over once
+the battery is full.  Run with solar P50 × learned correction (suggested)
+and P10 (shown as the cautious value).  No grid charge when
+`HC price / efficiency ≥ HP price`.
 
 ### Notification
 - Time: `time` entity on the System device (default 20:00); target: a
   `notify.mobile_app_*` service picked in the options.
 - Message: forecast P50 (P10–P90), consumption forecast (of which heating at
   the forecast temperature), suggested target, yesterday's recap.
-- Actions (companion app, Android and iOS): `APPLY`, `REFUSE`, and a
-  `textInput` action for a custom % (`reply_text`).  BeemAI listens to the
-  `mobile_app_notification_action` event; a `tag` lets a 23:00 refresh
-  replace the notification if the forecast moved.
+- Actions (companion app; Android shows 3 at most): `APPLY` (suggested %),
+  a `textInput` action for a custom % (`reply_text`), `REFUSE`.  BeemAI
+  listens to the `mobile_app_notification_action` event; a `tag` lets an
+  update (forecast moved, stove switched on) replace the notification.
 
 ### Applying the target (phase 3+)
-BeemAI drives the charge itself: CFTG on at off-peak start, off once SoC
-reaches the target (as the archived smart CFTG did) — or sets Beem's own
-grid-charge target if that's how it is done today (to confirm).  Auto mode:
-apply unless refused before the off-peak window opens.
+BeemAI drives the charge with its battery controls: at off-peak start,
+advanced mode + allow charge from grid (+ prevent discharge), charge power
+sized to finish within the window; CFTG off once SoC reaches the target
+(or Max SoC = target, if that's what the app's % does — to confirm); back
+to auto at 05:26 so the sun can fill the battery to 100 %.  Auto mode:
+apply unless refused before 21:26.
 
 ### Feedback loop
 Logged daily (`beem_ai_data/target_history.json`): forecast P10/P50/P90 vs
-actual solar, predicted vs actual base load, suggested / applied target and
-the answer (apply, refuse, custom value), SoC at off-peak end, minimum SoC
-during peak hours, SoC at the next off-peak start.  The last one is the real
-error signal: ideal is reaching `min_soc` just as off-peak starts.  It feeds
-an EMA correction of the solar forecast and of the margin.  Refusals and
+actual solar, predicted vs actual base load and heating, suggested /
+applied target and the answer (apply, refuse, custom value), SoC at 05:26,
+minimum SoC during peak hours, SoC at 21:26.  The last one is the real error
+signal: ideal is reaching `min_soc` just as off-peak starts.  It feeds an
+EMA correction of the solar forecast and of the margin.  Refusals and
 custom values show where the user's judgement and the model disagree.
 
 ### Phases
-1. Data collection (hourly base load, actual solar, forecast snapshots) —
-   start early: the heating model needs weeks of varied temperatures.
+1. Inputs: Solcast, weather, Daikin, Wallbox, WH entities in the options;
+   hourly energy log; recorder bootstrap.
 2. Suggestion sensor + evening notification (information only).
 3. Notification actions + applying the target.
-4. Auto mode, learned corrections, heating model.
+4. Auto mode, learned corrections.
 
 ### Open questions
-How is the percentage set today (Beem app grid-charge target, or Max SoC in
-advanced mode)?  Off-peak hours?  Which notify service?  Is there a weather
-entity (Météo-France)?  Is the heating electric and seen by the Beem meter?
-Does the Wallbox expose its power?
+- Which API field does the Beem app's percentage write (Max SoC?), and does
+  the battery discharge again during off-peak once it reaches it?
+- Daikin entities: energy (per unit? heating and cooling apart?) and the
+  outdoor temperature sensor.
