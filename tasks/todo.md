@@ -67,3 +67,25 @@ Full suite: 417 passed.
 - [ ] Not done: the ~45 s before a Wallbox-scheduled charge is adopted as
       hands-off still costs one pointless 15 min pause
 Full suite: 422 passed.  Not deployed to the HA box.
+
+## Fix: water heater drains a grid-charged battery
+Per user: with night grid charging (cold, rainy days), once SoC is over the
+50 % threshold and the battery charges, the heater restarts — whatever filled
+the battery.  Wanted: heater (and EV) start on solar surplus only.
+- [x] Root cause: rule 2 = SoC ≥ threshold + battery charging ≥ 500 W with no
+      import.  The import check already keeps the grid's own charge out, but
+      the SoC part counts grid-bought energy: a 600 W morning trickle into a
+      battery grid-charged to 70 % starts a 2-3 kW heater, which runs on the
+      battery for the 15 min floor, stops, restarts 30 s later… down to 40 %
+- [x] `GridChargeTracker`: grid → battery (`clamp(import, 0, battery)`) ≥
+      200 W for 120 s in a row; reserve held 20 h after the last such tick,
+      persisted in `beem_ai_data/grid_charge.json`
+- [x] While reserved: WH rule 2 off (rule 1 = SoC ≥ 95 % and exporting
+      only), EV Auto target raised to ≥ 95 %
+- [x] "Grid Charge Reserve" binary sensor (System) with timestamps
+- [x] Tests: tracker, WH rule gating, coordinator replay of the rainy
+      morning (fails with the gate disabled), EV target
+- [x] `test_externally_turned_off_clears_session` pinned to a patched clock
+      again: since `COMMAND_SETTLE_S` it failed on hosts up < ~17 min
+- [ ] Not seen on the real HA box: no log access from here.  To confirm the
+      cause, grep the log for "Solar surplus detected" on a grid-charged day

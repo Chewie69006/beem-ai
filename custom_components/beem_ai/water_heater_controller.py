@@ -185,6 +185,7 @@ class WaterHeaterController:
         power_entity_id: str | None = None,
         fully_heated_threshold_wh: float = 0,
         offpeak: bool = False,
+        grid_charged: bool = False,
     ) -> None:
         """Evaluate state machine and act.
 
@@ -197,6 +198,12 @@ class WaterHeaterController:
         running for ``OFFPEAK_START_DELAY_S``.  In Auto, a heater that is
         not fully heated is then run from the grid until its thermostat
         cuts or the period ends.
+
+        ``grid_charged`` is True while the battery holds energy charged
+        from the grid (see ``grid_charge_tracker``).  Rule 2 — start on
+        SoC plus a charge trickle, the battery covering the rest — is
+        then off: only rule 1 (battery full and exporting, i.e. surplus
+        the battery can no longer take) starts a session.
 
         Branches are driven by the live switch-entity state read at the
         top of the tick — never an in-memory copy.
@@ -330,7 +337,8 @@ class WaterHeaterController:
         # validation) and heating (symmetric stop) see the same view.
         rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
         rule2 = (
-            soc >= soc_threshold
+            not grid_charged
+            and soc >= soc_threshold
             and charge_power_w >= charge_power_threshold
             and import_w <= IMPORT_TOLERANCE_W
         )
@@ -420,6 +428,7 @@ class WaterHeaterController:
                 import_w=import_w,
                 sustain_seconds=sustain_seconds,
                 rule1=rule1, rule2=rule2,
+                grid_charged=grid_charged,
             )
 
         _LOGGER.debug(
@@ -444,6 +453,7 @@ class WaterHeaterController:
         sustain_seconds: int = DEFAULT_SUSTAIN_SECONDS,
         rule1: bool | None = None,
         rule2: bool | None = None,
+        grid_charged: bool = False,
     ) -> str:
         """IDLE state: check if either rule triggers."""
         # Grace period never exceeds half the sustain window — otherwise a
@@ -454,7 +464,8 @@ class WaterHeaterController:
             rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
         if rule2 is None:
             rule2 = (
-                soc >= soc_threshold
+                not grid_charged
+                and soc >= soc_threshold
                 and charge_power_w >= charge_power_threshold
                 and import_w <= IMPORT_TOLERANCE_W
             )
@@ -525,6 +536,12 @@ class WaterHeaterController:
             return "idle: sustain reset (grace expired)"
         if self._sustained_since is not None:
             return "idle: in grace (conditions dipped)"
+        if grid_charged:
+            return (
+                f"idle: battery grid-charged — solar export only "
+                f"(rule1 SoC>={EXPORT_SOC_THRESHOLD:.0f} & "
+                f"export={export_w:.0f}W)"
+            )
         return (
             f"idle: no trigger (rule1={'y' if soc >= EXPORT_SOC_THRESHOLD else 'n'}/"
             f"export={export_w:.0f}W, "

@@ -56,6 +56,7 @@ from .const import (
     DEFAULT_WH_SUSTAIN_S,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
+from .grid_charge_tracker import RESERVED_MIN_SOC, GridChargeTracker
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
@@ -100,6 +101,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._consumption: ConsumptionAnalyzer | None = None
         self._water_heater: WaterHeaterController | None = None
         self._ev_charger: EvChargerController | None = None
+        # Remembers the last grid charge of the battery: the diverters
+        # keep off what was bought for the house (re-created with its
+        # file in async_setup).
+        self._grid_charge = GridChargeTracker()
         # Monotonic timestamp of the first tick observing overload
         # (cons ≥ OVERLOAD_THRESHOLD_W with positive import).  Cleared
         # when the overload clears.  Used to delay WH force-stop until
@@ -169,6 +174,11 @@ class BeemAICoordinator(DataUpdateCoordinator):
         """Return the EV charger controller (if configured)."""
         return self._ev_charger
 
+    @property
+    def grid_charge(self) -> GridChargeTracker:
+        """Return the grid charge tracker (battery reserve flag)."""
+        return self._grid_charge
+
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
         data = self._entry.data
@@ -214,6 +224,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
             default_price=options.get(OPT_TARIFF_DEFAULT_PRICE, DEFAULT_TARIFF_DEFAULT_PRICE),
             periods=tariff_periods,
         )
+
+        # Grid charge reserve — loaded before MQTT starts, so a restart
+        # the morning after a grid charge keeps the battery reserved.
+        self._grid_charge = GridChargeTracker(
+            os.path.join(data_dir, "grid_charge.json")
+        )
+        await self.hass.async_add_executor_job(self._grid_charge.load)
 
         # Analytics
         self._consumption = ConsumptionAnalyzer(data_dir=data_dir)
@@ -424,11 +441,16 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     def _on_battery_update(self):
         """Handle battery data update from MQTT."""
+        battery = self.state_store.battery
         # Record consumption
         if self._consumption:
-            self._consumption.record_consumption(
-                self.state_store.battery.consumption_w
-            )
+            self._consumption.record_consumption(battery.consumption_w)
+        # Track grid charging — a measurement, so it runs even while
+        # BeemAI is disabled.
+        if self._grid_charge.update(
+            battery.battery_power_w, battery.import_power_w,
+        ):
+            self.hass.async_add_executor_job(self._grid_charge.save)
         # Evaluate surplus diverters (water heater first, then EV charger)
         if self._water_heater or self._ev_charger:
             soc = self.state_store.battery.soc
@@ -459,6 +481,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         battery = self.state_store.battery
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
+        # After a grid charge, the battery's energy is the house's: the
+        # diverters only get what the panels produce beyond a nearly
+        # full battery.
+        grid_charged = self._grid_charge.is_reserved()
 
         await self._handle_overload(consumption_w, import_w)
 
@@ -477,6 +503,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 power_entity_id=self.wh_power_entity or None,
                 fully_heated_threshold_wh=self.wh_fully_heated_threshold,
                 offpeak=self._wh_offpeak(),
+                grid_charged=grid_charged,
             )
         # Note: the EV controller's per-tick overload reduction still
         # runs inside its evaluate() — that's the actual amps-trim
@@ -499,6 +526,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 wh_heating = self._water_heater.is_heating
             else:
                 wh_heating = None
+            # Auto starts at target SoC and pulls the battery toward it
+            # (SoC bias): after a grid charge, that target is raised so
+            # the car never draws on grid-bought energy.
+            target_soc = self.ev_target_soc
+            if grid_charged:
+                target_soc = max(target_soc, RESERVED_MIN_SOC)
             await self._ev_charger.evaluate(
                 soc,
                 meter_power_w=battery.meter_power_w,
@@ -506,7 +539,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 solar_power_w=battery.solar_power_w,
                 consumption_w=consumption_w,
                 water_heater_heating=wh_heating,
-                target_soc=self.ev_target_soc,
+                target_soc=target_soc,
                 soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
@@ -943,6 +976,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Save analytics
         if self._consumption:
             self._consumption.save()
+        self._grid_charge.save()
 
         # Close API client
         if self._api_client:

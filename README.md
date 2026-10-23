@@ -256,6 +256,23 @@ thresholds so the heater doesn't toggle every 5 minutes near the boundary.
 
 ---
 
+### Solar surplus only after a grid charge
+
+On a day the battery was charged from the grid (off-peak, because the sun
+won't be enough), its energy is reserved for the house. BeemAI detects the
+grid charge from the live power flows — however it was started — and for
+the next 20 hours:
+
+- the **water heater** only starts on real surplus: battery ≥ 95 % *and*
+  exporting. The "SoC ≥ threshold + battery charging" rule is off, so a weak
+  morning sun trickling into a grid-charged battery no longer starts it;
+- the **EV charger** in Auto uses a target SoC of at least 95 %.
+
+The off-peak top-up, Manual, Force Charge and the Wallbox schedule are not
+affected. The **Grid Charge Reserve** binary sensor (System device) shows
+when the reserve is active, with `last_grid_charge` and `reserved_until`
+attributes.
+
 ### EV Charger Modes
 
 | Mode | What BeemAI does |

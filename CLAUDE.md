@@ -103,6 +103,25 @@
 - The options flow starts from the stored options, so saving the form
   keeps what the entities wrote (modes, thresholds, this switch)
 
+## Grid Charge Reserve (diverters on solar surplus only)
+- After a grid charge, the battery holds energy bought for the house (the
+  day's solar was forecast short).  `GridChargeTracker` detects it from
+  live data, whatever started it: `clamp(import, 0, battery_power)` ≥
+  `GRID_CHARGE_MIN_W` (200 W) for `GRID_CHARGE_SUSTAIN_S` (120 s) in a row
+  — a load spike while charging from the panels is regulated away in
+  seconds and never counts
+- The battery stays reserved for `GRID_CHARGE_HOLD` (20 h) after the last
+  grid-charging tick; the timestamp is persisted in
+  `beem_ai_data/grid_charge.json` (a morning restart keeps the reserve)
+- While reserved: the water heater's rule 2 (SoC ≥ threshold + charge
+  trickle) is off — only rule 1 (SoC ≥ 95 % and exporting) starts it —
+  and the EV Auto target SoC is raised to at least `RESERVED_MIN_SOC`
+  (95 %).  Off-peak top-up, Manual, Force and the Wallbox schedule are
+  untouched
+- The tracker runs in `_on_battery_update()`, before the diverters and
+  even while BeemAI is disabled (it is a measurement).  Exposed as the
+  System binary sensor "Grid Charge Reserve"
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

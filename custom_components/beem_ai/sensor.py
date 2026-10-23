@@ -317,6 +317,7 @@ class BeemAIBinarySensor(CoordinatorEntity, BinarySensorEntity):
         device_class: BinarySensorDeviceClass | None,
         value_fn,
         device_type: str = "battery",
+        attrs_fn=None,
     ) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)
@@ -326,6 +327,7 @@ class BeemAIBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_icon = icon
         self._attr_device_class = device_class
         self._value_fn = value_fn
+        self._attrs_fn = attrs_fn
         self._entry = entry
         self._device_type = device_type
 
@@ -343,5 +345,15 @@ class BeemAIBinarySensor(CoordinatorEntity, BinarySensorEntity):
         """Return True if the binary sensor is on."""
         try:
             return self._value_fn(self.coordinator)
+        except Exception:
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra attributes, if the entity defines any."""
+        if self._attrs_fn is None:
+            return None
+        try:
+            return self._attrs_fn(self.coordinator)
         except Exception:
             return None
