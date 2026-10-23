@@ -176,12 +176,11 @@ Then actionable buttons (apply / refuse / custom value), then automatic
 application.
 
 ### User setup (answers, 23 Oct)
-- Today the target is set by hand in the Beem app.  BeemAI already drives
-  the same API fields as the CharlesP44 integration (mode, allow charge from
+- Today the target is set by hand in the Beem app: it is the Max SoC
+  (see "Driving the battery during off-peak").  BeemAI already drives the
+  same API fields as the CharlesP44 integration (mode, allow charge from
   grid, prevent discharge, charge power, min / max SoC): no extra
-  integration needed.  To find which field the app's percentage writes,
-  change it in the app and read the next "Control params refreshed from
-  API" line in `beem_ai.log` (every 2 min).
+  integration needed.
 - Off-peak 21:26 → 05:26 (configured in BeemAI): the battery has to carry
   the house from 05:26 to 21:26.
 - Notify service unknown: the options flow will list the
@@ -249,45 +248,42 @@ and P10 (shown as the cautious value).  No grid charge when
   update (forecast moved, stove switched on) replace the notification.
 
 ### Driving the battery during off-peak (phase 3+)
-**Observed (user, 23 Oct):** with the Beem app's off-peak charge set, the
-battery never powers the house for the whole window — while charging, once
-at the target, and even when the window opens *above* the target (50 % set,
-65 % at 21:30: held at 65 % all night, the house on the grid).  So the
-battery must never be left in grid-charge mode for the whole window.
+**Observed on the box (log, 22–23 Oct).**  Nothing switches at 21:26 or
+05:26 — the parameters stayed: advanced mode, charge from grid allowed at 5000 W, discharge not
+prevented, Min SoC 10 %, Max SoC 99 % (set to 100 % by hand on 23 Oct,
+09:15).  The app's percentage is **Max SoC**.  Every evening the user
+either turns charge from grid on and sets Max SoC, or turns it off; the
+setting then stays as it is through the next day.  With it on, the box
+itself:
+- runs normally in peak hours — no grid charge, discharges to cover the
+  house, charges from the sun;
+- holds during off-peak — does not power the house (user: even when it
+  starts the window above Max SoC: 50 % set, held at 65 % all night);
+- charges **late in the window**, up to Max SoC: 9 % at 02:30, ~5.5 kW
+  from the grid, 99 % by ~04:50, held until 05:26, back to normal after.
+  It knows the off-peak hours without the app storing them.
 
-BeemAI decides every 5 min during off-peak, against the target recomputed
-from the latest forecast:
-- **SoC above the target:** normal operation — the battery powers the house
-  (night heating included) down to the target, then holds (no discharge).
-  The excess was going to sit there all night; spent at night it saves the
-  off-peak kWh and leaves room for tomorrow's sun.
-- **SoC below the target:** hold (no discharge), and charge **just in
-  time**: start at `05:26 − missing kWh / (charge power × efficiency) −
-  margin`, so the target uses the latest forecast and the battery doesn't
-  sit charged for hours.
-- **Charge power:** the smallest step (500 / 1000 / 2500 / 5000 W) that
-  still fits the time left.  The car charges over the whole off-peak window
-  and the Wallbox throttles itself on the house consumption (its own load
-  management, e.g. Power Boost): no 7 kW clash to manage here, but every
-  watt into the battery is a watt the car doesn't get.  Likewise, while the
-  battery spends its excess it also feeds the car — fine, it just reaches
-  the target sooner.
-- **05:26:** back to auto, so the sun can fill the battery to 100 %.
+So the box already does the just-in-time charge.  BeemAI's part:
+- **Apply a target = charge from grid on + Max SoC = target**, before
+  21:26 — the user's evening routine, done for them.  Refused (or no
+  target needed): charge from grid off.
+- **05:26: charge from grid off, Max SoC back to 100 %**, so the sun can
+  fill the battery and nothing charges from the grid the next night unless
+  that evening's decision says so.  Left on at 100 %, the box would fill
+  the battery from the grid the next night by default.
+- **SoC above the target at 21:26** (the 65 % case): leave charge from grid
+  off, so the battery powers the house (night heating included) down to
+  the target; then turn it on — the box holds at Max SoC.
+  Spent at night, the excess saves the off-peak kWh and leaves room for
+  tomorrow's sun.
+- **Charge power** stays the user's setting (5000 W today).  The car charges
+  over the whole window and the Wallbox throttles itself on the house
+  consumption, so a lower power would only spread the battery's share over
+  more of the night — a possible refinement, not needed.
+- A watchdog checks the battery follows each command within a few MQTT
+  ticks (battery power sign vs the expected state) and otherwise puts the
+  parameters back and notifies.
 - Auto mode (phase 4): apply unless refused before 21:26.
-
-**No experiments on the box** (user's call): BeemAI switches between three
-states that are already known, and watches the SoC thresholds itself rather
-than relying on how Beem treats `minSoc` / `maxSoc`:
-- *normal* — auto mode, as in the daytime;
-- *grid charge* — what the app's off-peak charge does below its target;
-- *hold* — what it does at or above its target: the battery neither
-  charges nor powers the house.
-The only unknown is which fields the app writes for these, and it is
-already logged: `_refresh_control_params()` writes "Control params
-refreshed from API: {…}" every 2 min, so a normal off-peak night driven by
-the app shows them.  A watchdog checks the battery follows each command
-within a few MQTT ticks (battery power sign vs the expected state) and
-otherwise goes back to auto and notifies.
 
 Once the target exists, the diverters' grid-charge reserve should key off
 "a target was planned for today" rather than off a detected grid charge
@@ -311,7 +307,5 @@ custom values show where the user's judgement and the model disagree.
 4. Auto mode, learned corrections.
 
 ### Open questions
-- Which fields the Beem app writes for its off-peak charge (read from the
-  "Control params refreshed" lines of a night driven by the app)
 - Daikin entities: energy (per unit? heating and cooling apart?) and the
   outdoor temperature sensor.
