@@ -103,6 +103,75 @@
 - The options flow starts from the stored options, so saving the form
   keeps what the entities wrote (modes, thresholds, this switch)
 
+## Grid Charge Reserve (diverters on solar surplus only)
+- After a grid charge, the battery holds energy bought for the house (the
+  day's solar was forecast short).  `GridChargeTracker` detects it from
+  live data, whatever started it: `clamp(import, 0, battery_power)` ≥
+  `GRID_CHARGE_MIN_W` (200 W) for `GRID_CHARGE_SUSTAIN_S` (120 s) in a row
+  — a load spike while charging from the panels is regulated away in
+  seconds and never counts
+- The battery stays reserved for `GRID_CHARGE_HOLD` (20 h) after the last
+  grid-charging tick; the timestamp is persisted in
+  `beem_ai_data/grid_charge.json` (a morning restart keeps the reserve)
+- While reserved: the water heater's rule 2 (SoC ≥ threshold + charge
+  trickle) is off — only rule 1 (SoC ≥ 95 % and exporting) starts it —
+  and the EV Auto target SoC is raised to at least `RESERVED_MIN_SOC`
+  (95 %).  Off-peak top-up, Manual, Force and the Wallbox schedule are
+  untouched
+- The tracker runs in `_on_battery_update()`, before the diverters and
+  even while BeemAI is disabled (it is a measurement).  Exposed as the
+  System binary sensor "Grid Charge Reserve"
+
+## Energy History (charge-target inputs — read-only)
+- Phase 1 of ROADMAP §10.  `EnergyHistory` reads Home Assistant's
+  long-term statistics (recorder, hourly, kept forever) — no log of our
+  own, and the past is there from the first run.  Nothing is driven from it
+- `base = consumption − water heater − EV − heating − cooling`, per hour
+  over `HOURLY_DAYS` (28).  Sources: our own Consumption / Solar Power
+  sensors (found in the entity registry by unique ID), the WH power entity,
+  `OPT_EV_CHARGING_POWER_SENSOR`, `OPT_HEATING_ENERGY_ENTITIES` /
+  `OPT_COOLING_ENERGY_ENTITIES` (lists), `OPT_OUTDOOR_TEMP_ENTITY` — the
+  options step "consumption" (last step) plus one field in the EV step
+- Power sensors → hourly `mean` (W ≈ Wh); energy counters → hourly
+  `change`; the recorder converts units (`UNITS`).  Daily heating / cooling
+  and outdoor temperature over `HVAC_HISTORY_DAYS` (365) for the heating
+  model
+- Base load (talon) = median over the last 14 nights of the 01:00–05:00
+  window average, never hour by hour: the Daikin cloud reports by 2-hour
+  blocks, so heating lands in the wrong hour.  `OPT_BASE_LOAD_OVERRIDE_W`
+  > 0 replaces it
+- Refreshed one minute after start, every hour, and 5 s after an options
+  update (one-shot, re-armed).  A failure only logs a warning
+- System sensors "Base Load" (W) and "Energy History" (days, with the last
+  7 days' breakdown and `missing_statistics` — configured entities the
+  recorder has nothing for)
+
+## Charge Suggestion (ROADMAP §10 phase 2 — information only)
+- `charge_planner.py` is pure (no HA imports).  Window = the next peak
+  period after an off-peak one (`peak_window()` over
+  `TariffManager.is_in_cheapest_period`, minute steps): 05:26 → 21:26 here
+- Hour by hour over the window: `house(h) = base(h) + heating_day ×
+  heating_shape(h) + cooling_day × cooling_shape(h)` (base: mean of that
+  clock hour over 14 days; heating_day: least-squares fit of daily heating
+  vs `max(0, 17 − T_mean)` over the year, else last 7 days' average;
+  shapes: when the heating ran, 14 days).  Only the hour total is clamped
+  at 0 — a lagging heat-pump counter makes some hours' base negative
+- Target = smallest SoC keeping `E(h) ≥ min_soc` through the window, with
+  0.95 one-way losses and saturation at capacity × SoH; rounded up to 5 %.
+  P50 sun = suggestion, P10 sun = "cautious"
+- Inputs: `OPT_SOLAR_FORECAST_ENTITIES` (Solcast `detailedHourly`, else
+  half-hourly `detailedForecast`), `OPT_WEATHER_ENTITY`
+  (`weather.get_forecasts` hourly, mean of the window's day; else the last
+  2 days' measured temperature)
+- Recomputed after every history refresh (hourly) and at
+  `OPT_SUGGESTION_TIME` (default 20:00), when `OPT_NOTIFY_SERVICE` (e.g.
+  `mobile_app_x`) gets the notification — French if HA's language is
+  French, tag `beem_ai_charge_target`.  No suggestion → the notification
+  says why.  Sent whatever the Enabled switch: it drives nothing
+- System sensor "Charge Target Suggestion" (%) — attributes: window,
+  sun P10/P50/P90, consumption, heating, temperature and their sources,
+  hourly breakdown; `reason` when there is none
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

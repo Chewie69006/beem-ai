@@ -92,6 +92,25 @@ _ha_ce.OptionsFlow = _OptionsFlow
 _ha_ev = _mod("homeassistant.helpers.event")
 _ha_ev.async_call_later = MagicMock(return_value=MagicMock())
 _ha_ev.async_track_time_interval = MagicMock(return_value=MagicMock())
+_ha_ev.async_track_time_change = MagicMock(return_value=MagicMock())
+
+# homeassistant.util.dt — local "now" in the tests' time zone
+_mod("homeassistant.util")
+_ha_dt = _mod("homeassistant.util.dt")
+
+
+def _dt_now():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Europe/Paris"))
+
+
+_ha_dt.now = _dt_now
+
+# homeassistant.helpers.entity_registry
+_ha_er = _mod("homeassistant.helpers.entity_registry")
+_ha_er.async_get = MagicMock()
 
 # homeassistant.helpers.update_coordinator
 _ha_uc = _mod("homeassistant.helpers.update_coordinator")
@@ -168,9 +187,11 @@ _ha_sel = _mod("homeassistant.helpers.selector")
 
 
 class _EntitySelectorConfig:
-    def __init__(self, domain=None, device_class=None, **kwargs):
+    def __init__(self, domain=None, device_class=None, multiple=False,
+                 **kwargs):
         self.domain = domain
         self.device_class = device_class
+        self.multiple = multiple
 
 
 class _EntitySelector:
@@ -180,11 +201,51 @@ class _EntitySelector:
         self.config = config
 
     def __call__(self, value):
+        if self.config is not None and self.config.multiple:
+            return [str(v) for v in value or ()]
         return str(value) if value else ""
 
 
 _ha_sel.EntitySelector = _EntitySelector
 _ha_sel.EntitySelectorConfig = _EntitySelectorConfig
+
+
+class _SelectSelectorConfig:
+    def __init__(self, options=None, mode=None, **kwargs):
+        self.options = list(options or [])
+        self.mode = mode
+
+
+class _SelectSelector:
+    """Validates against the configured options, like HA's."""
+
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        if value not in self.config.options:
+            import voluptuous as vol
+            raise vol.Invalid(f"{value!r} is not an option")
+        return value
+
+
+class _SelectSelectorMode:
+    DROPDOWN = "dropdown"
+    LIST = "list"
+
+
+class _TimeSelector:
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return str(value)
+
+
+_ha_sel.SelectSelector = _SelectSelector
+_ha_sel.SelectSelectorConfig = _SelectSelectorConfig
+_ha_sel.SelectSelectorMode = _SelectSelectorMode
+_ha_sel.TimeSelector = _TimeSelector
 
 # homeassistant.helpers.entity_platform
 _ha_ep = _mod("homeassistant.helpers.entity_platform")

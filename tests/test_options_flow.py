@@ -3,6 +3,7 @@
 import json
 
 import pytest
+import voluptuous as vol
 from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.beem_ai.options_flow import BeemAIOptionsFlow
@@ -17,6 +18,16 @@ from custom_components.beem_ai.const import (
     OPT_EV_CHARGER_RESUME_SCHEDULE,
     OPT_EV_CHARGER_TOGGLE,
     OPT_WATER_HEATER_SWITCH,
+    OPT_EV_CHARGING_POWER_SENSOR,
+    OPT_HEATING_ENERGY_ENTITIES,
+    OPT_COOLING_ENERGY_ENTITIES,
+    OPT_OUTDOOR_TEMP_ENTITY,
+    OPT_BASE_LOAD_OVERRIDE_W,
+    OPT_SOLAR_FORECAST_ENTITIES,
+    OPT_WEATHER_ENTITY,
+    OPT_NOTIFY_SERVICE,
+    OPT_SUGGESTION_TIME,
+    DEFAULT_SUGGESTION_TIME,
 )
 
 
@@ -42,6 +53,10 @@ def _make_flow(options=None, panel_arrays=None):
     ]
     flow.hass = MagicMock()
     flow.hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+    flow.hass.services.async_services.return_value = {
+        "notify": {"mobile_app_pixel": None, "persistent_notification": None},
+        "light": {"turn_on": None},
+    }
 
     flow.async_show_form = MagicMock()
     flow.async_create_entry = MagicMock()
@@ -101,6 +116,8 @@ async def test_saving_the_form_keeps_entity_written_options():
     await flow.async_step_ev_charger(user_input={
         OPT_EV_CHARGER_TOGGLE: "switch.new",
     })
+    await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     saved = flow.async_create_entry.call_args.kwargs["data"]
     assert saved["ev_charger_mode"] == "Force Charge"
@@ -284,20 +301,30 @@ async def test_step_ev_charger_with_existing_values():
 
 
 @pytest.mark.asyncio
-async def test_step_ev_charger_creates_entry():
-    """EV charger input stores entities and creates entry."""
+async def test_step_ev_charger_proceeds_to_consumption():
+    """EV charger input stores entities and shows the last step."""
     flow = _make_flow()
     flow._options = dict(VALID_INIT_INPUT)
 
     await flow.async_step_ev_charger(user_input={
         OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
         OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
+        OPT_EV_CHARGING_POWER_SENSOR: "sensor.wallbox_charging_power",
     })
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "consumption"
+    flow.async_create_entry.assert_not_called()
 
+    await flow.async_step_consumption(user_input={})
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "suggestion"
+    await flow.async_step_suggestion(user_input={})
     flow.async_create_entry.assert_called_once()
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
     assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
     assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
+    assert (
+        saved_data[OPT_EV_CHARGING_POWER_SENSOR]
+        == "sensor.wallbox_charging_power"
+    )
 
 
 @pytest.mark.asyncio
@@ -307,6 +334,8 @@ async def test_step_ev_charger_empty_creates_entry():
     flow._options = dict(VALID_INIT_INPUT)
 
     await flow.async_step_ev_charger(user_input={})
+    await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     flow.async_create_entry.assert_called_once()
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
@@ -327,6 +356,8 @@ async def test_step_ev_charger_stores_resume_schedule_button():
         OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
         OPT_EV_CHARGER_RESUME_SCHEDULE: "button.wallbox_resume_schedule",
     })
+    await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
 
     saved_data = flow.async_create_entry.call_args.kwargs["data"]
     assert (
@@ -345,13 +376,14 @@ async def test_step_ev_charger_stores_resume_schedule_button():
 
 
 # ------------------------------------------------------------------
-# Full flow: init -> tariffs -> water_heater -> ev_charger -> entry
+# Full flow: init -> tariffs -> water_heater -> ev_charger ->
+# consumption -> entry
 # ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_full_flow():
-    """End-to-end: init -> tariffs -> water_heater -> ev_charger -> create_entry."""
+    """End-to-end: init -> … -> ev_charger -> consumption -> create_entry."""
     flow = _make_flow()
 
     # Step 1: init -> shows tariffs form
@@ -383,11 +415,25 @@ async def test_full_flow():
     flow.async_show_form.assert_called_once()
     assert flow.async_show_form.call_args.kwargs["step_id"] == "ev_charger"
 
-    # Step 4: ev_charger -> creates entry
+    # Step 4: ev_charger -> shows consumption form
     flow.async_show_form.reset_mock()
     await flow.async_step_ev_charger(user_input={
         OPT_EV_CHARGER_TOGGLE: "switch.ev_charger",
         OPT_EV_CHARGER_POWER: "number.ev_charger_amps",
+    })
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "consumption"
+
+    # Step 5: consumption -> creates entry
+    await flow.async_step_consumption(user_input={
+        OPT_HEATING_ENERGY_ENTITIES: ["sensor.salon_heating"],
+        OPT_OUTDOOR_TEMP_ENTITY: "sensor.outdoor",
+    })
+    assert flow.async_show_form.call_args.kwargs["step_id"] == "suggestion"
+
+    # Step 6: suggestion -> creates entry
+    await flow.async_step_suggestion(user_input={
+        OPT_SOLAR_FORECAST_ENTITIES: ["sensor.solcast_tomorrow"],
+        OPT_NOTIFY_SERVICE: "mobile_app_pixel",
     })
 
     # Should create entry
@@ -399,7 +445,111 @@ async def test_full_flow():
     assert saved_data[OPT_WATER_HEATER_SWITCH] == "switch.boiler"
     assert saved_data[OPT_EV_CHARGER_TOGGLE] == "switch.ev_charger"
     assert saved_data[OPT_EV_CHARGER_POWER] == "number.ev_charger_amps"
+    assert saved_data[OPT_HEATING_ENERGY_ENTITIES] == ["sensor.salon_heating"]
+    assert saved_data[OPT_OUTDOOR_TEMP_ENTITY] == "sensor.outdoor"
+    assert saved_data[OPT_SOLAR_FORECAST_ENTITIES] == ["sensor.solcast_tomorrow"]
+    assert saved_data[OPT_NOTIFY_SERVICE] == "mobile_app_pixel"
+    assert saved_data[OPT_SUGGESTION_TIME] == DEFAULT_SUGGESTION_TIME
 
     # Verify tariff periods
     periods = json.loads(saved_data[OPT_TARIFF_PERIODS_JSON])
     assert len(periods) == 2
+
+
+# ------------------------------------------------------------------
+# async_step_consumption
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_step_consumption_defaults_and_saved_values():
+    """Stored lists and the override come back as the form defaults; an
+    empty form saves empty lists and the learned base load (0)."""
+    stored = {
+        OPT_HEATING_ENERGY_ENTITIES: ["sensor.a_heating", "sensor.b_heating"],
+        OPT_COOLING_ENERGY_ENTITIES: ["sensor.a_cooling"],
+        OPT_OUTDOOR_TEMP_ENTITY: "sensor.outdoor",
+        OPT_BASE_LOAD_OVERRIDE_W: 250,
+    }
+    flow = _make_flow(options=stored)
+    await flow.async_step_consumption(user_input=None)
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    defaults = {str(k): k.default() for k in schema.schema}
+    assert defaults[OPT_HEATING_ENERGY_ENTITIES] == [
+        "sensor.a_heating", "sensor.b_heating",
+    ]
+    assert defaults[OPT_BASE_LOAD_OVERRIDE_W] == 250
+
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+    await flow.async_step_consumption(user_input={})
+    await flow.async_step_suggestion(user_input={})
+    saved = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved[OPT_HEATING_ENERGY_ENTITIES] == []
+    assert saved[OPT_COOLING_ENERGY_ENTITIES] == []
+    assert saved[OPT_OUTDOOR_TEMP_ENTITY] == ""
+    assert saved[OPT_BASE_LOAD_OVERRIDE_W] == 0
+
+
+@pytest.mark.asyncio
+async def test_step_consumption_schema_validates():
+    """The override is bounded; entity lists stay lists."""
+    flow = _make_flow()
+    await flow.async_step_consumption(user_input=None)
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+
+    out = schema({
+        OPT_HEATING_ENERGY_ENTITIES: ["sensor.x"],
+        OPT_BASE_LOAD_OVERRIDE_W: "300",
+    })
+    assert out[OPT_HEATING_ENERGY_ENTITIES] == ["sensor.x"]
+    assert out[OPT_BASE_LOAD_OVERRIDE_W] == 300
+    with pytest.raises(vol.Invalid):
+        schema({OPT_BASE_LOAD_OVERRIDE_W: 9000})
+
+
+# ------------------------------------------------------------------
+# async_step_suggestion
+# ------------------------------------------------------------------
+
+
+def _schema_key(schema, name):
+    return next(k for k in schema.schema if str(k) == name)
+
+
+@pytest.mark.asyncio
+async def test_step_suggestion_lists_notify_services():
+    flow = _make_flow(options={
+        OPT_NOTIFY_SERVICE: "mobile_app_pixel",
+        OPT_SUGGESTION_TIME: "19:45:00",
+    })
+
+    await flow.async_step_suggestion(user_input=None)
+
+    schema = flow.async_show_form.call_args.kwargs["data_schema"]
+    notify = _schema_key(schema, OPT_NOTIFY_SERVICE)
+    assert schema.schema[notify].config.options == [
+        "mobile_app_pixel", "persistent_notification",
+    ]
+    # Suggested, not a default: clearing the field stops the notification.
+    assert notify.description == {"suggested_value": "mobile_app_pixel"}
+    assert _schema_key(schema, OPT_SUGGESTION_TIME).default() == "19:45:00"
+
+    out = schema({OPT_NOTIFY_SERVICE: "persistent_notification"})
+    assert out[OPT_NOTIFY_SERVICE] == "persistent_notification"
+    with pytest.raises(vol.Invalid):
+        schema({OPT_NOTIFY_SERVICE: "turn_on"})
+
+
+@pytest.mark.asyncio
+async def test_step_suggestion_empty_saves_no_notification():
+    flow = _make_flow()
+    flow._options = dict(VALID_INIT_INPUT)
+
+    await flow.async_step_suggestion(user_input={})
+
+    saved = flow.async_create_entry.call_args.kwargs["data"]
+    assert saved[OPT_SOLAR_FORECAST_ENTITIES] == []
+    assert saved[OPT_WEATHER_ENTITY] == ""
+    assert saved[OPT_NOTIFY_SERVICE] == ""
+    assert saved[OPT_SUGGESTION_TIME] == DEFAULT_SUGGESTION_TIME

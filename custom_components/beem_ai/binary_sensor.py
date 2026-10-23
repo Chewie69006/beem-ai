@@ -47,4 +47,26 @@ async def async_setup_entry(
             value_fn=lambda c: c.water_heater.fully_heated if c.water_heater else False,
             device_type="system",
         ),
+        BeemAIBinarySensor(
+            coordinator, entry,
+            key="grid_charge_reserve",
+            name="Grid Charge Reserve",
+            icon="mdi:transmission-tower-import",
+            device_class=None,
+            value_fn=lambda c: c.grid_charge.is_reserved(),
+            attrs_fn=_grid_charge_attrs,
+            device_type="system",
+        ),
     ])
+
+
+def _grid_charge_attrs(coordinator) -> dict:
+    """When the grid last charged the battery, and when the reserve ends."""
+    tracker = coordinator.grid_charge
+    last = tracker.last_charge_at
+    until = tracker.reserved_until
+    return {
+        "grid_charging": tracker.charging,
+        "last_grid_charge": last.isoformat() if last else None,
+        "reserved_until": until.isoformat() if until else None,
+    }

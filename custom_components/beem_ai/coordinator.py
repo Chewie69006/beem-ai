@@ -13,8 +13,14 @@ import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .beem_api import BeemApiClient
 from .const import (
@@ -54,8 +60,31 @@ from .const import (
     DEFAULT_WATER_HEATER_MODE,
     DEFAULT_WH_MIN_DURATION_S,
     DEFAULT_WH_SUSTAIN_S,
+    OPT_EV_CHARGING_POWER_SENSOR,
+    OPT_HEATING_ENERGY_ENTITIES,
+    OPT_COOLING_ENERGY_ENTITIES,
+    OPT_OUTDOOR_TEMP_ENTITY,
+    OPT_BASE_LOAD_OVERRIDE_W,
+    DEFAULT_BASE_LOAD_OVERRIDE_W,
+    OPT_SOLAR_FORECAST_ENTITIES,
+    OPT_WEATHER_ENTITY,
+    OPT_NOTIFY_SERVICE,
+    OPT_SUGGESTION_TIME,
+    DEFAULT_SUGGESTION_TIME,
+)
+from .charge_planner import (
+    Suggestion,
+    build_consumption_model,
+    mean_temperature,
+    no_suggestion_notification,
+    notification,
+    peak_window,
+    plan,
+    solar_by_hour,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
+from .energy_history import EnergyHistory, HistorySources, recorder_fetch
+from .grid_charge_tracker import RESERVED_MIN_SOC, GridChargeTracker
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
 from .tariff_manager import TariffManager
@@ -73,6 +102,12 @@ UPDATE_INTERVAL = timedelta(minutes=2)
 # short grace) so the two diverters don't act on stale views.
 OVERLOAD_THRESHOLD_W = 7000
 OVERLOAD_WH_FORCE_STOP_GRACE_S = 15.0
+# Energy history: re-read the recorder's statistics every hour; the first
+# read waits a minute so the recorder and our own sensors are up.
+HISTORY_REFRESH_INTERVAL = timedelta(hours=1)
+HISTORY_FIRST_REFRESH_DELAY_S = 60
+# Evening notification: replaced in place on the phone by the next one.
+SUGGESTION_NOTIFY_TAG = "beem_ai_charge_target"
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -100,6 +135,16 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._consumption: ConsumptionAnalyzer | None = None
         self._water_heater: WaterHeaterController | None = None
         self._ev_charger: EvChargerController | None = None
+        # Remembers the last grid charge of the battery: the diverters
+        # keep off what was bought for the house (re-created with its
+        # file in async_setup).
+        self._grid_charge = GridChargeTracker()
+        # Hourly consumption breakdown and heating history, read from the
+        # recorder (charge-target suggestion inputs — nothing is driven
+        # from it yet).
+        self._energy_history = EnergyHistory(
+            lambda *args: recorder_fetch(self.hass, *args)
+        )
         # Monotonic timestamp of the first tick observing overload
         # (cons ≥ OVERLOAD_THRESHOLD_W with positive import).  Cleared
         # when the overload clears.  Used to delay WH force-stop until
@@ -150,9 +195,18 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 DEFAULT_WH_FULLY_HEATED_THRESHOLD,
             )
         )
+        self._read_history_options(options)
 
         # Schedule handles
         self._daily_reset_unsub = None
+        self._history_unsub = None
+        self._history_first_unsub = None
+        self._suggestion_unsub = None
+
+        # Tonight's charge suggestion (information only), or why there
+        # is none.
+        self.suggestion: Suggestion | None = None
+        self.suggestion_reason: str | None = "not computed yet"
         self._last_reset_date = None
 
         # Persistence directory (set in async_setup)
@@ -168,6 +222,234 @@ class BeemAICoordinator(DataUpdateCoordinator):
     def ev_charger(self) -> EvChargerController | None:
         """Return the EV charger controller (if configured)."""
         return self._ev_charger
+
+    @property
+    def grid_charge(self) -> GridChargeTracker:
+        """Return the grid charge tracker (battery reserve flag)."""
+        return self._grid_charge
+
+    @property
+    def energy_history(self) -> EnergyHistory:
+        """Return the energy history (recorder statistics)."""
+        return self._energy_history
+
+    @property
+    def base_load_w(self) -> float | None:
+        """Always-on load: the user's fixed value, else the learned one."""
+        if self.base_load_override_w > 0:
+            return float(self.base_load_override_w)
+        return self._energy_history.base_load_w()
+
+    def _read_history_options(self, options) -> None:
+        """Energy-history inputs, re-read on every options update."""
+        self.ev_charging_power_sensor: str = str(
+            options.get(OPT_EV_CHARGING_POWER_SENSOR, "") or ""
+        )
+        self.heating_energy_entities: list[str] = list(
+            options.get(OPT_HEATING_ENERGY_ENTITIES) or []
+        )
+        self.cooling_energy_entities: list[str] = list(
+            options.get(OPT_COOLING_ENERGY_ENTITIES) or []
+        )
+        self.outdoor_temp_entity: str = str(
+            options.get(OPT_OUTDOOR_TEMP_ENTITY, "") or ""
+        )
+        self.base_load_override_w: int = int(
+            options.get(
+                OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W,
+            ) or 0
+        )
+        self.solar_forecast_entities: list[str] = list(
+            options.get(OPT_SOLAR_FORECAST_ENTITIES) or []
+        )
+        self.weather_entity: str = str(
+            options.get(OPT_WEATHER_ENTITY, "") or ""
+        )
+        self.notify_service: str = str(
+            options.get(OPT_NOTIFY_SERVICE, "") or ""
+        )
+        self.suggestion_time: str = str(
+            options.get(OPT_SUGGESTION_TIME) or DEFAULT_SUGGESTION_TIME
+        )
+
+    def _history_sources(self) -> HistorySources:
+        """Statistic IDs: our own consumption / solar sensors, plus the
+        entities picked in the options."""
+        registry = er.async_get(self.hass)
+
+        def own(key: str) -> str | None:
+            return registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{self._entry.entry_id}_{key}",
+            )
+
+        return HistorySources(
+            consumption=own("consumption"),
+            solar=own("solar_power"),
+            water_heater=self.wh_power_entity or None,
+            ev=self.ev_charging_power_sensor or None,
+            heating=tuple(self.heating_energy_entities),
+            cooling=tuple(self.cooling_energy_entities),
+            outdoor_temp=self.outdoor_temp_entity or None,
+        )
+
+    async def _refresh_history(self, _now=None) -> bool:
+        """Re-read the energy history from the recorder, then recompute
+        the charge suggestion.  Returns False if the read failed.
+
+        A failure (recorder not loaded, database busy) only costs this
+        refresh — the next one is an hour away, and nothing depends on
+        it yet.
+        """
+        history = self._energy_history
+        try:
+            await history.async_refresh(
+                self._history_sources(), dt_util.now(),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Energy history refresh failed", exc_info=True)
+            return False
+        hvac_days, hvac_since = history.hvac_history()
+        _LOGGER.info(
+            "Energy history: %d complete days of hourly data, %d days of "
+            "heating/cooling since %s, base load %s W%s",
+            len(history.complete_days()), hvac_days, hvac_since,
+            None if self.base_load_w is None else round(self.base_load_w),
+            f" — no statistics for {history.missing}" if history.missing
+            else "",
+        )
+        await self._update_suggestion()
+        self.async_update_listeners()
+        return True
+
+    # ---- Charge suggestion (information only) ----
+
+    async def _update_suggestion(self) -> None:
+        """Recompute tonight's suggested target from the latest inputs."""
+        try:
+            self.suggestion, self.suggestion_reason = (
+                await self._compute_suggestion()
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Charge suggestion failed", exc_info=True)
+            self.suggestion, self.suggestion_reason = None, "error"
+            return
+        if self.suggestion is None:
+            _LOGGER.info("Charge suggestion: none — %s", self.suggestion_reason)
+            return
+        s = self.suggestion
+        _LOGGER.info(
+            "Charge suggestion: %d %% at %s (cautious %s %%) — sun %.1f kWh "
+            "(P10 %.1f), use %.1f kWh of which heating %.1f kWh at %s °C "
+            "(%s, %s)",
+            s.target_soc, s.window.start.strftime("%H:%M"), s.cautious_soc,
+            s.solar_kwh, s.solar_p10_kwh, s.consumption_kwh, s.heating_kwh,
+            None if s.outdoor_temp_c is None else round(s.outdoor_temp_c, 1),
+            s.temp_source, s.heating_method,
+        )
+
+    async def _compute_suggestion(self) -> tuple[Suggestion | None, str | None]:
+        now = dt_util.now()
+        if self._tariff is None:
+            return None, "no tariff"
+        window = peak_window(self._tariff.is_in_cheapest_period, now)
+        if window is None:
+            return None, "no off-peak period configured"
+        model = build_consumption_model(self._energy_history)
+        if model is None:
+            return None, "not enough consumption history"
+        attrs = [
+            state.attributes
+            for entity_id in self.solar_forecast_entities
+            if (state := self.hass.states.get(entity_id)) is not None
+        ]
+        solar = solar_by_hour(attrs, now.tzinfo)
+        if not any(window.start <= h < window.end for h in solar):
+            return None, (
+                f"no solar forecast for {window.start.date().isoformat()}"
+            )
+        temp = await self._forecast_temperature(window.start.date(), now.tzinfo)
+        battery = self.state_store.battery
+        capacity = battery.capacity_kwh * (
+            battery.soh / 100.0 if battery.soh > 0 else 1.0
+        )
+        return plan(
+            window, solar, model, temp, capacity,
+            float(self.state_store.control.min_soc), now,
+        ), None
+
+    async def _forecast_temperature(self, day, tz) -> float | None:
+        """Mean forecast temperature of ``day``, from the weather entity."""
+        if not self.weather_entity:
+            return None
+        try:
+            resp = await self.hass.services.async_call(
+                "weather", "get_forecasts",
+                {"entity_id": self.weather_entity, "type": "hourly"},
+                blocking=True, return_response=True,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Weather forecast from %s failed", self.weather_entity,
+                exc_info=True,
+            )
+            return None
+        forecast = (resp or {}).get(self.weather_entity, {}).get("forecast", [])
+        return mean_temperature(forecast, day, tz)
+
+    def _schedule_suggestion(self) -> None:
+        """(Re-)arm the evening notification at the configured time."""
+        if self._suggestion_unsub:
+            self._suggestion_unsub()
+        parts = (self.suggestion_time.split(":") + ["0", "0"])[:3]
+        try:
+            hour, minute, second = (int(p) for p in parts)
+        except ValueError:
+            _LOGGER.warning(
+                "Invalid suggestion time %r — using %s",
+                self.suggestion_time, DEFAULT_SUGGESTION_TIME,
+            )
+            hour, minute, second = 20, 0, 0
+        self._suggestion_unsub = async_track_time_change(
+            self.hass, self._send_suggestion,
+            hour=hour, minute=minute, second=second,
+        )
+
+    async def _send_suggestion(self, _now=None) -> None:
+        """Evening notification: tonight's suggested charge, or why
+        there is none.  Information only — no battery setting changes.
+
+        The history is re-read first: fresher, and a restart just before
+        the time would otherwise find it still empty.
+        """
+        if not await self._refresh_history():
+            await self._update_suggestion()
+            self.async_update_listeners()
+        service = self.notify_service.removeprefix("notify.")
+        if not service:
+            return
+        lang = "fr" if str(self.hass.config.language).startswith("fr") else "en"
+        if self.suggestion is not None:
+            title, message = notification(
+                self.suggestion, self.state_store.battery.soc, lang,
+            )
+        else:
+            title, message = no_suggestion_notification(
+                self.suggestion_reason, lang,
+            )
+        try:
+            await self.hass.services.async_call(
+                "notify", service,
+                {
+                    "title": title,
+                    "message": message,
+                    "data": {"tag": SUGGESTION_NOTIFY_TAG},
+                },
+                blocking=False,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Notification via notify.%s failed", service, exc_info=True,
+            )
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -214,6 +496,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
             default_price=options.get(OPT_TARIFF_DEFAULT_PRICE, DEFAULT_TARIFF_DEFAULT_PRICE),
             periods=tariff_periods,
         )
+
+        # Grid charge reserve — loaded before MQTT starts, so a restart
+        # the morning after a grid charge keeps the battery reserved.
+        self._grid_charge = GridChargeTracker(
+            os.path.join(data_dir, "grid_charge.json")
+        )
+        await self.hass.async_add_executor_job(self._grid_charge.load)
 
         # Analytics
         self._consumption = ConsumptionAnalyzer(data_dir=data_dir)
@@ -328,6 +617,13 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._check_daily_reset,
             timedelta(minutes=1),
         )
+        self._history_unsub = async_track_time_interval(
+            self.hass, self._refresh_history, HISTORY_REFRESH_INTERVAL,
+        )
+        self._history_first_unsub = async_call_later(
+            self.hass, HISTORY_FIRST_REFRESH_DELAY_S, self._refresh_history,
+        )
+        self._schedule_suggestion()
 
     # ---- Coordinator update ----
 
@@ -424,11 +720,16 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
     def _on_battery_update(self):
         """Handle battery data update from MQTT."""
+        battery = self.state_store.battery
         # Record consumption
         if self._consumption:
-            self._consumption.record_consumption(
-                self.state_store.battery.consumption_w
-            )
+            self._consumption.record_consumption(battery.consumption_w)
+        # Track grid charging — a measurement, so it runs even while
+        # BeemAI is disabled.
+        if self._grid_charge.update(
+            battery.battery_power_w, battery.import_power_w,
+        ):
+            self.hass.async_add_executor_job(self._grid_charge.save)
         # Evaluate surplus diverters (water heater first, then EV charger)
         if self._water_heater or self._ev_charger:
             soc = self.state_store.battery.soc
@@ -459,6 +760,10 @@ class BeemAICoordinator(DataUpdateCoordinator):
         battery = self.state_store.battery
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
+        # After a grid charge, the battery's energy is the house's: the
+        # diverters only get what the panels produce beyond a nearly
+        # full battery.
+        grid_charged = self._grid_charge.is_reserved()
 
         await self._handle_overload(consumption_w, import_w)
 
@@ -477,6 +782,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 power_entity_id=self.wh_power_entity or None,
                 fully_heated_threshold_wh=self.wh_fully_heated_threshold,
                 offpeak=self._wh_offpeak(),
+                grid_charged=grid_charged,
             )
         # Note: the EV controller's per-tick overload reduction still
         # runs inside its evaluate() — that's the actual amps-trim
@@ -499,6 +805,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 wh_heating = self._water_heater.is_heating
             else:
                 wh_heating = None
+            # Auto starts at target SoC and pulls the battery toward it
+            # (SoC bias): after a grid charge, that target is raised so
+            # the car never draws on grid-bought energy.
+            target_soc = self.ev_target_soc
+            if grid_charged:
+                target_soc = max(target_soc, RESERVED_MIN_SOC)
             await self._ev_charger.evaluate(
                 soc,
                 meter_power_w=battery.meter_power_w,
@@ -506,7 +818,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 solar_power_w=battery.solar_power_w,
                 consumption_w=consumption_w,
                 water_heater_heating=wh_heating,
-                target_soc=self.ev_target_soc,
+                target_soc=target_soc,
                 soc_hysteresis=self.ev_soc_hysteresis,
                 mode=self.ev_charger_mode,
             )
@@ -731,6 +1043,15 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 DEFAULT_WH_FULLY_HEATED_THRESHOLD,
             )
         )
+        self._read_history_options(options)
+        # The sources may have changed: re-read the history shortly
+        # (one-shot, so a burst of option writes costs a single read).
+        if self._history_first_unsub:
+            self._history_first_unsub()
+        self._history_first_unsub = async_call_later(
+            self.hass, 5, self._refresh_history,
+        )
+        self._schedule_suggestion()
 
     # ---- EV charger mode control ----
 
@@ -922,6 +1243,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
+        for unsub in (
+            self._history_unsub, self._history_first_unsub,
+            self._suggestion_unsub,
+        ):
+            if unsub:
+                unsub()
 
         # An unload is almost always a reload — an HA restart, a config
         # entry reload — so the EV charger is left strictly alone: not
@@ -943,6 +1270,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # Save analytics
         if self._consumption:
             self._consumption.save()
+        self._grid_charge.save()
 
         # Close API client
         if self._api_client:

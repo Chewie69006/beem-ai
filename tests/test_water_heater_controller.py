@@ -105,6 +105,7 @@ async def _evaluate(
     mode="Auto",
     power_entity_id=None,
     fully_heated_threshold_wh=0,
+    grid_charged=False,
 ):
     """Helper to call evaluate with sane defaults.
 
@@ -119,6 +120,7 @@ async def _evaluate(
         mode=mode,
         power_entity_id=power_entity_id,
         fully_heated_threshold_wh=fully_heated_threshold_wh,
+        grid_charged=grid_charged,
     )
 
 
@@ -489,12 +491,13 @@ async def test_externally_turned_on_adopts_session():
 async def test_externally_turned_off_clears_session():
     """Switch turned off externally → controller clears session bookkeeping."""
     ctrl, hass = _make_controller()
-    await _heat_via_export(ctrl, hass)
+    t = await _heat_via_export(ctrl, hass)
     assert ctrl._active_soc_threshold is not None
 
     # External turn-off
     hass.set_switch("off")
-    await _evaluate(ctrl, soc=85.0)
+    with patch("time.monotonic", return_value=t + 60):
+        await _evaluate(ctrl, soc=85.0)
 
     assert ctrl.is_heating is False
     assert ctrl._active_soc_threshold is None
@@ -1220,3 +1223,52 @@ async def test_offpeak_manual_switch_off_is_not_overridden():
     await _offpeak_eval(ctrl, t=1100.0)
     await _offpeak_eval(ctrl, t=1100.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S + 1)
     assert not ctrl.is_heating
+
+
+# ==================================================================
+# Battery charged from the grid — solar export only
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_grid_charged_battery_blocks_the_soc_rule():
+    """Morning after an off-peak charge: SoC above the threshold thanks to
+    the grid, and a 600 W solar trickle into the battery.  Rule 2 would
+    start the heater and drain the grid-bought energy — not any more."""
+    ctrl, hass = _make_controller()
+    for t in (1000.0, 1000.0 + SUSTAIN_SECONDS, 1000.0 + 10 * SUSTAIN_SECONDS):
+        with patch("time.monotonic", return_value=t):
+            await _evaluate(
+                ctrl, soc=SOC_THRESHOLD + 1, charge_power_w=600,
+                grid_charged=True,
+            )
+    assert ctrl.is_heating is False
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_grid_charged_battery_still_heats_on_export():
+    """Battery full and exporting: that surplus is solar whatever filled
+    the battery overnight."""
+    ctrl, hass = _make_controller()
+    with patch("time.monotonic", return_value=1000.0):
+        await _evaluate(ctrl, soc=96.0, export_w=600, grid_charged=True)
+    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
+        await _evaluate(ctrl, soc=96.0, export_w=600, grid_charged=True)
+    assert ctrl.is_heating is True
+
+
+@pytest.mark.asyncio
+async def test_grid_charged_battery_stops_a_session_without_export():
+    """A session running on the SoC rule (e.g. adopted after a restart)
+    ends once only the export rule counts and nothing is exported."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+
+    for dt in (1, 1 + SUSTAIN_SECONDS):
+        with patch("time.monotonic", return_value=t + dt):
+            await _evaluate(
+                ctrl, soc=SOC_THRESHOLD + 1, charge_power_w=600,
+                grid_charged=True,
+            )
+    assert ctrl.is_heating is False

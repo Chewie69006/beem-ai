@@ -39,6 +39,23 @@ OPT_WH_MIN_DURATION_S = "wh_min_duration_s"
 OPT_WH_SUSTAIN_S = "wh_sustain_s"
 OPT_WH_POWER_ENTITY = "wh_power_entity"
 OPT_WH_FULLY_HEATED_THRESHOLD = "wh_fully_heated_threshold"
+# Energy history (charge-target suggestion inputs): what the house draws
+# beyond the base load, read from HA's long-term statistics.
+OPT_EV_CHARGING_POWER_SENSOR = "ev_charging_power_sensor"
+OPT_HEATING_ENERGY_ENTITIES = "heating_energy_entities"
+OPT_COOLING_ENERGY_ENTITIES = "cooling_energy_entities"
+OPT_OUTDOOR_TEMP_ENTITY = "outdoor_temperature_entity"
+# Fixed base load (W) instead of the learned one; 0 = learned.
+OPT_BASE_LOAD_OVERRIDE_W = "base_load_override_w"
+DEFAULT_BASE_LOAD_OVERRIDE_W = 0
+# Charge-target suggestion: solar forecast entities (Solcast Forecast
+# Today / Tomorrow, with their detailed attributes), a weather entity for
+# tomorrow's temperature, and the evening notification.
+OPT_SOLAR_FORECAST_ENTITIES = "solar_forecast_entities"
+OPT_WEATHER_ENTITY = "weather_entity"
+OPT_NOTIFY_SERVICE = "notify_service"
+OPT_SUGGESTION_TIME = "suggestion_time"
+DEFAULT_SUGGESTION_TIME = "20:00:00"
 
 DEFAULT_EV_REQUIRE_WATER_HEATER = True
 DEFAULT_EV_FOLLOW_SCHEDULE = True

@@ -256,6 +256,66 @@ thresholds so the heater doesn't toggle every 5 minutes near the boundary.
 
 ---
 
+### Solar surplus only after a grid charge
+
+On a day the battery was charged from the grid (off-peak, because the sun
+won't be enough), its energy is reserved for the house. BeemAI detects the
+grid charge from the live power flows — however it was started — and for
+the next 20 hours:
+
+- the **water heater** only starts on real surplus: battery ≥ 95 % *and*
+  exporting. The "SoC ≥ threshold + battery charging" rule is off, so a weak
+  morning sun trickling into a grid-charged battery no longer starts it;
+- the **EV charger** in Auto uses a target SoC of at least 95 %.
+
+The off-peak top-up, Manual, Force Charge and the Wallbox schedule are not
+affected. The **Grid Charge Reserve** binary sensor (System device) shows
+when the reserve is active, with `last_grid_charge` and `reserved_until`
+attributes.
+
+### Energy history (consumption model)
+
+First step towards an evening suggestion of the night's battery charge.
+BeemAI reads Home Assistant's long-term statistics and splits the house
+consumption hour by hour:
+
+    base = consumption − water heater − EV − heating − cooling
+
+Set the inputs in the options (last step, **Consumption model**): heating and
+cooling energy counters (e.g. each Daikin unit's daily electrical
+consumption), an outdoor temperature sensor, and in the EV step the charger's
+power sensor. Two System sensors show the result:
+
+- **Base Load** (W) — the always-on consumption: median of the night windows
+  (01:00–05:00) over the last 14 nights, or a fixed value from the options;
+- **Energy History** (days) — the last 7 days' breakdown in its attributes,
+  how far back the heating history goes, and `missing_statistics` (configured
+  entities without long-term statistics, e.g. a sensor with no
+  `state_class`).
+
+Nothing is controlled from this yet.
+
+### Tonight's charge suggestion
+
+Every evening (20:00 by default) BeemAI can send a notification to the HA
+mobile app with the battery level to reach by the end of the off-peak window:
+
+> Charge conseillée : 55 % à 05:26 (prudent : 70 %).
+> Soleil : 6,2 kWh (3,9 – 8,1).
+> Conso 05:26–21:26 : 14,0 kWh, dont chauffage 4,1 kWh (6 °C).
+> Batterie maintenant : 32 %.
+
+It simulates the battery hour by hour over the next peak window (the
+consumption model above, tomorrow's Solcast forecast, tomorrow's temperature
+for the heating) and keeps the smallest level that never goes under the
+battery's Min SoC. "Prudent" is the same with the pessimistic (P10) sun.
+
+Options, last step **Charge suggestion**: the Solcast *Forecast Today* and
+*Forecast Tomorrow* sensors, a weather entity, the notification service and
+time. The **Charge Target Suggestion** sensor (System device) shows the value
+and what it was computed from. Information only — no battery setting is
+changed.
+
 ### EV Charger Modes
 
 | Mode | What BeemAI does |

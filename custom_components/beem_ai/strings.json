@@ -55,13 +55,17 @@
           "ev_charger_toggle_entity": "EV charger start/stop switch",
           "ev_charger_power_entity": "EV charger amperage control",
           "ev_charger_status_entity": "EV charger status sensor (optional)",
-          "ev_charger_resume_schedule_entity": "Wallbox 'Resume schedule' button (optional)"
+          "ev_charger_resume_schedule_entity": "Wallbox 'Resume schedule' button (optional)",
+          "ev_require_water_heater": "Wait for the water heater",
+          "ev_charging_power_sensor": "EV charging power sensor (optional)"
         },
         "data_description": {
           "ev_charger_toggle_entity": "A switch entity that starts/stops EV charging.",
           "ev_charger_power_entity": "A number entity (6-32A) that controls the wallbox charging amperage.",
           "ev_charger_status_entity": "Optional. A sensor reporting the charger status (e.g. Wallbox 'status_description'). When it reports 'Waiting for car demand' / 'Ready' / 'Paused' for 60s, BeemAI stops the switch so it doesn't sit on while the car refuses current. In Auto, with 'Follow Wallbox Schedule' on, a charge the Wallbox starts while this sensor reads 'Scheduled' is left to the schedule at 32 A.",
-          "ev_charger_resume_schedule_entity": "Optional — set it only if you use a schedule in the Wallbox app. A pause sent by BeemAI takes the Wallbox off its schedule; While 'Follow Wallbox Schedule' is on, BeemAI presses this button after each Auto stop (and when Auto is selected) so the scheduled charge still starts."
+          "ev_charger_resume_schedule_entity": "Optional — set it only if you use a schedule in the Wallbox app. A pause sent by BeemAI takes the Wallbox off its schedule; While 'Follow Wallbox Schedule' is on, BeemAI presses this button after each Auto stop (and when Auto is selected) so the scheduled charge still starts.",
+          "ev_require_water_heater": "In Auto, start the car only once the water heater is heating.",
+          "ev_charging_power_sensor": "Optional. The charger's power sensor (e.g. Wallbox 'Charging power'). Its energy is taken out of the house consumption when learning the base load: the car charges off-peak, not from the battery."
         }
       },
       "tariffs": {
@@ -92,6 +96,38 @@
           "tariff_6_start": "Period 6 start (HH:MM)",
           "tariff_6_end": "Period 6 end (HH:MM)",
           "tariff_6_price": "Period 6 price (EUR/kWh)"
+        }
+      },
+      "consumption": {
+        "title": "Consumption model",
+        "description": "Optional. What the house consumption is made of, read from Home Assistant's long-term statistics to learn the base load and the heating needs. Nothing here controls any device.",
+        "data": {
+          "heating_energy_entities": "Heating energy sensors",
+          "cooling_energy_entities": "Cooling energy sensors",
+          "outdoor_temperature_entity": "Outdoor temperature sensor",
+          "base_load_override_w": "Fixed base load (W, 0 = learned)"
+        },
+        "data_description": {
+          "heating_energy_entities": "Energy counters of the heating (kWh), e.g. the Daikin units' 'heating daily electrical consumption'. Several allowed.",
+          "cooling_energy_entities": "The same for cooling (air conditioning).",
+          "outdoor_temperature_entity": "Outdoor temperature, for the heating vs temperature history (e.g. a Daikin unit's outdoor temperature).",
+          "base_load_override_w": "The always-on consumption, learned from the night hours (01:00-05:00) once a few nights are available. Set a value to use it instead."
+        }
+      },
+      "suggestion": {
+        "title": "Charge suggestion",
+        "description": "Optional. Every evening BeemAI suggests the battery level to reach by the end of the off-peak window, from tomorrow's solar forecast and the consumption model. Information only: no battery setting is changed.",
+        "data": {
+          "solar_forecast_entities": "Solar forecast sensors",
+          "weather_entity": "Weather forecast",
+          "notify_service": "Notification service",
+          "suggestion_time": "Notification time"
+        },
+        "data_description": {
+          "solar_forecast_entities": "Solcast 'Forecast Today' and 'Forecast Tomorrow' (any sensor with a 'detailedHourly' or 'detailedForecast' attribute).",
+          "weather_entity": "For tomorrow's temperature (heating). Without it, the last days' temperature is used.",
+          "notify_service": "Where to send the evening suggestion (e.g. mobile_app_<phone>). Leave empty for no notification.",
+          "suggestion_time": "When to send it — before the off-peak window starts."
         }
       }
     }

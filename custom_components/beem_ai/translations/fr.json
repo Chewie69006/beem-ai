@@ -65,6 +65,70 @@
           "tariff_6_end": "Periode 6 fin (HH:MM)",
           "tariff_6_price": "Periode 6 prix (EUR/kWh)"
         }
+      },
+      "water_heater": {
+        "title": "Chauffe-eau",
+        "description": "Optionnel : un chauffe-eau qui absorbe le surplus solaire.",
+        "data": {
+          "water_heater_switch_entity": "Interrupteur du chauffe-eau",
+          "wh_power_entity": "Capteur de puissance du chauffe-eau"
+        },
+        "data_description": {
+          "water_heater_switch_entity": "L'interrupteur qui allume et éteint le chauffe-eau.",
+          "wh_power_entity": "Le capteur de la puissance consommée par le chauffe-eau (W). Nécessaire pour détecter qu'il est chaud."
+        }
+      },
+      "ev_charger": {
+        "title": "Borne de recharge",
+        "description": "Optionnel : une borne de recharge, second consommateur du surplus solaire après le chauffe-eau.",
+        "data": {
+          "ev_charger_toggle_entity": "Interrupteur marche / arrêt de la charge",
+          "ev_charger_power_entity": "Réglage de l'ampérage de la borne",
+          "ev_charger_status_entity": "Capteur d'état de la borne (optionnel)",
+          "ev_charger_resume_schedule_entity": "Bouton Wallbox « Reprendre le planning » (optionnel)",
+          "ev_require_water_heater": "Attendre le chauffe-eau",
+          "ev_charging_power_sensor": "Capteur de puissance de charge (optionnel)"
+        },
+        "data_description": {
+          "ev_charger_toggle_entity": "L'interrupteur qui démarre et arrête la charge.",
+          "ev_charger_power_entity": "L'entité nombre (6-32 A) qui règle l'ampérage de la borne.",
+          "ev_charger_status_entity": "Optionnel. Le capteur d'état de la borne (ex. Wallbox « status_description »). S'il indique « Waiting for car demand » / « Ready » / « Paused » pendant 60 s, BeemAI coupe la charge. En Auto, avec « Suivre le planning Wallbox » activé, une charge que la Wallbox démarre pendant que ce capteur indique « Scheduled » est laissée au planning, à 32 A.",
+          "ev_charger_resume_schedule_entity": "Optionnel, seulement si vous utilisez un planning dans l'app Wallbox. Une pause envoyée par BeemAI sort la Wallbox de son planning ; tant que « Suivre le planning Wallbox » est activé, BeemAI appuie sur ce bouton après chaque arrêt en Auto (et quand Auto est choisi) pour que la charge planifiée démarre quand même.",
+          "ev_require_water_heater": "En Auto, ne démarrer la voiture qu'une fois le chauffe-eau en chauffe.",
+          "ev_charging_power_sensor": "Optionnel. Le capteur de puissance de la borne (ex. Wallbox « Charging power »). Son énergie est retirée de la consommation de la maison pour apprendre le talon : la voiture charge en heures creuses, pas sur la batterie."
+        }
+      },
+      "consumption": {
+        "title": "Modèle de consommation",
+        "description": "Optionnel. De quoi est faite la consommation de la maison, lu dans les statistiques long terme de Home Assistant pour apprendre le talon et les besoins de chauffage. Rien ici ne pilote d'appareil.",
+        "data": {
+          "heating_energy_entities": "Compteurs d'énergie du chauffage",
+          "cooling_energy_entities": "Compteurs d'énergie de la climatisation",
+          "outdoor_temperature_entity": "Capteur de température extérieure",
+          "base_load_override_w": "Talon fixe (W, 0 = appris)"
+        },
+        "data_description": {
+          "heating_energy_entities": "Les compteurs d'énergie du chauffage (kWh), ex. la « heating daily electrical consumption » des unités Daikin. Plusieurs possibles.",
+          "cooling_energy_entities": "La même chose pour la climatisation.",
+          "outdoor_temperature_entity": "La température extérieure, pour l'historique chauffage / température (ex. la température extérieure d'une unité Daikin).",
+          "base_load_override_w": "La consommation permanente, apprise sur les heures de nuit (01h-05h) dès que quelques nuits sont disponibles. Indiquez une valeur pour l'imposer."
+        }
+      },
+      "suggestion": {
+        "title": "Suggestion de charge",
+        "description": "Optionnel. Chaque soir, BeemAI suggère le niveau de batterie à atteindre à la fin des heures creuses, d'après la prévision solaire du lendemain et le modèle de consommation. Pour information seulement : aucun réglage de la batterie n'est modifié.",
+        "data": {
+          "solar_forecast_entities": "Capteurs de prévision solaire",
+          "weather_entity": "Prévision météo",
+          "notify_service": "Service de notification",
+          "suggestion_time": "Heure de la notification"
+        },
+        "data_description": {
+          "solar_forecast_entities": "Les capteurs Solcast « Forecast Today » et « Forecast Tomorrow » (ou tout capteur avec un attribut « detailedHourly » ou « detailedForecast »).",
+          "weather_entity": "Pour la température du lendemain (chauffage). Sans elle, la température des derniers jours est utilisée.",
+          "notify_service": "Où envoyer la suggestion du soir (ex. mobile_app_<téléphone>). Laisser vide pour ne pas être notifié.",
+          "suggestion_time": "Quand l'envoyer — avant le début des heures creuses."
+        }
       }
     }
   }
