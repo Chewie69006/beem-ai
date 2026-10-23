@@ -187,8 +187,21 @@ application.
   `notify.mobile_app_*` services to pick from.
 - Weather: HA's default Met.no entity is enough for a temperature forecast
   (hourly via `weather.get_forecasts`); Météo-France optional.
-- Heating: Daikin reversible heat pumps, already in HA (energy sensors and
-  an outdoor temperature sensor), plus a pellet stove that isn't connected.
+- Heating: Daikin reversible heat pumps through the `daikin_onecta`
+  integration, plus a pellet stove that isn't connected.  Four units —
+  `salon`, `chambre_maelys`, `chambre_parentale`, `bureau`:
+  - `sensor.<unit>_climatecontrol_heating_daily_electrical_consumption` and
+    `…_cooling_daily_electrical_consumption` (kWh, `total_increasing`,
+    reset at midnight, 0.1 kWh steps; the Daikin cloud reports by 2-hour
+    blocks, so 2-hourly at best — daily totals are what the model needs);
+  - `sensor.<unit>_climatecontrol_outdoor_temperature` (all four read the
+    same, 13.5 °C on 23 Oct) — the history of outdoor temperature;
+  - order of magnitude: heating ≈ 870 kWh since January, 42 kWh in October
+    so far, ≈ 33 kWh this week (~7 kWh/day since the cold came, about half
+    a battery), the salon about two thirds of it; cooling ≈ 1 310 kWh this
+    year, so the summer evenings matter too.
+  In the options: a multi-select of heating / cooling energy sensors and
+  one outdoor temperature sensor — nothing Daikin-specific in the code.
 - Wallbox power is available through its integration.
 
 ### Inputs
@@ -307,5 +320,4 @@ custom values show where the user's judgement and the model disagree.
 4. Auto mode, learned corrections.
 
 ### Open questions
-- Daikin entities: energy (per unit? heating and cooling apart?) and the
-  outdoor temperature sensor.
+- None blocking phase 1.
