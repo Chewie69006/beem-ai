@@ -13,8 +13,13 @@ import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_time_interval,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .beem_api import BeemApiClient
 from .const import (
@@ -54,8 +59,15 @@ from .const import (
     DEFAULT_WATER_HEATER_MODE,
     DEFAULT_WH_MIN_DURATION_S,
     DEFAULT_WH_SUSTAIN_S,
+    OPT_EV_CHARGING_POWER_SENSOR,
+    OPT_HEATING_ENERGY_ENTITIES,
+    OPT_COOLING_ENERGY_ENTITIES,
+    OPT_OUTDOOR_TEMP_ENTITY,
+    OPT_BASE_LOAD_OVERRIDE_W,
+    DEFAULT_BASE_LOAD_OVERRIDE_W,
 )
 from .consumption_analyzer import ConsumptionAnalyzer
+from .energy_history import EnergyHistory, HistorySources, recorder_fetch
 from .grid_charge_tracker import RESERVED_MIN_SOC, GridChargeTracker
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
@@ -74,6 +86,10 @@ UPDATE_INTERVAL = timedelta(minutes=2)
 # short grace) so the two diverters don't act on stale views.
 OVERLOAD_THRESHOLD_W = 7000
 OVERLOAD_WH_FORCE_STOP_GRACE_S = 15.0
+# Energy history: re-read the recorder's statistics every hour; the first
+# read waits a minute so the recorder and our own sensors are up.
+HISTORY_REFRESH_INTERVAL = timedelta(hours=1)
+HISTORY_FIRST_REFRESH_DELAY_S = 60
 
 
 class BeemAICoordinator(DataUpdateCoordinator):
@@ -105,6 +121,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         # keep off what was bought for the house (re-created with its
         # file in async_setup).
         self._grid_charge = GridChargeTracker()
+        # Hourly consumption breakdown and heating history, read from the
+        # recorder (charge-target suggestion inputs — nothing is driven
+        # from it yet).
+        self._energy_history = EnergyHistory(
+            lambda *args: recorder_fetch(self.hass, *args)
+        )
         # Monotonic timestamp of the first tick observing overload
         # (cons ≥ OVERLOAD_THRESHOLD_W with positive import).  Cleared
         # when the overload clears.  Used to delay WH force-stop until
@@ -155,9 +177,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 DEFAULT_WH_FULLY_HEATED_THRESHOLD,
             )
         )
+        self._read_history_options(options)
 
         # Schedule handles
         self._daily_reset_unsub = None
+        self._history_unsub = None
+        self._history_first_unsub = None
         self._last_reset_date = None
 
         # Persistence directory (set in async_setup)
@@ -178,6 +203,84 @@ class BeemAICoordinator(DataUpdateCoordinator):
     def grid_charge(self) -> GridChargeTracker:
         """Return the grid charge tracker (battery reserve flag)."""
         return self._grid_charge
+
+    @property
+    def energy_history(self) -> EnergyHistory:
+        """Return the energy history (recorder statistics)."""
+        return self._energy_history
+
+    @property
+    def base_load_w(self) -> float | None:
+        """Always-on load: the user's fixed value, else the learned one."""
+        if self.base_load_override_w > 0:
+            return float(self.base_load_override_w)
+        return self._energy_history.base_load_w()
+
+    def _read_history_options(self, options) -> None:
+        """Energy-history inputs, re-read on every options update."""
+        self.ev_charging_power_sensor: str = str(
+            options.get(OPT_EV_CHARGING_POWER_SENSOR, "") or ""
+        )
+        self.heating_energy_entities: list[str] = list(
+            options.get(OPT_HEATING_ENERGY_ENTITIES) or []
+        )
+        self.cooling_energy_entities: list[str] = list(
+            options.get(OPT_COOLING_ENERGY_ENTITIES) or []
+        )
+        self.outdoor_temp_entity: str = str(
+            options.get(OPT_OUTDOOR_TEMP_ENTITY, "") or ""
+        )
+        self.base_load_override_w: int = int(
+            options.get(
+                OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W,
+            ) or 0
+        )
+
+    def _history_sources(self) -> HistorySources:
+        """Statistic IDs: our own consumption / solar sensors, plus the
+        entities picked in the options."""
+        registry = er.async_get(self.hass)
+
+        def own(key: str) -> str | None:
+            return registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{self._entry.entry_id}_{key}",
+            )
+
+        return HistorySources(
+            consumption=own("consumption"),
+            solar=own("solar_power"),
+            water_heater=self.wh_power_entity or None,
+            ev=self.ev_charging_power_sensor or None,
+            heating=tuple(self.heating_energy_entities),
+            cooling=tuple(self.cooling_energy_entities),
+            outdoor_temp=self.outdoor_temp_entity or None,
+        )
+
+    async def _refresh_history(self, _now=None) -> None:
+        """Re-read the energy history from the recorder.
+
+        A failure (recorder not loaded, database busy) only costs this
+        refresh — the next one is an hour away, and nothing depends on
+        it yet.
+        """
+        history = self._energy_history
+        try:
+            await history.async_refresh(
+                self._history_sources(), dt_util.now(),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Energy history refresh failed", exc_info=True)
+            return
+        hvac_days, hvac_since = history.hvac_history()
+        _LOGGER.info(
+            "Energy history: %d complete days of hourly data, %d days of "
+            "heating/cooling since %s, base load %s W%s",
+            len(history.complete_days()), hvac_days, hvac_since,
+            None if self.base_load_w is None else round(self.base_load_w),
+            f" — no statistics for {history.missing}" if history.missing
+            else "",
+        )
+        self.async_update_listeners()
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -344,6 +447,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self.hass,
             self._check_daily_reset,
             timedelta(minutes=1),
+        )
+        self._history_unsub = async_track_time_interval(
+            self.hass, self._refresh_history, HISTORY_REFRESH_INTERVAL,
+        )
+        self._history_first_unsub = async_call_later(
+            self.hass, HISTORY_FIRST_REFRESH_DELAY_S, self._refresh_history,
         )
 
     # ---- Coordinator update ----
@@ -764,6 +873,14 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 DEFAULT_WH_FULLY_HEATED_THRESHOLD,
             )
         )
+        self._read_history_options(options)
+        # The sources may have changed: re-read the history shortly
+        # (one-shot, so a burst of option writes costs a single read).
+        if self._history_first_unsub:
+            self._history_first_unsub()
+        self._history_first_unsub = async_call_later(
+            self.hass, 5, self._refresh_history,
+        )
 
     # ---- EV charger mode control ----
 
@@ -955,6 +1072,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
 
         if self._daily_reset_unsub:
             self._daily_reset_unsub()
+        for unsub in (self._history_unsub, self._history_first_unsub):
+            if unsub:
+                unsub()
 
         # An unload is almost always a reload — an HA restart, a config
         # entry reload — so the EV charger is left strictly alone: not

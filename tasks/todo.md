@@ -89,3 +89,21 @@ the battery.  Wanted: heater (and EV) start on solar surplus only.
       again: since `COMMAND_SETTLE_S` it failed on hosts up < ~17 min
 - [ ] Not seen on the real HA box: no log access from here.  To confirm the
       cause, grep the log for "Solar surplus detected" on a grid-charged day
+
+## Charge-target suggestion — phase 1: energy history
+Per user: start ROADMAP §10, phase 1 (inputs + history, nothing driven).
+- [x] Read HA's long-term statistics (`statistics_during_period`, recorder
+      executor) instead of keeping our own hourly log: the history and the
+      "bootstrap" are the same query, and last winter is already there
+- [x] Options: EV charging power sensor (EV step); new last step
+      "consumption": heating / cooling energy counters (multi), outdoor
+      temperature, base-load override.  Labels in strings/en/fr — en/fr had
+      no water-heater / EV steps at all, added
+- [x] `EnergyHistory`: hourly base = consumption − WH − EV − heating −
+      cooling (28 days), daily heating / cooling vs temperature (365 days),
+      base load = median of 01:00–05:00 window averages (14 nights) — window,
+      not hourly, because the Daikin cloud reports in 2-hour blocks
+- [x] Coordinator: sources (own sensors via the entity registry), refresh
+      at +60 s, hourly, and 5 s after an options update; warning on failure
+- [x] Sensors "Base Load" and "Energy History" (System)
+- [x] Solcast / weather / notify service moved to phase 2, where they're used

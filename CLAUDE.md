@@ -122,6 +122,30 @@
   even while BeemAI is disabled (it is a measurement).  Exposed as the
   System binary sensor "Grid Charge Reserve"
 
+## Energy History (charge-target inputs — read-only)
+- Phase 1 of ROADMAP §10.  `EnergyHistory` reads Home Assistant's
+  long-term statistics (recorder, hourly, kept forever) — no log of our
+  own, and the past is there from the first run.  Nothing is driven from it
+- `base = consumption − water heater − EV − heating − cooling`, per hour
+  over `HOURLY_DAYS` (28).  Sources: our own Consumption / Solar Power
+  sensors (found in the entity registry by unique ID), the WH power entity,
+  `OPT_EV_CHARGING_POWER_SENSOR`, `OPT_HEATING_ENERGY_ENTITIES` /
+  `OPT_COOLING_ENERGY_ENTITIES` (lists), `OPT_OUTDOOR_TEMP_ENTITY` — the
+  options step "consumption" (last step) plus one field in the EV step
+- Power sensors → hourly `mean` (W ≈ Wh); energy counters → hourly
+  `change`; the recorder converts units (`UNITS`).  Daily heating / cooling
+  and outdoor temperature over `HVAC_HISTORY_DAYS` (365) for the heating
+  model
+- Base load (talon) = median over the last 14 nights of the 01:00–05:00
+  window average, never hour by hour: the Daikin cloud reports by 2-hour
+  blocks, so heating lands in the wrong hour.  `OPT_BASE_LOAD_OVERRIDE_W`
+  > 0 replaces it
+- Refreshed one minute after start, every hour, and 5 s after an options
+  update (one-shot, re-armed).  A failure only logs a warning
+- System sensors "Base Load" (W) and "Energy History" (days, with the last
+  7 days' breakdown and `missing_statistics` — configured entities the
+  recorder has nothing for)
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

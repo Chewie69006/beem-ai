@@ -313,9 +313,13 @@ EMA correction of the solar forecast and of the margin.  Refusals and
 custom values show where the user's judgement and the model disagree.
 
 ### Phases
-1. Inputs: Solcast, weather, Daikin, Wallbox, WH entities in the options;
-   hourly energy log; recorder bootstrap.
-2. Suggestion sensor + evening notification (information only).
+1. ✓ **Energy history** — implemented: `energy_history.py` reads the
+   recorder's long-term statistics instead of keeping a log of its own
+   (bootstrap and log are the same thing), inputs in the options (heating /
+   cooling counters, outdoor temperature, EV power sensor, base-load
+   override), System sensors "Base Load" and "Energy History".
+2. Solcast, weather and notify-service options; suggestion sensor +
+   evening notification (information only).
 3. Notification actions + applying the target.
 4. Auto mode, learned corrections.
 

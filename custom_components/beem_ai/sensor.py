@@ -151,6 +151,30 @@ async def async_setup_entry(
             ),
             device_type="system",
         ),
+        BeemAISensor(
+            coordinator, entry,
+            key="base_load",
+            name="Base Load",
+            icon="mdi:home-lightning-bolt-outline",
+            device_class=SensorDeviceClass.POWER,
+            state_class=SensorStateClass.MEASUREMENT,
+            unit="W",
+            value_fn=lambda c: _round_or_none(c.base_load_w),
+            extra_fn=_base_load_attrs,
+            device_type="system",
+        ),
+        BeemAISensor(
+            coordinator, entry,
+            key="energy_history",
+            name="Energy History",
+            icon="mdi:chart-timeline-variant",
+            device_class=None,
+            state_class=None,
+            unit="d",
+            value_fn=lambda c: len(c.energy_history.complete_days()),
+            extra_fn=_energy_history_attrs,
+            device_type="system",
+        ),
     ]
 
     # --- Per-array solar sensors (creates a device per panel array) ---
@@ -235,6 +259,41 @@ async def async_setup_entry(
             solar_index=idx,
         ))
     async_add_entities(sensors)
+
+
+def _round_or_none(value: float | None) -> int | None:
+    return None if value is None else round(value)
+
+
+def _base_load_attrs(coordinator) -> dict[str, Any]:
+    """Where the base load comes from, and the nights it was learned on."""
+    history = coordinator.energy_history
+    learned = history.base_load_w()
+    nights = history.night_base_loads_w()
+    return {
+        "source": (
+            "override" if coordinator.base_load_override_w > 0
+            else "learned" if learned is not None
+            else "no data"
+        ),
+        "learned_w": _round_or_none(learned),
+        "nights": [round(n) for n in nights[-14:]],
+    }
+
+
+def _energy_history_attrs(coordinator) -> dict[str, Any]:
+    """The last days' breakdown, and how far back the history goes."""
+    history = coordinator.energy_history
+    hvac_days, hvac_since = history.hvac_history()
+    return {
+        "updated": (
+            history.updated.isoformat() if history.updated else None
+        ),
+        "hvac_history_days": hvac_days,
+        "hvac_history_since": hvac_since.isoformat() if hvac_since else None,
+        "missing_statistics": history.missing,
+        "last_days": [d.as_dict() for d in history.complete_days()[-7:]],
+    }
 
 
 class BeemAISensor(CoordinatorEntity, SensorEntity):

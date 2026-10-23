@@ -26,6 +26,12 @@ from .const import (
     DEFAULT_EV_REQUIRE_WATER_HEATER,
     OPT_WATER_HEATER_SWITCH,
     OPT_WH_POWER_ENTITY,
+    OPT_EV_CHARGING_POWER_SENSOR,
+    OPT_HEATING_ENERGY_ENTITIES,
+    OPT_COOLING_ENERGY_ENTITIES,
+    OPT_OUTDOOR_TEMP_ENTITY,
+    OPT_BASE_LOAD_OVERRIDE_W,
+    DEFAULT_BASE_LOAD_OVERRIDE_W,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -184,7 +190,10 @@ class BeemAIOptionsFlow(OptionsFlow):
             self._options[OPT_EV_REQUIRE_WATER_HEATER] = user_input.get(
                 OPT_EV_REQUIRE_WATER_HEATER, DEFAULT_EV_REQUIRE_WATER_HEATER
             )
-            return self.async_create_entry(title="", data=self._options)
+            self._options[OPT_EV_CHARGING_POWER_SENSOR] = user_input.get(
+                OPT_EV_CHARGING_POWER_SENSOR, ""
+            )
+            return await self.async_step_consumption()
 
         current = self.config_entry.options
 
@@ -213,10 +222,76 @@ class BeemAIOptionsFlow(OptionsFlow):
                         DEFAULT_EV_REQUIRE_WATER_HEATER,
                     ),
                 ): bool,
+                vol.Optional(
+                    OPT_EV_CHARGING_POWER_SENSOR,
+                    default=current.get(OPT_EV_CHARGING_POWER_SENSOR, ""),
+                ): EntitySelector(
+                    EntitySelectorConfig(domain="sensor", device_class="power")
+                ),
             }
         )
 
         return self.async_show_form(
             step_id="ev_charger",
+            data_schema=schema,
+        )
+
+    async def async_step_consumption(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Last step — what the house consumption is made of.
+
+        Heating / cooling energy counters and the outdoor temperature,
+        read from the recorder's statistics to learn the base load and
+        the heating needs.  Nothing here drives any device.
+        """
+        if user_input is not None:
+            self._options[OPT_HEATING_ENERGY_ENTITIES] = list(
+                user_input.get(OPT_HEATING_ENERGY_ENTITIES) or []
+            )
+            self._options[OPT_COOLING_ENERGY_ENTITIES] = list(
+                user_input.get(OPT_COOLING_ENERGY_ENTITIES) or []
+            )
+            self._options[OPT_OUTDOOR_TEMP_ENTITY] = user_input.get(
+                OPT_OUTDOOR_TEMP_ENTITY, ""
+            )
+            self._options[OPT_BASE_LOAD_OVERRIDE_W] = user_input.get(
+                OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W
+            )
+            return self.async_create_entry(title="", data=self._options)
+
+        current = self.config_entry.options
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    OPT_HEATING_ENERGY_ENTITIES,
+                    default=current.get(OPT_HEATING_ENERGY_ENTITIES, []),
+                ): EntitySelector(EntitySelectorConfig(
+                    domain="sensor", device_class="energy", multiple=True,
+                )),
+                vol.Optional(
+                    OPT_COOLING_ENERGY_ENTITIES,
+                    default=current.get(OPT_COOLING_ENERGY_ENTITIES, []),
+                ): EntitySelector(EntitySelectorConfig(
+                    domain="sensor", device_class="energy", multiple=True,
+                )),
+                vol.Optional(
+                    OPT_OUTDOOR_TEMP_ENTITY,
+                    default=current.get(OPT_OUTDOOR_TEMP_ENTITY, ""),
+                ): EntitySelector(EntitySelectorConfig(
+                    domain="sensor", device_class="temperature",
+                )),
+                vol.Optional(
+                    OPT_BASE_LOAD_OVERRIDE_W,
+                    default=current.get(
+                        OPT_BASE_LOAD_OVERRIDE_W, DEFAULT_BASE_LOAD_OVERRIDE_W,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=5000)),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="consumption",
             data_schema=schema,
         )

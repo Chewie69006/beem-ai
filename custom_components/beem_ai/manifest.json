@@ -1,6 +1,7 @@
 {
   "domain": "beem_ai",
   "name": "BeemAI",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@drodrigues"],
   "config_flow": true,
   "documentation": "https://github.com/drodrigues/BeemAI",

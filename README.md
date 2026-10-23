@@ -273,6 +273,28 @@ affected. The **Grid Charge Reserve** binary sensor (System device) shows
 when the reserve is active, with `last_grid_charge` and `reserved_until`
 attributes.
 
+### Energy history (consumption model)
+
+First step towards an evening suggestion of the night's battery charge.
+BeemAI reads Home Assistant's long-term statistics and splits the house
+consumption hour by hour:
+
+    base = consumption − water heater − EV − heating − cooling
+
+Set the inputs in the options (last step, **Consumption model**): heating and
+cooling energy counters (e.g. each Daikin unit's daily electrical
+consumption), an outdoor temperature sensor, and in the EV step the charger's
+power sensor. Two System sensors show the result:
+
+- **Base Load** (W) — the always-on consumption: median of the night windows
+  (01:00–05:00) over the last 14 nights, or a fixed value from the options;
+- **Energy History** (days) — the last 7 days' breakdown in its attributes,
+  how far back the heating history goes, and `missing_statistics` (configured
+  entities without long-term statistics, e.g. a sensor with no
+  `state_class`).
+
+Nothing is controlled from this yet.
+
 ### EV Charger Modes
 
 | Mode | What BeemAI does |
