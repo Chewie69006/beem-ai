@@ -30,6 +30,10 @@ COOLDOWN_AFTER_EXTERNAL_OFF_S = 15 * 60  # Block restart after an unexpected OFF
 # commands before the mismatch counts as an external toggle.  The plug
 # confirms within one 5 s tick; raise it for a slower (cloud) switch.
 COMMAND_SETTLE_S = 15
+# A switch that has not changed at all since our command never got it
+# (meross_lan drops commands over its cloud rate limit): re-send it this
+# many times before giving up — never read it as a hand toggle.
+COMMAND_RETRIES = 2
 IMPORT_TOLERANCE_W = 50  # Small grid import below this is noise, not real deficit
 
 # Fully-heated detection: power must stay below this for FULLY_HEATED_SUSTAIN_S
@@ -87,6 +91,10 @@ class WaterHeaterController:
         # passed that mismatch is our own command in flight, not an
         # external transition.
         self._commanded_at: float | None = None
+        # Wall-clock time of that command, compared with the switch's
+        # ``last_changed`` to tell a lost command from an external toggle.
+        self._commanded_wall: datetime | None = None
+        self._command_retries: int = 0
         # True while the heater is on *because we turned it on*.  An
         # externally started session (manual flip, another automation)
         # leaves this False so releasing control never kills a run we
@@ -217,24 +225,51 @@ class WaterHeaterController:
         # old state.  Deciding on it would read our stop as an external
         # on, then as an external off — which arms the cooldown and
         # latches the off-peak window.  Skip the tick until it settles.
+        command_lost = False
         if self._commanded_at is not None:
-            if (
-                observed != self._expected_state
-                and now - self._commanded_at < COMMAND_SETTLE_S
-            ):
-                _LOGGER.debug(
-                    "WH eval: switch still %s after our turn_%s — waiting",
-                    observed, self._expected_state,
+            if observed != self._expected_state:
+                if now - self._commanded_at < COMMAND_SETTLE_S:
+                    _LOGGER.debug(
+                        "WH eval: switch still %s after our turn_%s — waiting",
+                        observed, self._expected_state,
+                    )
+                    return
+                last_changed = getattr(
+                    self._hass.states.get(self._switch_entity_id),
+                    "last_changed", None,
                 )
-                return
+                command_lost = (
+                    isinstance(last_changed, datetime)
+                    and last_changed < self._commanded_wall
+                )
+                if command_lost and self._command_retries < COMMAND_RETRIES:
+                    self._command_retries += 1
+                    _LOGGER.warning(
+                        "Water heater: switch still %s %ds after our "
+                        "turn_%s — command lost, re-sending (%d/%d)",
+                        observed, COMMAND_SETTLE_S, self._expected_state,
+                        self._command_retries, COMMAND_RETRIES,
+                    )
+                    if self._expected_state == "on":
+                        await self._turn_on()
+                    else:
+                        await self._turn_off()
+                    return
             self._commanded_at = None
+            self._command_retries = 0
 
-        # Accumulate energy from power entity
+        # Accumulate energy from power entity.  Only Auto's surplus
+        # sessions count toward "fully heated": energy bought off-peak or
+        # run by hand must not exempt the next night from its top-up.
         wh_power = self._read_power_w(power_entity_id)
         if wh_power is not None and is_on and wh_power > 0:
             if self._last_power_sample_time is not None:
                 dt_h = (now - self._last_power_sample_time) / 3600.0
-                if 0 < dt_h < 1:
+                if (
+                    0 < dt_h < 1
+                    and wh_mode == WhMode.AUTO
+                    and not self._offpeak_session
+                ):
                     self._energy_today_wh += wh_power * dt_h
             self._last_power_sample_time = now
         elif wh_power is not None and is_on:
@@ -299,27 +334,37 @@ class WaterHeaterController:
         # the cooldown so we don't immediately re-fire on a residual
         # surplus reading.
         if self._expected_state is not None and observed != self._expected_state:
-            if observed == "off":
+            if command_lost:
                 _LOGGER.warning(
-                    "Water heater: switch turned off externally "
-                    "(plug auto-off, manual, or integration glitch) — "
-                    "applying %ds cooldown before any restart",
+                    "Water heater: switch ignored %d turn_%s commands — "
+                    "taking it as %s (%ds cooldown if off)",
+                    COMMAND_RETRIES + 1, self._expected_state, observed,
                     COOLDOWN_AFTER_EXTERNAL_OFF_S,
                 )
+            if observed == "off":
+                if not command_lost:
+                    _LOGGER.warning(
+                        "Water heater: switch turned off externally "
+                        "(plug auto-off, manual, or integration glitch) — "
+                        "applying %ds cooldown before any restart",
+                        COOLDOWN_AFTER_EXTERNAL_OFF_S,
+                    )
                 self._cooldown_until_monotonic = (
                     now + COOLDOWN_AFTER_EXTERNAL_OFF_S
                 )
                 self._commanded_on = False
                 # Switched off by hand mid off-peak session: don't fight
-                # the user every cooldown until the period ends.
-                if self._offpeak_session:
+                # the user every cooldown until the period ends.  A plug
+                # that ignored us is retried after the cooldown instead.
+                if self._offpeak_session and not command_lost:
                     self._offpeak_done = True
                 self._clear_session()
             else:
-                _LOGGER.warning(
-                    "Water heater: switch turned on externally — "
-                    "controller will adopt the running session",
-                )
+                if not command_lost:
+                    _LOGGER.warning(
+                        "Water heater: switch turned on externally — "
+                        "controller will adopt the running session",
+                    )
                 self._commanded_on = False
         self._expected_state = observed
 
@@ -664,6 +709,7 @@ class WaterHeaterController:
         )
         self._expected_state = "on"
         self._commanded_at = time.monotonic()
+        self._commanded_wall = datetime.now(timezone.utc)
         self._commanded_on = True
 
     async def _turn_off(self) -> None:
@@ -675,6 +721,7 @@ class WaterHeaterController:
         )
         self._expected_state = "off"
         self._commanded_at = time.monotonic()
+        self._commanded_wall = datetime.now(timezone.utc)
         self._commanded_on = False
 
     async def force_stop_overload(self, consumption_w: float) -> None:

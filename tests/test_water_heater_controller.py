@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.beem_ai.water_heater_controller import (
+    COMMAND_RETRIES,
     COMMAND_SETTLE_S,
     COOLDOWN_AFTER_EXTERNAL_OFF_S,
     EXPORT_SOC_THRESHOLD,
@@ -1164,17 +1165,63 @@ async def test_offpeak_start_on_slow_switch_is_not_an_external_off(caplog):
 
 
 @pytest.mark.asyncio
-async def test_command_that_never_lands_is_still_an_external_state():
-    """The settle window is bounded: a plug that never obeys (offline,
-    lost command) falls back to the unexpected-OFF handling."""
+async def test_lost_offpeak_command_is_resent_not_a_manual_off(caplog):
+    """23/10 21:31: meross_lan dropped the turn_on (cloud rate limit), the
+    switch never moved, and the night was latched as a hand switch-off."""
     ctrl, hass = _make_controller()
+    hass.set_switch("off", seconds_ago=60)
     hass.lag = True
-    await _offpeak_eval(ctrl)
-    await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S - 1)
-    assert ctrl._cooldown_until_monotonic is None
+    with caplog.at_level(logging.WARNING):
+        await _offpeak_eval(ctrl)
+        await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S)
+        assert hass.services.async_call.await_count == 2
+        hass.flush()
+        await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S + 5)
 
-    await _offpeak_eval(ctrl, t=1000.0 + COMMAND_SETTLE_S)
+    assert ctrl.is_heating
+    assert "externally" not in caplog.text
+    assert ctrl._cooldown_until_monotonic is None
+    assert not ctrl._offpeak_done
+
+
+@pytest.mark.asyncio
+async def test_plug_ignoring_every_command_is_retried_after_cooldown():
+    """Bounded retries, then the cooldown — but the window stays open."""
+    ctrl, hass = _make_controller()
+    hass.set_switch("off", seconds_ago=60)
+    hass.lag = True
+    t = 1000.0
+    await _offpeak_eval(ctrl, t=t)
+    for _ in range(COMMAND_RETRIES + 1):
+        t += COMMAND_SETTLE_S
+        await _offpeak_eval(ctrl, t=t)
+    assert hass.services.async_call.await_count == COMMAND_RETRIES + 1
     assert ctrl._cooldown_until_monotonic is not None
+    assert not ctrl._offpeak_done
+
+    await _offpeak_eval(ctrl, t=t + COOLDOWN_AFTER_EXTERNAL_OFF_S)
+    assert hass.services.async_call.await_count == COMMAND_RETRIES + 2
+
+
+@pytest.mark.asyncio
+async def test_only_auto_surplus_energy_counts_toward_fully_heated():
+    """20/10: 3.7 kWh heated off-peak after the 22:00 reset counted as the
+    next day's solar — "fully heated" at 05:22 skipped the 21/10 night."""
+    ctrl, hass = _make_controller()
+    hass.set_power(2000.0)
+    await _offpeak_eval(ctrl)
+    for t in (1100.0, 2000.0, 3000.0):
+        await _offpeak_eval(ctrl, t=t)
+    assert ctrl.is_heating
+    assert ctrl.energy_today_wh == 0
+
+    for t in (3100.0, 4000.0):
+        await _offpeak_eval(ctrl, offpeak=False, mode="Manual", t=t)
+    assert ctrl.energy_today_wh == 0
+
+    await _offpeak_eval(ctrl, offpeak=False, t=4900.0)
+    await _offpeak_eval(ctrl, offpeak=False, t=5800.0)
+    assert ctrl.energy_today_wh > 0
 
 
 @pytest.mark.asyncio

@@ -77,6 +77,14 @@
   skips the tick while the switch still shows the pre-command state
   (`COMMAND_SETTLE_S`, 15 s).  Without it our own force-stop reads as a
   manual off mid-session and latches the window for the night
+- A switch that never moved after our command (`last_changed` older than
+  the command) did not get it — meross_lan drops commands over its cloud
+  rate limit.  It is re-sent `COMMAND_RETRIES` (2) times, then the cooldown
+  applies, but the window is never latched: the top-up retries after it
+- Only Auto surplus sessions add to the fully-heated energy counter — not
+  an off-peak session (the 22:00 reset lands inside it) nor Manual.  Known
+  gap: rule 1 can still fire at dawn on a grid-charged battery (99 %, a few
+  W of meter noise as "export", solar 0 W) and that session counts
 
 ## EV Wallbox Schedule (Auto) and Full Power
 - Force Charge sets `FULL_POWER_AMPS` (32 A) once at start (or when selected
