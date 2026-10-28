@@ -22,6 +22,7 @@ from custom_components.beem_ai.ev_charger_controller import (
     REGULATE_INTERVAL_S,
     START_HEADROOM_W,
     STATUS_NO_DEMAND_SUSTAIN_S,
+    STOP_RETRY_S,
     SUSTAIN_SECONDS,
     FULL_POWER_AMPS,
     EvMode,
@@ -460,6 +461,9 @@ async def test_overload_stops_if_already_at_minimum():
         await _eval(ctrl, consumption_w=8000)
 
     assert ctrl.is_charging is False
+    assert ctrl.current_amps == MIN_CHARGE_AMPS  # not while it may run
+    with patch("time.monotonic", return_value=t + 7):
+        await _eval(ctrl, consumption_w=8000)  # the pause shows
     assert ctrl.current_amps == 32  # restored
 
 
@@ -536,7 +540,11 @@ async def test_stops_when_soc_drops_below_threshold():
     assert calls[0] == call(
         "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
-    # calls[1] is the post-turn_off update_entity refresh.
+    # calls[1] is the post-turn_off update_entity refresh.  The user's
+    # amps follow once the pause shows, on the next (idle) tick.
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                meter_power_w=0, battery_power_w=-1500)
+    calls = hass.services.async_call.call_args_list
     assert calls[2] == call(
         "number", "set_value",
         {"entity_id": AMPS_ID, "value": 32},
@@ -655,8 +663,12 @@ async def test_restores_user_amps_on_stop():
                 meter_power_w=0, battery_power_w=-1500)
 
     assert ctrl.is_charging is False
-    assert ctrl.current_amps == 25
     assert ctrl._saved_amps is None
+    # Owed, not written yet: the pause may not have landed.
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1,
+                meter_power_w=0, battery_power_w=-1500)  # off: idle tick
+    assert ctrl.current_amps == 25
 
     calls = hass.services.async_call.call_args_list
     # calls[0]=turn_off, calls[1]=update_entity refresh, calls[2]=restore amps.
@@ -1881,17 +1893,20 @@ async def _solar_session_hits_soc_floor(ctrl, hass, mode="Auto"):
 async def test_auto_stop_hands_back_to_schedule():
     ctrl, hass = _schedule_controller(user_amps=32, resume=True)
 
-    await _solar_session_hits_soc_floor(ctrl, hass)
+    t = await _solar_session_hits_soc_floor(ctrl, hass)
 
     assert ctrl.is_charging is False
     names = _service_names(hass)
-    # Pause first, then the user's amps back, then the schedule.
+    # Pause first, then the schedule; the user's amps once the pause shows.
     assert names.index(("homeassistant", "turn_off")) < names.index(
         ("button", "press")
     )
     assert _press_calls(hass) == [
         call("button", "press", {"entity_id": RESUME_ID}),
     ]
+    assert hass._amps == MIN_CHARGE_AMPS
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)
     assert hass._amps == 32
 
 
@@ -2131,3 +2146,138 @@ async def test_resume_schedule_if_idle():
     hass.set_switch("on")
     await ctrl.resume_schedule_if_idle()
     assert len(_press_calls(hass)) == 1  # never while charging
+
+
+# ---- A stop the Wallbox doesn't take (27/10) --------------------------
+
+
+def _wallbox_keeps_it_on(hass, *, flips=False):
+    """The 27/10 Wallbox: after our pause and "Resume schedule" the switch
+    reads on again at the next tick.  By default HA never sees the pause
+    (the switch doesn't change); ``flips``: the pause showed and the
+    schedule restarted the charge between two ticks."""
+    real_call = hass._service_call
+
+    async def call_(domain, service, data):
+        if (domain, service) == ("homeassistant", "turn_off") and not flips:
+            return
+        await real_call(domain, service, data)
+        if flips and domain == "button":
+            hass.set_switch("on")
+
+    hass.services.async_call.side_effect = call_
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flips", [False, True])
+async def test_idle_car_kept_on_by_the_wallbox_is_not_stopped_every_minute(
+    flips,
+):
+    """27/10 10:24–10:44: a solar start, the car not drawing, the Wallbox
+    back on 5 s after each no-demand stop.  BeemAI stopped it and adopted
+    it again once a minute, at the 32A it had just restored — and at
+    10:44 the car drew those 32A into the 7 kW limit."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Waiting for car demand")
+    _wallbox_keeps_it_on(hass, flips=flips)
+
+    ticks = 19 * 60 // 5
+    for i in range(1, ticks):
+        with patch("time.monotonic", return_value=t + 5 * i):
+            await _eval(ctrl)
+
+    assert _service_names(hass).count(("homeassistant", "turn_off")) == 1
+    assert len(_press_calls(hass)) == 1
+    assert ctrl.is_charging is True
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+
+    # The car wakes up while the house is busy: it starts at 6A, piloted.
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 5 * ticks):
+        await _eval(ctrl, meter_power_w=1500.0, consumption_w=4500.0)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    assert ctrl.is_hands_off("Auto") is False
+
+
+@pytest.mark.asyncio
+async def test_pause_shown_late_costs_nothing():
+    """27/10 12:41: the switch still read on 5 s after our stop, then off
+    — the pause had landed late.  The tick in between holds the charger
+    at 6A, never at the 32A the stop restored; once it's off the user's
+    32A are back, and the night's start is still the schedule's."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Charging")
+    _wallbox_keeps_it_on(hass)
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, meter_power_w=1000.0,
+                    consumption_w=MAX_CONSUMPTION_W + 500.0)  # stop at 6A
+    assert ("homeassistant", "turn_off") in _service_names(hass)
+
+    with patch("time.monotonic", return_value=t + 10):
+        await _eval(ctrl, **QUIET_NIGHT)
+    assert ctrl.current_amps == MIN_CHARGE_AMPS
+    assert ctrl.is_hands_off("Auto") is False
+    # Neither the stop nor the tick after it raised a charger still on.
+    assert call(
+        "number", "set_value", {"entity_id": AMPS_ID, "value": 32},
+    ) not in hass.services.async_call.call_args_list
+
+    hass.set_switch("off")
+    hass.set_status("Scheduled")
+    with patch("time.monotonic", return_value=t + 15):
+        await _eval(ctrl, **QUIET_NIGHT)
+    assert hass._amps == 32
+    assert ctrl._held_since is None
+
+    hass.set_switch("on")  # the night window opens
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 20):
+        await _eval(ctrl, **QUIET_NIGHT)
+    assert ctrl._start_mode == StartMode.SCHEDULE
+
+
+@pytest.mark.asyncio
+async def test_held_session_retries_its_auto_stops_late():
+    """A held car that draws still gets the SoC floor — once per
+    STOP_RETRY_S, not once a tick."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Waiting for car demand")
+    _wallbox_keeps_it_on(hass, flips=True)
+    for dt in (5, 5 + STATUS_NO_DEMAND_SUSTAIN_S, 10 + STATUS_NO_DEMAND_SUSTAIN_S):
+        with patch("time.monotonic", return_value=t + dt):
+            await _eval(ctrl)
+    assert ctrl._held_since is not None
+    held_at = ctrl._held_since
+    hass.set_status("Charging")
+    hass.services.async_call.reset_mock()
+
+    low = dict(soc=SOC_STOP_THRESHOLD - 1, meter_power_w=0.0)
+    with patch("time.monotonic", return_value=held_at + STOP_RETRY_S - 5):
+        await _eval(ctrl, **low)
+    assert ("homeassistant", "turn_off") not in _service_names(hass)
+
+    with patch("time.monotonic", return_value=held_at + STOP_RETRY_S):
+        await _eval(ctrl, **low)
+    assert _service_names(hass).count(("homeassistant", "turn_off")) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_demand_arm_does_not_outlive_its_session():
+    """27/10 10:25: our solar start was stopped on its first tick —
+    'sustained 30302s' — on an arm left over from the night."""
+    ctrl, hass = _make_controller(with_status=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Waiting for car demand")
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl)
+    assert ctrl._no_demand_since is not None
+
+    hass.set_switch("off")  # the session ends on the Wallbox side
+    with patch("time.monotonic", return_value=t + 600):
+        await _eval(ctrl)
+
+    await _start_charging(ctrl, hass, t0=t + 30000)  # asserts it runs
+    assert ctrl._no_demand_since == t + 30000 + SUSTAIN_SECONDS

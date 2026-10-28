@@ -102,6 +102,18 @@
   it after every Auto-rule stop, and so does selecting Auto while the
   charger is off.  Never on Disabled / master off / Manual stops.  The button
   is plain config, assigned on every options update — not in `entity_ids`
+- A stop that doesn't take — switch still on at a tick after
+  `_stop_session()` with no idle tick between (25–27/10, car idle: the
+  Wallbox API answered 403 to every pause of the loops, unseen here since
+  service calls don't block) — makes a *held* session (`_held_since`):
+  parked at `MIN_CHARGE_AMPS`, no regulation and never stopped again while
+  the car doesn't draw, other Auto stops after `STOP_RETRY_S` (15 min);
+  overload stops still apply.  `_stop_session()` writes no amperage: the
+  user's amps are owed (`_restore_amps`) and written on the first idle
+  tick, never to a charger that may still be charging (`stop()` and
+  Disabled still restore at once).  Every idle tick also drops
+  `_no_demand_since` (a stale arm stopped a solar start on its first
+  tick: "sustained 30302s")
 - All of the schedule behaviour is gated by the "Follow Wallbox Schedule"
   switch (`OPT_EV_FOLLOW_SCHEDULE`, default on, stored in the options like
   the mode selects, assigned to `controller.follow_schedule`).  Read live:

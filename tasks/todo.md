@@ -171,3 +171,40 @@ idle (rule 2 gated by the reserve; the decision is DEBUG-only).
       running on its own draw (fails with the line patched out), still
       stops at 400 W left.  511 passed
 - [ ] Not deployed to the HA box
+
+## Fix: Wallbox stop/resume loop, and 32 A after a stop that doesn't take
+Per user (28/10), from the 27/10 investigation.  ~110 cycles on 27/10
+(00:23–02:00, 10:25–10:44): no-demand stop → restore 32 A → Resume
+schedule → switch still on 5 s later → adopted MANUAL at 32 A → stop 60 s
+later…  At 10:44 the car drew those 32 A (7995 W, import 4928 W).
+- [x] Root cause (HA journal, DEBUG): the pauses in the loops failed —
+      `pauseChargingSession` → 403 Forbidden from api.wall-box.com
+      (`/v3/chargers/1145334/remote-action`; a few 502), logged by HA core
+      as "Error executing service" 0.5 s later and unseen by the
+      controller since service calls don't block.  340 re-adoptions 4–9 s
+      after our stop, never an idle tick; the 7 loops that ended did so on
+      a SCHEDULE adoption after one.  A stale `_no_demand_since` (30302 s,
+      81609 s) made the first stops immediate
+- [x] Held session (`_held_since`): on at a tick after `_stop_session()`
+      with no idle tick between → parked at 6 A, no regulation and no stop
+      while the car doesn't draw, other Auto stops after `STOP_RETRY_S`
+      (15 min); one warning log.  Overload stops still apply
+- [x] User amps owed (`_restore_amps`), written on the first idle tick
+      only; Force clears the debt.  `_no_demand_since` dropped on idle
+- [x] Tests: 27/10 replay (pause never shown / pause then immediate
+      restart), late pause (12:41) → 6 A, no 32 A while on, 32 A once off,
+      then SCHEDULE; SoC-floor retry bound; stale arm.  Red on HEAD
+      (scratch copy): 4 replays fail on behaviour, the retry test on the
+      missing attribute; 3 existing tests adapted to the deferred restore
+      (one idle tick before checking amps).  Full suite 509 passed
+      (incl. the WH session's uncommitted changes)
+- [ ] Not deployed to the HA box
+- [ ] Trade-offs: a session held at night charges at 6 A, not the
+      schedule's 32 A, until a stop lands and an idle tick is seen; an
+      adopted non-schedule session still sits at its amps (up to 32) for
+      the 60 s no-demand arm before the first stop
+- [ ] Follow-ups: why api.wall-box.com forbids the pause — every loop
+      pause (car idle) got 403, while the 11:30:03 one (car drawing) went
+      through and only the re-pause 5 s later failed; 27/10 00:23 the
+      26/10 21:30 SCHEDULE session came back MANUAL — the switch read off
+      or unknown for a tick, cause unconfirmed (no journal pass there)

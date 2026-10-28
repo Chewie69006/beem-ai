@@ -82,6 +82,18 @@ PENDING_START_GRACE_S = 120
 # pending window.
 PENDING_REFRESH_INTERVAL_S = 20
 
+# A charger still on at the tick after one of our stops, with no idle tick
+# in between, didn't take it: the pause failed (25–27/10, car idle: the
+# Wallbox API answered 403 to every pause of the loops — unseen here,
+# service calls don't block), was reported late, or "Resume schedule"
+# restarted the charge at once.
+# Stopping it again only loops — once a minute for hours, at the 32A the
+# stop had just restored, until the car drew them into the 7 kW limit.
+# Such a session is held at MIN_CHARGE_AMPS while the car doesn't draw,
+# never stopped again for no demand, and its other Auto stops wait this
+# long.  The user's amperage goes back once the charger is seen off.
+STOP_RETRY_S = 15 * 60
+
 EMERGENCY_SHRINK_W = 500
 
 MAX_CONSUMPTION_W = 7000
@@ -200,6 +212,14 @@ class EvChargerController:
         # mistaken for the schedule starting.
         self._idle_scheduled: bool = False
         self._handed_back: bool = False
+        # Our last stop, until an idle tick shows it landed.
+        self._stopped_at: float | None = None
+        # Set when the session is one that didn't take our stop (see
+        # STOP_RETRY_S); cleared with the session.
+        self._held_since: float | None = None
+        # The user's amperage, owed back once the charger is seen off —
+        # never written to one that may still be charging.
+        self._restore_amps: int | None = None
 
     # -- Entity reads --
 
@@ -316,6 +336,7 @@ class EvChargerController:
             "EV charger: force start requested at %dA", FULL_POWER_AMPS,
         )
         self._saved_amps = None
+        self._restore_amps = None
         self._last_regulate_time = time.monotonic()
         self._start_mode = StartMode.FORCE
         self._export_sustained_since = None
@@ -359,6 +380,7 @@ class EvChargerController:
             # so stopping later never overwrites what the user sets in
             # the Wallbox app while Force is active.
             self._saved_amps = None
+            self._restore_amps = None
             if not self._is_switch_on():
                 _LOGGER.info(
                     "EV charger: mode set to Force Charge — starting at %dA",
@@ -473,6 +495,18 @@ class EvChargerController:
             if self._start_mode is not None:
                 self._start_mode = None
                 self._saved_amps = None
+            # Off: our stop (if any) landed, and whatever the last session
+            # armed or held ends with it.
+            self._stopped_at = None
+            self._held_since = None
+            self._no_demand_since = None
+            if self._restore_amps not in (None, self._read_amps()):
+                _LOGGER.info(
+                    "EV charger: charger off — restoring user amps %dA",
+                    self._restore_amps,
+                )
+                await self._set_amps(self._restore_amps)
+            self._restore_amps = None
             if ev_mode == EvMode.AUTO:
                 decision = await self._evaluate_idle(
                     soc, headroom_w, solar_power_w, consumption_w,
@@ -506,9 +540,13 @@ class EvChargerController:
         - Anything else (HA restart, a resume from the Wallbox app):
           conservatively MANUAL — overload trims to the floor rather
           than stopping outright — and the mode's own rules apply.
+        - Still on after one of our Auto stops, with no idle tick since:
+          the stop didn't take.  Held (see STOP_RETRY_S) at
+          MIN_CHARGE_AMPS, never at the amperage we just restored.
         """
         from_schedule = self._idle_scheduled
         self._idle_scheduled = False
+        stopped_at, self._stopped_at = self._stopped_at, None
         if ev_mode == EvMode.FORCE:
             self._start_mode = StartMode.FORCE
         elif ev_mode == EvMode.AUTO and from_schedule and self.follow_schedule:
@@ -524,6 +562,21 @@ class EvChargerController:
         )
         if self._start_mode == StartMode.SCHEDULE:
             await self._set_full_power(amps)
+        elif stopped_at is not None and ev_mode == EvMode.AUTO:
+            _LOGGER.warning(
+                "EV charger: switch still reads on %.0fs after our stop "
+                "(pause failed, late, or undone by the schedule); holding "
+                "it at %dA, no stop for no car demand, other Auto stops "
+                "in %d min",
+                now - stopped_at, MIN_CHARGE_AMPS, STOP_RETRY_S // 60,
+            )
+            self._held_since = now
+            # Whatever we change here is owed back once the charger is
+            # off, like the amps of the session we stopped.
+            if self._restore_amps is None:
+                self._restore_amps = self._read_amps()
+            if amps > MIN_CHARGE_AMPS:
+                await self._set_amps(MIN_CHARGE_AMPS)
 
     async def _evaluate_idle(
         self,
@@ -638,7 +691,13 @@ class EvChargerController:
         # leaves the user confused.  Sustain to ignore brief
         # session-handshake transitions.
         status = self._read_status()
+        held = ev_mode == EvMode.AUTO and self._held_since is not None
         if status is not None and status in NO_DEMAND_STATUSES:
+            if held:
+                # The Wallbox keeps this idle car on whatever we do:
+                # another stop would only loop.  No regulation either —
+                # it would ramp an idle car back up to 32A.
+                return f"held: car not drawing, {amps}A (our stop didn't take)"
             if self._no_demand_since is None:
                 self._no_demand_since = now
                 _LOGGER.info(
@@ -705,7 +764,9 @@ class EvChargerController:
             return f"overload: cons {consumption_w:.0f}W → {target}A"
 
         # Auto-only surplus stops (after overload, before regulation):
-        if ev_mode == EvMode.AUTO:
+        if ev_mode == EvMode.AUTO and not (
+            held and now - self._held_since < STOP_RETRY_S
+        ):
             if amps <= MIN_CHARGE_AMPS and soc < stop_soc:
                 _LOGGER.info(
                     "EV charger: pinned at %dA, SoC=%.1f%% < %.1f%% "
@@ -809,9 +870,15 @@ class EvChargerController:
     async def _stop_session(self, ev_mode: EvMode) -> None:
         """End a session on one of our own rules (SoC floor, no car
         demand, overload).  In Auto, the charger then goes back to its
-        Wallbox schedule — our pause would otherwise cancel it."""
-        await self._turn_off_and_restore()
+        Wallbox schedule — our pause would otherwise cancel it.
+
+        The user's amperage is only owed back here: written on the first
+        idle tick, since this pause may not land (see STOP_RETRY_S)."""
+        await self._turn_off()
+        if self._saved_amps is not None:
+            self._restore_amps = self._saved_amps
         self._clear_session()
+        self._stopped_at = time.monotonic()
         if ev_mode == EvMode.AUTO and self.follow_schedule:
             await self._resume_schedule()
 
@@ -853,6 +920,8 @@ class EvChargerController:
         # Our own start — whatever the Wallbox was waiting for before.
         self._idle_scheduled = False
         self._handed_back = False
+        self._stopped_at = None
+        self._held_since = None
         try:
             await self._hass.services.async_call(
                 "homeassistant",
@@ -868,8 +937,8 @@ class EvChargerController:
             )
         await self._refresh_toggle_entity()
 
-    async def _turn_off_and_restore(self) -> None:
-        """Stop EV charging and restore the user's original amperage."""
+    async def _turn_off(self) -> None:
+        """Pause the EV charger toggle."""
         try:
             await self._hass.services.async_call(
                 "homeassistant",
@@ -879,6 +948,10 @@ class EvChargerController:
         except HomeAssistantError as err:
             _LOGGER.warning("EV charger: turn_off failed: %s", err)
         await self._refresh_toggle_entity()
+
+    async def _turn_off_and_restore(self) -> None:
+        """Stop EV charging and restore the user's original amperage."""
+        await self._turn_off()
         if self._saved_amps is not None:
             _LOGGER.info(
                 "EV charger: restoring user amps %dA → %dA",
@@ -929,6 +1002,8 @@ class EvChargerController:
         self._last_headroom_ok_at = None
         self._pending_start_since = None
         self._no_demand_since = None
+        self._stopped_at = None
+        self._held_since = None
 
     # -- Lifecycle --
 
