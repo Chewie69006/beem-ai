@@ -106,7 +106,6 @@ async def _evaluate(
     mode="Auto",
     power_entity_id=None,
     fully_heated_threshold_wh=0,
-    grid_charged=False,
 ):
     """Helper to call evaluate with sane defaults.
 
@@ -121,7 +120,6 @@ async def _evaluate(
         mode=mode,
         power_entity_id=power_entity_id,
         fully_heated_threshold_wh=fully_heated_threshold_wh,
-        grid_charged=grid_charged,
     )
 
 
@@ -358,6 +356,42 @@ async def test_rule2_stop_hysteresis():
     hass.services.async_call.assert_called_once_with(
         "homeassistant", "turn_off", {"entity_id": SWITCH_ID}
     )
+
+
+@pytest.mark.asyncio
+async def test_rule2_session_counts_its_own_draw_as_surplus():
+    """28/10: 2.5 kW of solar into the battery, a 2.4 kW heater on top
+    leaves it +100 W.  Without the heater the surplus is still 2.5 kW:
+    the session must not stop on its own draw."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+    hass.set_power(2400.0)
+
+    for dt in (1, 1 + SUSTAIN_SECONDS, 1 + 3 * SUSTAIN_SECONDS):
+        with patch("time.monotonic", return_value=t + dt):
+            await _evaluate(
+                ctrl, soc=81.0, charge_power_w=100,
+                power_entity_id=POWER_ENTITY_ID,
+            )
+    assert ctrl.is_heating is True
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rule2_session_stops_when_the_surplus_without_it_is_gone():
+    """A cloud: the battery covers 2 kW of the 2.4 kW heater — 400 W of
+    surplus left, under the threshold, so the session ends."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+    hass.set_power(2400.0)
+
+    for dt in (1, 1 + SUSTAIN_SECONDS):
+        with patch("time.monotonic", return_value=t + dt):
+            await _evaluate(
+                ctrl, soc=81.0, charge_power_w=-2000,
+                power_entity_id=POWER_ENTITY_ID,
+            )
+    assert ctrl.is_heating is False
 
 
 # ==================================================================
@@ -1270,52 +1304,3 @@ async def test_offpeak_manual_switch_off_is_not_overridden():
     await _offpeak_eval(ctrl, t=1100.0)
     await _offpeak_eval(ctrl, t=1100.0 + COOLDOWN_AFTER_EXTERNAL_OFF_S + 1)
     assert not ctrl.is_heating
-
-
-# ==================================================================
-# Battery charged from the grid — solar export only
-# ==================================================================
-
-
-@pytest.mark.asyncio
-async def test_grid_charged_battery_blocks_the_soc_rule():
-    """Morning after an off-peak charge: SoC above the threshold thanks to
-    the grid, and a 600 W solar trickle into the battery.  Rule 2 would
-    start the heater and drain the grid-bought energy — not any more."""
-    ctrl, hass = _make_controller()
-    for t in (1000.0, 1000.0 + SUSTAIN_SECONDS, 1000.0 + 10 * SUSTAIN_SECONDS):
-        with patch("time.monotonic", return_value=t):
-            await _evaluate(
-                ctrl, soc=SOC_THRESHOLD + 1, charge_power_w=600,
-                grid_charged=True,
-            )
-    assert ctrl.is_heating is False
-    hass.services.async_call.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_grid_charged_battery_still_heats_on_export():
-    """Battery full and exporting: that surplus is solar whatever filled
-    the battery overnight."""
-    ctrl, hass = _make_controller()
-    with patch("time.monotonic", return_value=1000.0):
-        await _evaluate(ctrl, soc=96.0, export_w=600, grid_charged=True)
-    with patch("time.monotonic", return_value=1000.0 + SUSTAIN_SECONDS):
-        await _evaluate(ctrl, soc=96.0, export_w=600, grid_charged=True)
-    assert ctrl.is_heating is True
-
-
-@pytest.mark.asyncio
-async def test_grid_charged_battery_stops_a_session_without_export():
-    """A session running on the SoC rule (e.g. adopted after a restart)
-    ends once only the export rule counts and nothing is exported."""
-    ctrl, hass = _make_controller()
-    t = await _heat_via_charge(ctrl, hass)
-
-    for dt in (1, 1 + SUSTAIN_SECONDS):
-        with patch("time.monotonic", return_value=t + dt):
-            await _evaluate(
-                ctrl, soc=SOC_THRESHOLD + 1, charge_power_w=600,
-                grid_charged=True,
-            )
-    assert ctrl.is_heating is False

@@ -761,8 +761,9 @@ class BeemAICoordinator(DataUpdateCoordinator):
         consumption_w = battery.consumption_w
         import_w = battery.import_power_w
         # After a grid charge, the battery's energy is the house's: the
-        # diverters only get what the panels produce beyond a nearly
-        # full battery.
+        # EV only gets what the panels produce beyond a nearly full
+        # battery.  The water heater isn't held back — its rules already
+        # need solar surplus (no import).
         grid_charged = self._grid_charge.is_reserved()
 
         await self._handle_overload(consumption_w, import_w)
@@ -782,7 +783,6 @@ class BeemAICoordinator(DataUpdateCoordinator):
                 power_entity_id=self.wh_power_entity or None,
                 fully_heated_threshold_wh=self.wh_fully_heated_threshold,
                 offpeak=self._wh_offpeak(),
-                grid_charged=grid_charged,
             )
         # Note: the EV controller's per-tick overload reduction still
         # runs inside its evaluate() — that's the actual amps-trim

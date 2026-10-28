@@ -111,7 +111,7 @@
 - The options flow starts from the stored options, so saving the form
   keeps what the entities wrote (modes, thresholds, this switch)
 
-## Grid Charge Reserve (diverters on solar surplus only)
+## Grid Charge Reserve (EV on solar surplus only)
 - After a grid charge, the battery holds energy bought for the house (the
   day's solar was forecast short).  `GridChargeTracker` detects it from
   live data, whatever started it: `clamp(import, 0, battery_power)` ≥
@@ -121,11 +121,20 @@
 - The battery stays reserved for `GRID_CHARGE_HOLD` (20 h) after the last
   grid-charging tick; the timestamp is persisted in
   `beem_ai_data/grid_charge.json` (a morning restart keeps the reserve)
-- While reserved: the water heater's rule 2 (SoC ≥ threshold + charge
-  trickle) is off — only rule 1 (SoC ≥ 95 % and exporting) starts it —
-  and the EV Auto target SoC is raised to at least `RESERVED_MIN_SOC`
-  (95 %).  Off-peak top-up, Manual, Force and the Wallbox schedule are
-  untouched
+- While reserved: the EV Auto target SoC is raised to at least
+  `RESERVED_MIN_SOC` (95 %).  Off-peak top-up, Manual, Force and the
+  Wallbox schedule are untouched
+- The water heater is **not** held back (per user, 28/10): a solar
+  surplus goes to the tank whatever filled the battery.  Rule 2 (SoC ≥
+  threshold + charge ≥ threshold) already counts solar charge only — it
+  requires import ≤ `IMPORT_TOLERANCE_W` (50 W), so a grid charge never
+  meets it.  The Beem charges from the grid most nights: a reserve gate
+  on rule 2 turned it off for good (28/10: SoC 55 %, +2.5 kW, no start)
+- While the heater is on, rule 2 adds the plug's measured draw
+  (`wh_power_entity`) back to the battery charge: the surplus as if the
+  heater were off.  Without it, a 2.5 kW surplus under a 2.4 kW heater
+  reads +100 W and stops the session at the end of every min_duration.
+  No reading (no entity, unavailable) → raw battery charge
 - The tracker runs in `_on_battery_update()`, before the diverters and
   even while BeemAI is disabled (it is a measurement).  Exposed as the
   System binary sensor "Grid Charge Reserve"

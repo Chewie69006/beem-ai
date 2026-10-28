@@ -126,3 +126,48 @@ Per user: start ROADMAP §10, phase 1 (inputs + history, nothing driven).
 - [x] Checked on a real HA 2026.10 (scratch): `weather.get_forecasts`
       response parsed, notify payload with `data.tag` accepted
 - [ ] Next (phase 3): actions on the notification, applying the target
+
+## Investigation: water heater barely ran on 27/10 (no code change)
+Per user.  Deployed code = repo (b8a7b71).  No plug history (no API from
+SSH): heater draw inferred from house consumption steps (~2.4 kW).
+- Tank already hot: night top-up 26/10 22:03 → ~00:00 (thermostat cut).
+  27/10: switch on 05:21–06:53 and 09:02–10:51, draw only 09:14–09:19 and
+  09:30–09:39 (thermostat cut); 10:27–10:43 battery 100 %, ~2 kW exported,
+  heater on and drawing nothing.  Same on 26/10: plug on 12:15–13:54,
+  battery 100 %, up to 1.6 kW exported, nothing drawn (night 21:31 → 02:23)
+- 10:44–12:57 car took 1.4–2.5 kW of surplus (adopted at 32 A → overload,
+  then 6–11 A); heater short bursts only (~1.5–2 kWh for the whole day)
+- 12:57 stop at SoC 92 %; afternoon solar ≈ house load, SoC never back to
+  95 %.  Grid-charge reserve (02:03–04:21) kept rule 2 off, but the battery
+  never charged ≥ 1500 W, so rule 2 would not have fired either
+- Reheat at night: 21:31–22:53 ~2.4 kW (~3.3 kWh), battery 36 → 9 %, then
+  grid; clean thermostat cut.  User test 28/10 09:36: +2.2–2.6 kW, heats
+- Cause: the nightly top-up fills the tank every night, so the next day's
+  surplus has little to heat and `fully_heated` (≥ 2500 Wh of surplus +
+  thermostat cut) is rarely reached.  Trade-off, not a bug: skipping the
+  27/10 top-up would have left ~3.3 kWh unheated for the 28/10 morning
+  (battery 44 % at 09:30).  Possible lever, user's call: forecast-gated
+  top-up.  Daytime figure is an estimate (car draw mixed in)
+- [ ] Side finding: Wallbox loop every ~65 s (no car demand → stop →
+      resume schedule → adopted MANUAL at 32 A), 110×/day; 10:44 overload
+
+## Fix: grid-charge reserve no longer blocks the water heater
+Per user (28/10): "dès lors que j'ai un surplus solaire, on doit
+l'utiliser pour le chauffe-eau".  Seen at 10:40: grid charge 02:03–03:04
+(9 → 50 %), then SoC 55 % and +2.5 kW of solar into the battery, heater
+idle (rule 2 gated by the reserve; the decision is DEBUG-only).
+- [x] Rule 2 ungated: `grid_charged` removed from the WH controller and
+      its coordinator call.  "Solar charge" needs no new code: rule 2
+      already requires import ≤ 50 W (`test_rule2_does_not_fire_when_grid_charging`)
+- [x] Reserve kept for the EV only (target ≥ 95 %); tracker docstring and
+      "Grid charging detected" log text updated; CLAUDE.md section
+- [x] Tests: the 3 WH reserve tests deleted; coordinator replay of 28/10
+      (night grid charge doesn't start the heater, morning solar charge
+      does) — fails on HEAD (git archive copy), passes now.  504 passed
+- [x] Follow-up (per user): rule 2 counted the heater's own draw as lost
+      surplus (2.5 kW surplus − 2.4 kW heater = +100 W < 1500 W → stop
+      after every min_duration, restart 30 s later).  While on, the
+      plug's power is added back to the battery charge.  Tests: keeps
+      running on its own draw (fails with the line patched out), still
+      stops at 400 W left.  511 passed
+- [ ] Not deployed to the HA box

@@ -2,11 +2,13 @@
 
 On a day the battery was charged from the grid (off-peak, because the
 solar forecast falls short), what it holds was bought for the house.
-The surplus diverters must not spend it: a water heater started on a
-500 W solar trickle at SoC 70 % runs on the battery, and the house then
-imports at the peak rate in the evening.  While :py:meth:`is_reserved`
-is True the coordinator holds the diverters to genuine solar surplus —
-the battery nearly full (``RESERVED_MIN_SOC``) and solar left over.
+The EV must not spend it: an Auto charge started at the EV's target SoC
+runs on the battery, and the house then imports at the peak rate in the
+evening.  While :py:meth:`is_reserved` is True the coordinator raises
+the EV's Auto target to ``RESERVED_MIN_SOC`` (battery nearly full).
+The water heater is not held back: its rules already need solar surplus
+(no import), and that surplus goes to the tank whatever filled the
+battery overnight.
 
 Detection is measurement-based, so it works whatever started the charge
 (the Beem app, its schedule, BeemAI's own switches).  The grid power
@@ -117,7 +119,7 @@ class GridChargeTracker:
         self._charging = True
         _LOGGER.info(
             "Grid charging detected (%.0f W from the grid into the "
-            "battery) — water heater and EV limited to solar surplus "
+            "battery) — EV Auto target raised to the reserve level "
             "until %s",
             grid_charge_w, self.reserved_until,
         )

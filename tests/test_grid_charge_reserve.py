@@ -1,9 +1,9 @@
-"""Coordinator: after a grid charge, the diverters only get solar surplus.
+"""Coordinator: after a grid charge, the reserve holds back the EV only.
 
-Replays the rainy-day morning: the battery was charged from the grid
-overnight to 70 %, then a weak sun trickles 600 W into it.  Before, the
-water heater's SoC rule (SoC ≥ threshold + battery charging) started the
-heater on that trickle and drained the grid-bought energy.
+Replays 28/10: the battery charged from the grid overnight (9 → 50 %),
+then at 10:40 the sun put 2.5 kW into it at SoC 55 %.  The water
+heater's SoC rule (SoC ≥ threshold + solar charge, no import) must start
+it — a solar surplus goes to the tank whatever filled the battery.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -32,7 +32,7 @@ def coordinator(mock_hass, state_store):
     c = BeemAICoordinator(mock_hass, entry)
     c.state_store = state_store
     c.wh_soc_threshold = 50.0
-    c.wh_charge_power_threshold = 500.0
+    c.wh_charge_power_threshold = 1500.0
     return c
 
 
@@ -48,13 +48,13 @@ async def _tick(coordinator, t, **battery):
 
 
 async def _night_grid_charge(coordinator, t0=0.0):
-    """Off-peak: 2.5 kW from the grid into the battery, up to 70 %."""
+    """Off-peak: 5 kW from the grid into the battery, at SoC 50 %."""
     t = t0
     while t <= t0 + GRID_CHARGE_SUSTAIN_S + 60:
         await _tick(
             coordinator, t,
-            soc=70.0, solar_power_w=0.0,
-            battery_power_w=2500.0, meter_power_w=2900.0,
+            soc=50.0, solar_power_w=0.0,
+            battery_power_w=5000.0, meter_power_w=5400.0,
         )
         t += 10
     return t
@@ -67,34 +67,28 @@ def _water_heater(coordinator):
     return coordinator._water_heater
 
 
-async def _rainy_morning(coordinator, t0):
-    """1 kW of sun, 400 W of house: 600 W into the battery, no import."""
+async def _sunny_morning(coordinator, t0):
+    """3 kW of sun, 500 W of house: 2.5 kW into the battery, no import."""
     for dt in range(0, 600, 10):
         await _tick(
             coordinator, t0 + dt,
-            soc=70.0, solar_power_w=1000.0,
-            battery_power_w=600.0, meter_power_w=0.0,
+            soc=55.0, solar_power_w=3000.0,
+            battery_power_w=2500.0, meter_power_w=0.0,
         )
 
 
 @pytest.mark.asyncio
-async def test_heater_stays_off_on_the_morning_after_a_grid_charge(
+async def test_solar_charge_heats_on_the_morning_after_a_grid_charge(
     coordinator,
 ):
+    wh = _water_heater(coordinator)
     t = await _night_grid_charge(coordinator)
     assert coordinator.grid_charge.is_reserved()
-
-    wh = _water_heater(coordinator)
-    await _rainy_morning(coordinator, t + 3600)
-
+    # The grid charge itself is no surplus: SoC and charge meet the rule,
+    # the import doesn't.
     assert wh.is_heating is False
 
-
-@pytest.mark.asyncio
-async def test_same_morning_without_grid_charge_heats(coordinator):
-    """Control: the SoC rule itself still works on a solar-filled battery."""
-    wh = _water_heater(coordinator)
-    await _rainy_morning(coordinator, 1000.0)
+    await _sunny_morning(coordinator, t + 3600)
 
     assert wh.is_heating is True
 
