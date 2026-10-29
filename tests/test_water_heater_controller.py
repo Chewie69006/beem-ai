@@ -20,7 +20,9 @@ from custom_components.beem_ai.water_heater_controller import (
     COMMAND_SETTLE_S,
     COOLDOWN_AFTER_EXTERNAL_OFF_S,
     EXPORT_SOC_THRESHOLD,
+    GRACE_SECONDS,
     HYSTERESIS_PCT,
+    SURPLUS_LOSS_STOP_S,
     SUSTAIN_SECONDS,
     WaterHeaterController,
 )
@@ -377,20 +379,80 @@ async def test_rule2_session_counts_its_own_draw_as_surplus():
     hass.services.async_call.assert_not_called()
 
 
+async def _tick(ctrl, t, charge_power_w):
+    """One MQTT tick of a rule-2 session against a 1.5 kW threshold."""
+    with patch("time.monotonic", return_value=t):
+        await _evaluate(
+            ctrl, soc=81.0, charge_power_w=charge_power_w,
+            charge_power_threshold=1500.0,
+            power_entity_id=POWER_ENTITY_ID,
+        )
+
+
 @pytest.mark.asyncio
 async def test_rule2_session_stops_when_the_surplus_without_it_is_gone():
-    """A cloud: the battery covers 2 kW of the 2.4 kW heater — 400 W of
-    surplus left, under the threshold, so the session ends."""
+    """The sun is gone: the battery covers 2 kW of the 2.2 kW heater —
+    ~450 W of surplus without it, under 1.5 kW, so the session ends once
+    the loss has lasted the stop delay."""
     ctrl, hass = _make_controller()
     t = await _heat_via_charge(ctrl, hass)
-    hass.set_power(2400.0)
+    hass.set_power(2200.0)
 
-    for dt in (1, 1 + SUSTAIN_SECONDS):
-        with patch("time.monotonic", return_value=t + dt):
-            await _evaluate(
-                ctrl, soc=81.0, charge_power_w=-2000,
-                power_entity_id=POWER_ENTITY_ID,
-            )
+    await _tick(ctrl, t + 1, charge_power_w=-2000)
+    await _tick(ctrl, t + SURPLUS_LOSS_STOP_S - 1, charge_power_w=-2000)
+    assert ctrl.is_heating is True
+    await _tick(ctrl, t + 1 + SURPLUS_LOSS_STOP_S, charge_power_w=-2000)
+    assert ctrl.is_heating is False
+
+
+@pytest.mark.asyncio
+async def test_rule2_adds_the_heater_back_with_its_conversion_losses():
+    """28/10 13:49: the plug read 2.2 kW, but each switch moved the
+    battery by ~2.45 kW.  At −800 W under the heater the surplus without
+    it is ~1.65 kW, over the 1.5 kW threshold: no stop countdown."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+    hass.set_power(2200.0)
+
+    await _tick(ctrl, t + 5, charge_power_w=-800)
+
+    assert ctrl._stop_armed_since is None
+
+
+@pytest.mark.asyncio
+async def test_cloud_shorter_than_the_stop_delay_keeps_heating():
+    """28/10 13:04: a cloud put the battery at −2.1 kW under the heater
+    for a minute; stopped after 30 s, the sun was back 30 s later.  A
+    2 min dip must not cut the session."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+    hass.set_power(2200.0)
+
+    for dt in range(5, 2 * 60, 5):
+        await _tick(ctrl, t + dt, charge_power_w=-2100)
+    assert ctrl.is_heating is True
+    for dt in range(2 * 60, 2 * 60 + 30, 5):
+        await _tick(ctrl, t + dt, charge_power_w=-300)
+
+    assert ctrl.is_heating is True
+    assert ctrl._stop_armed_since is None
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_lone_good_tick_does_not_restart_the_stop_delay():
+    """A fading afternoon: ~1.1 kW of surplus without the heater, with a
+    lone 1.7 kW tick every minute (the battery swings ±300 W tick to
+    tick under the heater).  The session still ends after the stop
+    delay."""
+    ctrl, hass = _make_controller()
+    t = await _heat_via_charge(ctrl, hass)
+    hass.set_power(2200.0)
+
+    for dt in range(5, SURPLUS_LOSS_STOP_S + 60, 5):
+        lucky = dt % 60 == 0
+        await _tick(ctrl, t + dt, charge_power_w=-750 if lucky else -1350)
+
     assert ctrl.is_heating is False
 
 
@@ -763,8 +825,8 @@ async def test_surplus_loss_stops_after_min_duration_and_sustain():
     assert ctrl.is_heating is True
     assert ctrl._stop_armed_since is not None
 
-    # After sustain seconds → stop.
-    with patch("time.monotonic", return_value=t0 + 5 + SUSTAIN_SECONDS + 1):
+    # After the stop delay → stop.
+    with patch("time.monotonic", return_value=t0 + 5 + SURPLUS_LOSS_STOP_S + 1):
         await _evaluate(
             ctrl, soc=85.0, export_w=0, charge_power_w=0,
             min_duration_s=15 * 60,
@@ -777,7 +839,8 @@ async def test_surplus_loss_stops_after_min_duration_and_sustain():
 
 @pytest.mark.asyncio
 async def test_surplus_returning_clears_stop_arm():
-    """Brief loss then surplus comes back → no stop, arm cleared."""
+    """Loss, then the surplus is back for GRACE_SECONDS → no stop,
+    arm cleared."""
     ctrl, hass = _make_controller()
     t0 = await _heat_via_charge(ctrl, hass)
     hass.set_switch("on", seconds_ago=16 * 60)
@@ -790,12 +853,13 @@ async def test_surplus_returning_clears_stop_arm():
         )
     assert ctrl._stop_armed_since is not None
 
-    with patch("time.monotonic", return_value=t0 + 15):
-        await _evaluate(
-            ctrl, soc=85.0, export_w=0,
-            charge_power_w=600,  # rule2 re-fires
-            min_duration_s=15 * 60,
-        )
+    for dt in (15, 15 + GRACE_SECONDS):
+        with patch("time.monotonic", return_value=t0 + dt):
+            await _evaluate(
+                ctrl, soc=85.0, export_w=0,
+                charge_power_w=600,  # rule2 re-fires
+                min_duration_s=15 * 60,
+            )
     assert ctrl.is_heating is True
     assert ctrl._stop_armed_since is None
     hass.services.async_call.assert_not_called()

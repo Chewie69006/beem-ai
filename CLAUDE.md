@@ -86,6 +86,28 @@
   gap: rule 1 can still fire at dawn on a grid-charged battery (99 %, a few
   W of meter noise as "export", solar 0 W) and that session counts
 
+## Water Heater Solar Session (Auto)
+- Rule 1: SoC ≥ 95 % and exporting.  Rule 2: SoC ≥ threshold, battery
+  charge ≥ threshold (1.5 kW here) and import ≤ `IMPORT_TOLERANCE_W`
+  (50 W).  Either one, held for the "Water Heater Sustain Duration"
+  number (5–120 s — the start delay only), turns the heater on
+- While the heater is on, rule 2 adds the plug's measured draw
+  (`wh_power_entity`) back to the battery charge, divided by
+  `BATTERY_TO_PLUG_EFFICIENCY` (0.9): the surplus as if the heater were
+  off.  Each switch of the heater (2.2 kW at the plug) moves the battery
+  by ~2.45 kW (28/10, 9 switches) — the plug reading alone read ~300 W
+  short.  No reading (no entity, unavailable) → raw battery charge:
+  rule 2 reads false while it heats, so a rule-2 session runs
+  min_duration + `SURPLUS_LOSS_STOP_S`, mostly on the battery
+- Stop, once min_duration has run: both rules false for
+  `SURPLUS_LOSS_STOP_S` (3 min, per user); the surplus must be back
+  `GRACE_SECONDS` (15 s) to call it off, so a lone good tick (the
+  battery swings ±300 W under the heater) doesn't restart the delay.
+  28/10: passing clouds took the surplus away for ~1 min, and the old
+  30 s stop cut those sessions just before the sun came back.  An
+  appliance cycle over 3 min (up to ~5 min that day) or a steady
+  surplus under the threshold still stops it
+
 ## EV Wallbox Schedule (Auto) and Full Power
 - Force Charge sets `FULL_POWER_AMPS` (32 A) once at start (or when selected
   on a running session), then never writes the amperage again.  A session
@@ -142,11 +164,6 @@
   requires import ≤ `IMPORT_TOLERANCE_W` (50 W), so a grid charge never
   meets it.  The Beem charges from the grid most nights: a reserve gate
   on rule 2 turned it off for good (28/10: SoC 55 %, +2.5 kW, no start)
-- While the heater is on, rule 2 adds the plug's measured draw
-  (`wh_power_entity`) back to the battery charge: the surplus as if the
-  heater were off.  Without it, a 2.5 kW surplus under a 2.4 kW heater
-  reads +100 W and stops the session at the end of every min_duration.
-  No reading (no entity, unavailable) → raw battery charge
 - The tracker runs in `_on_battery_update()`, before the diverters and
   even while BeemAI is disabled (it is a measurement).  Exposed as the
   System binary sensor "Grid Charge Reserve"

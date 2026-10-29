@@ -35,6 +35,17 @@ COMMAND_SETTLE_S = 15
 # many times before giving up — never read it as a hand toggle.
 COMMAND_RETRIES = 2
 IMPORT_TOLERANCE_W = 50  # Small grid import below this is noise, not real deficit
+# The battery moves by more than the plug reads: on 28/10 each switch of
+# the heater (2.2 kW at the plug) moved it by ~2.45 kW (9 switches,
+# 1.9–2.8 kW) — inverter and battery losses.  Rule 2 adds the plug
+# reading back divided by this.
+BATTERY_TO_PLUG_EFFICIENCY = 0.9
+# Surplus-loss stop: how long both start rules must stay false while
+# heating.  On 28/10 passing clouds took the surplus away for ~1 min,
+# and stopping after the 30 s start delay cut the session just before
+# the sun came back.  3 min per user: a longer appliance cycle still
+# ends the session.
+SURPLUS_LOSS_STOP_S = 3 * 60
 
 # Fully-heated detection: power must stay below this for FULLY_HEATED_SUSTAIN_S
 FULLY_HEATED_POWER_W = 50
@@ -78,9 +89,12 @@ class WaterHeaterController:
         self._last_ok_at: float | None = None
         self._active_soc_threshold: float | None = None
         # Arm for the surplus-loss stop (heating branch).  Set when the
-        # start rules go False after min_duration; cleared as soon as
-        # they go True again or when the switch turns off.
+        # start rules go False after min_duration; cleared once they
+        # have been True again for GRACE_SECONDS (since
+        # _surplus_back_since, reset on every False tick) or when the
+        # switch turns off.
         self._stop_armed_since: float | None = None
+        self._surplus_back_since: float | None = None
         # Tracks what state we last commanded (or observed at startup).
         # An observed state differing from this is treated as an
         # external transition (auto-off timer on the plug, manual flip,
@@ -378,12 +392,13 @@ class WaterHeaterController:
         # Start rules — computed once here so both idle (fire-time
         # validation) and heating (symmetric stop) see the same view.
         # While it heats, the heater's own draw comes out of the battery
-        # charge: add the plug's reading back, so rule 2 judges the
-        # surplus as if the heater were off.  Otherwise a 2.5 kW surplus
-        # stops a 2.4 kW heater at the end of every min_duration.
+        # charge: add it back (plug reading plus conversion losses), so
+        # rule 2 judges the surplus as if the heater were off.  Otherwise
+        # a 2.5 kW surplus stops a 2.2 kW heater at the end of every
+        # min_duration.
         surplus_w = charge_power_w
         if is_on and wh_power is not None and wh_power > 0:
-            surplus_w += wh_power
+            surplus_w += wh_power / BATTERY_TO_PLUG_EFFICIENCY
         rule1 = soc >= EXPORT_SOC_THRESHOLD and export_w > 0
         rule2 = (
             soc >= soc_threshold
@@ -461,7 +476,6 @@ class WaterHeaterController:
                 soc, consumption_w, import_w, now,
                 min_duration_s=min_duration_s,
                 start_conditions_met=(rule1 or rule2),
-                sustain_seconds=sustain_seconds,
             )
         else:
             # Idle branch — if we had an active session, the switch was
@@ -595,7 +609,6 @@ class WaterHeaterController:
         now: float,
         min_duration_s: int,
         start_conditions_met: bool,
-        sustain_seconds: int,
     ) -> str:
         """HEATING state: stop on SoC drop or sustained surplus loss.
 
@@ -609,9 +622,11 @@ class WaterHeaterController:
           (active start threshold − HYSTERESIS_PCT), provided
           ``min_duration_s`` has elapsed.
         - **Surplus lost** — once ``min_duration_s`` has elapsed, if
-          neither start rule is true for ``sustain_seconds``, we stop.
-          This is symmetric to the start path and is what prevents the
-          heater from draining the battery once solar fades.
+          neither start rule is true for ``SURPLUS_LOSS_STOP_S``, we
+          stop; the surplus must be back ``GRACE_SECONDS`` to call it
+          off.  Longer than the start delay, so a cloud or an appliance
+          cycle doesn't cut the session — it still ends one once solar
+          fades, before the heater drains the battery.
 
         ``min_duration_s`` acts as a floor on both stops: the heater
         always runs at least that long after any commanded turn-on,
@@ -664,16 +679,17 @@ class WaterHeaterController:
             )
 
         if not start_conditions_met:
+            self._surplus_back_since = None
             if self._stop_armed_since is None:
                 self._stop_armed_since = now
                 _LOGGER.info(
                     "Water heater: surplus lost while heating — "
-                    "waiting %ds sustained before stopping",
-                    sustain_seconds,
+                    "turning off in %ds unless it returns",
+                    SURPLUS_LOSS_STOP_S,
                 )
-                return f"heating: stop armed ({sustain_seconds}s)"
+                return f"heating: stop armed ({SURPLUS_LOSS_STOP_S}s)"
             sustained = now - self._stop_armed_since
-            if sustained >= sustain_seconds:
+            if sustained >= SURPLUS_LOSS_STOP_S:
                 _LOGGER.info(
                     "Water heater: surplus lost sustained %.0fs — "
                     "turning off (SoC=%.1f%%)",
@@ -683,11 +699,19 @@ class WaterHeaterController:
                 self._clear_session()
                 return f"stop: surplus lost (sustained {sustained:.0f}s)"
             return (
-                f"heating: stop sustaining {sustained:.0f}s/{sustain_seconds}s"
+                f"heating: stop sustaining "
+                f"{sustained:.0f}s/{SURPLUS_LOSS_STOP_S}s"
             )
 
-        # Conditions came back — disarm the stop timer.
+        # Conditions came back — disarm the stop timer once they have
+        # held GRACE_SECONDS: the battery swings ±300 W tick to tick
+        # under the heater, and a lone good tick must not restart the
+        # delay on a fading afternoon.
         if self._stop_armed_since is not None:
+            if self._surplus_back_since is None:
+                self._surplus_back_since = now
+            if now - self._surplus_back_since < GRACE_SECONDS:
+                return "heating: surplus back, stop still armed"
             _LOGGER.info("Water heater: surplus returned — stop arm cleared")
             self._stop_armed_since = None
         return f"heating: SoC {soc:.1f}% (stop at {stop_threshold:.1f}%)"

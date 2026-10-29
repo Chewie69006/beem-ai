@@ -208,3 +208,26 @@ later…  At 10:44 the car drew those 32 A (7995 W, import 4928 W).
       through and only the re-pause 5 s later failed; 27/10 00:23 the
       26/10 21:30 SCHEDULE session came back MANUAL — the switch read off
       or unknown for a tick, cause unconfirmed (no journal pass there)
+
+## Fix: water heater zig-zag on clouds (28/10 afternoon)
+- [x] Deployed code checked: the add-back runs (HA reloaded 12:19), plug
+      reads ~2.2 kW (rule flips between −679 and −721 W at 1.5 kW)
+- [x] Stops after min_duration: 13:05 and 13:28 clouds (solar 3.4 → 0.7
+      kW for ~60 s), 13:50 a +1.6 kW load on a surplus at the threshold,
+      14:07 real (1.1–1.4 kW after).  Restarts 35–70 s after each
+- [x] Battery step at 9 real switches: ~2.45 kW (1.9–2.8) for 2.2 kW at
+      the plug → add-back = plug / 0.9 (`BATTERY_TO_PLUG_EFFICIENCY`)
+- [x] Surplus-loss stop `SURPLUS_LOSS_STOP_S` (3 min per user; 10 min
+      proposed), decoupled from the start sustain number; the arm clears
+      only after the surplus is back `GRACE_SECONDS` (15 s)
+- [x] Replay of 28/10 (12:19–14:31): current code 6 stops simulated (4 real); with both
+      changes and 10 min, 1 (14:06, real 14:07).  Grace without ÷0.9 →
+      2–3 zig-zags.  With 3 min: 5 stops, each restarted 1.5–4 min later
+      (the 3–5 min appliance dips at 12:54, 13:18, 13:40, 14:02), 93 min
+      of heating, battery share 1.31 kWh (10 min: 107 min, 1.74 kWh;
+      current: 97 min, 1.41 kWh).  The ~1 min clouds are covered
+- [x] Tests: losses (−800 W under 2.2 kW → no arm), 2 min cloud, lone
+      good tick every minute → still stops, stop needs the full delay.
+      Red on HEAD with the constant only (3 fail); the lone-tick test
+      fails without the grace.  Full suite 514 passed
+- [x] Committed to main 29/10 (3 min); the user deploys to HA
