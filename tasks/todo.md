@@ -248,7 +248,6 @@ configurable ideally."
       (disabled BeemAI still notifies, no service, options update, WH
       hold — fails without the hold, hot tank).  Full suite 534 passed
 - [ ] Not deployed to the HA box
-- [ ] Open: 30 min re-arm picked by me — no real log replayed (HA box not
-      reachable from the cloud session); a car BeemAI is starting can
-      trigger an alert during its ~2 min start
+- [ ] Open: 30 min re-arm picked by me — no real log replayed yet; a car
+      BeemAI is starting can trigger an alert during its ~2 min start
 
