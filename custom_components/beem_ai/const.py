@@ -56,6 +56,15 @@ OPT_WEATHER_ENTITY = "weather_entity"
 OPT_NOTIFY_SERVICE = "notify_service"
 OPT_SUGGESTION_TIME = "suggestion_time"
 DEFAULT_SUGGESTION_TIME = "20:00:00"
+# Export alert: notify (same service) once the grid export holds at or
+# above the threshold for the duration.  Threshold 0 = no alert.
+OPT_EXPORT_ALERT_W = "export_alert_w"
+OPT_EXPORT_ALERT_S = "export_alert_s"
+DEFAULT_EXPORT_ALERT_W = 500
+DEFAULT_EXPORT_ALERT_S = 60
+EXPORT_ALERT_MAX_W = 10000
+EXPORT_ALERT_MIN_S = 10
+EXPORT_ALERT_MAX_S = 900
 
 DEFAULT_EV_REQUIRE_WATER_HEATER = True
 DEFAULT_EV_FOLLOW_SCHEDULE = True

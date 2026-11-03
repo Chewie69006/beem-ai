@@ -316,6 +316,23 @@ time. The **Charge Target Suggestion** sensor (System device) shows the value
 and what it was computed from. Information only — no battery setting is
 changed.
 
+### Grid export alert
+
+When the battery can't take the solar surplus any more, BeemAI can tell you
+— a good time to start the dishwasher or some heating rather than export:
+
+> Export de 1,2 kW vers le réseau depuis 1 min, batterie à 100 %.
+> C'est le moment de lancer le lave-vaisselle ou un peu de chauffage.
+> Chauffe-eau : déjà chaud.
+
+Sent to the same notification service as the evening suggestion, once the
+export has held at or above **Export Alert Threshold** (500 W by default,
+0 = off) for **Export Alert Duration** (60 s) — two numbers on the System
+device. One alert per export episode: the next one needs the export to stay
+under the threshold for 30 minutes first, so passing clouds don't send a
+burst of them. It waits while BeemAI is starting the water heater on that
+surplus. Information only, sent whatever the Enabled switch.
+
 ### EV Charger Modes
 
 | Mode | What BeemAI does |

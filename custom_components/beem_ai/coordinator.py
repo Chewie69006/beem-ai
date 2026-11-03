@@ -71,6 +71,10 @@ from .const import (
     OPT_NOTIFY_SERVICE,
     OPT_SUGGESTION_TIME,
     DEFAULT_SUGGESTION_TIME,
+    OPT_EXPORT_ALERT_W,
+    OPT_EXPORT_ALERT_S,
+    DEFAULT_EXPORT_ALERT_W,
+    DEFAULT_EXPORT_ALERT_S,
 )
 from .charge_planner import (
     Suggestion,
@@ -84,6 +88,7 @@ from .charge_planner import (
 )
 from .consumption_analyzer import ConsumptionAnalyzer
 from .energy_history import EnergyHistory, HistorySources, recorder_fetch
+from .export_alert import EXPORT_NOTIFY_TAG, ExportAlert, export_notification
 from .grid_charge_tracker import RESERVED_MIN_SOC, GridChargeTracker
 from .mqtt_client import BeemMqttClient
 from .state_store import StateStore
@@ -145,6 +150,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         self._energy_history = EnergyHistory(
             lambda *args: recorder_fetch(self.hass, *args)
         )
+        # Sustained grid export → notification (information only).
+        self._export_alert = ExportAlert()
         # Monotonic timestamp of the first tick observing overload
         # (cons ≥ OVERLOAD_THRESHOLD_W with positive import).  Cleared
         # when the overload clears.  Used to delay WH force-stop until
@@ -241,7 +248,8 @@ class BeemAICoordinator(DataUpdateCoordinator):
         return self._energy_history.base_load_w()
 
     def _read_history_options(self, options) -> None:
-        """Energy-history inputs, re-read on every options update."""
+        """Energy-history, suggestion and export-alert inputs, re-read
+        on every options update."""
         self.ev_charging_power_sensor: str = str(
             options.get(OPT_EV_CHARGING_POWER_SENSOR, "") or ""
         )
@@ -270,6 +278,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         )
         self.suggestion_time: str = str(
             options.get(OPT_SUGGESTION_TIME) or DEFAULT_SUGGESTION_TIME
+        )
+        self.export_alert_w: float = float(
+            options.get(OPT_EXPORT_ALERT_W, DEFAULT_EXPORT_ALERT_W)
+        )
+        self.export_alert_s: int = int(
+            options.get(OPT_EXPORT_ALERT_S, DEFAULT_EXPORT_ALERT_S)
         )
 
     def _history_sources(self) -> HistorySources:
@@ -424,10 +438,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
         if not await self._refresh_history():
             await self._update_suggestion()
             self.async_update_listeners()
-        service = self.notify_service.removeprefix("notify.")
-        if not service:
-            return
-        lang = "fr" if str(self.hass.config.language).startswith("fr") else "en"
+        lang = self._lang()
         if self.suggestion is not None:
             title, message = notification(
                 self.suggestion, self.state_store.battery.soc, lang,
@@ -436,20 +447,73 @@ class BeemAICoordinator(DataUpdateCoordinator):
             title, message = no_suggestion_notification(
                 self.suggestion_reason, lang,
             )
+        await self._notify(title, message, SUGGESTION_NOTIFY_TAG)
+
+    def _lang(self) -> str:
+        """Notification language: French if HA is in French."""
+        return "fr" if str(self.hass.config.language).startswith("fr") else "en"
+
+    async def _notify(self, title: str, message: str, tag: str) -> None:
+        """Send to the configured notify service, if any.  A failure
+        only logs a warning."""
+        service = self.notify_service.removeprefix("notify.")
+        if not service:
+            return
         try:
             await self.hass.services.async_call(
                 "notify", service,
-                {
-                    "title": title,
-                    "message": message,
-                    "data": {"tag": SUGGESTION_NOTIFY_TAG},
-                },
+                {"title": title, "message": message, "data": {"tag": tag}},
                 blocking=False,
             )
         except Exception:  # noqa: BLE001
             _LOGGER.warning(
                 "Notification via notify.%s failed", service, exc_info=True,
             )
+
+    # ---- Export alert (information only) ----
+
+    def _check_export(self) -> None:
+        """Feed the export alert one live sample; notify when it is due.
+
+        Runs whatever the Enabled switch, like the evening notification:
+        it drives nothing.  It waits while BeemAI is timing a water
+        heater start — that surplus is about to go to the tank.
+        """
+        battery = self.state_store.battery
+        export_w = battery.export_power_w
+        hold = (
+            self.state_store.enabled
+            and self._water_heater is not None
+            and self._water_heater.is_starting
+        )
+        held = self._export_alert.update(
+            export_w, self.export_alert_w, self.export_alert_s, hold=hold,
+        )
+        if held is None:
+            return
+        _LOGGER.info(
+            "Export alert: %.0f W to the grid for %.0f s (threshold %.0f W "
+            "/ %d s), SoC %.1f%% — notify service: %s",
+            export_w, held, self.export_alert_w, self.export_alert_s,
+            battery.soc, self.notify_service or "none",
+        )
+        if not self.notify_service:
+            return
+        wh = self._water_heater
+        if wh is None:
+            wh_state = None
+        elif wh.is_heating:
+            wh_state = "heating"
+        elif wh.fully_heated:
+            wh_state = "full"
+        else:
+            wh_state = "off"
+        title, message = export_notification(
+            export_w, held, battery.soc, wh_state, self._lang(),
+        )
+        self.hass.async_create_task(
+            self._notify(title, message, EXPORT_NOTIFY_TAG)
+        )
 
     async def async_setup(self) -> None:
         """Create all modules, log in, start MQTT, schedule tasks."""
@@ -730,6 +794,7 @@ class BeemAICoordinator(DataUpdateCoordinator):
             battery.battery_power_w, battery.import_power_w,
         ):
             self.hass.async_add_executor_job(self._grid_charge.save)
+        self._check_export()
         # Evaluate surplus diverters (water heater first, then EV charger)
         if self._water_heater or self._ev_charger:
             soc = self.state_store.battery.soc

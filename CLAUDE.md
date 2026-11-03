@@ -218,6 +218,24 @@
   sun P10/P50/P90, consumption, heating, temperature and their sources,
   hourly breakdown; `reason` when there is none
 
+## Grid Export Alert (information only)
+- `export_alert.py` is pure.  `ExportAlert.update()` runs in
+  `_on_battery_update()` (`_check_export()`), whatever the Enabled
+  switch: export ≥ "Export Alert Threshold" (`OPT_EXPORT_ALERT_W`, 500 W,
+  0 = off) for "Export Alert Duration" (`OPT_EXPORT_ALERT_S`, 60 s) → one
+  notification to `OPT_NOTIFY_SERVICE`, tag `beem_ai_export` (not the
+  evening tag), French if HA is in French.  Two System number entities,
+  stored in the options
+- Dips shorter than `EXPORT_ALERT_GRACE_S` (15 s, at most half the
+  duration) don't restart the timer.  One alert per episode: re-armed once
+  the export has stayed under the threshold `EXPORT_ALERT_REARM_S` (30 min)
+- `hold` while BeemAI is timing a water heater solar start
+  (`WaterHeaterController.is_starting`, fresh ticks only, BeemAI enabled):
+  that surplus is about to go to the tank; the timer restarts once it is
+  on.  Not the EV: with the car away its start attempts loop, and holding
+  on them would block the alert when it matters.  A car BeemAI is
+  starting can still trigger one (the Wallbox takes up to ~2 min)
+
 ## Multi-Device Structure
 Three HA device types, each with distinct `DeviceInfo`:
 - **Battery** (`battery_{entry_id}`): SoC, power, SoH, grid, consumption, charge target/power

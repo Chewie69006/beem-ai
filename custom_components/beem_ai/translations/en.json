@@ -126,7 +126,7 @@
         "data_description": {
           "solar_forecast_entities": "Solcast 'Forecast Today' and 'Forecast Tomorrow' (any sensor with a 'detailedHourly' or 'detailedForecast' attribute).",
           "weather_entity": "For tomorrow's temperature (heating). Without it, the last days' temperature is used.",
-          "notify_service": "Where to send the evening suggestion (e.g. mobile_app_<phone>). Leave empty for no notification.",
+          "notify_service": "Where to send the evening suggestion and the grid export alert (e.g. mobile_app_<phone>). Leave empty for no notification. The export alert is set with the System numbers 'Export Alert Threshold' (0 = off) and 'Export Alert Duration'.",
           "suggestion_time": "When to send it — before the off-peak window starts."
         }
       }

@@ -126,7 +126,7 @@
         "data_description": {
           "solar_forecast_entities": "Les capteurs Solcast « Forecast Today » et « Forecast Tomorrow » (ou tout capteur avec un attribut « detailedHourly » ou « detailedForecast »).",
           "weather_entity": "Pour la température du lendemain (chauffage). Sans elle, la température des derniers jours est utilisée.",
-          "notify_service": "Où envoyer la suggestion du soir (ex. mobile_app_<téléphone>). Laisser vide pour ne pas être notifié.",
+          "notify_service": "Où envoyer la suggestion du soir et l'alerte d'export vers le réseau (ex. mobile_app_<téléphone>). Laisser vide pour ne pas être notifié. L'alerte d'export se règle avec les nombres « Export Alert Threshold » (0 = désactivée) et « Export Alert Duration » de l'appareil System.",
           "suggestion_time": "Quand l'envoyer — avant le début des heures creuses."
         }
       }

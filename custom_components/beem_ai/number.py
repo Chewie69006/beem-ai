@@ -12,6 +12,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
+    EXPORT_ALERT_MAX_S,
+    EXPORT_ALERT_MAX_W,
+    EXPORT_ALERT_MIN_S,
+    OPT_EXPORT_ALERT_S,
+    OPT_EXPORT_ALERT_W,
     OPT_EV_TARGET_SOC,
     OPT_EV_SOC_HYSTERESIS,
     OPT_WH_CHARGE_POWER_THRESHOLD,
@@ -43,6 +48,8 @@ async def async_setup_entry(
         BeemAIWaterHeaterFullyHeatedThreshold(coordinator, entry),
         BeemAIEvTargetSoc(coordinator, entry),
         BeemAIEvSocHysteresis(coordinator, entry),
+        BeemAIExportAlertThreshold(coordinator, entry),
+        BeemAIExportAlertDuration(coordinator, entry),
     ])
 
 
@@ -378,5 +385,76 @@ class BeemAIEvSocHysteresis(CoordinatorEntity, NumberEntity):
         self.hass.config_entries.async_update_entry(
             self._entry,
             options={**self._entry.options, OPT_EV_SOC_HYSTERESIS: value},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIExportAlertThreshold(CoordinatorEntity, NumberEntity):
+    """Grid export (W) that triggers the export notification; 0 = off."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Export Alert Threshold"
+    _attr_icon = "mdi:transmission-tower-export"
+    _attr_native_min_value = 0
+    _attr_native_max_value = EXPORT_ALERT_MAX_W
+    _attr_native_step = 50
+    _attr_native_unit_of_measurement = "W"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "export_alert_threshold"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_export_alert_threshold"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def native_value(self) -> float | None:
+        return float(self.coordinator.export_alert_w)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.export_alert_w = value
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_EXPORT_ALERT_W: value},
+        )
+        self.async_write_ha_state()
+
+
+class BeemAIExportAlertDuration(CoordinatorEntity, NumberEntity):
+    """How long (s) the export must hold before the notification."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Export Alert Duration"
+    _attr_icon = "mdi:timer-outline"
+    _attr_native_min_value = EXPORT_ALERT_MIN_S
+    _attr_native_max_value = EXPORT_ALERT_MAX_S
+    _attr_native_step = 10
+    _attr_native_unit_of_measurement = "s"
+    _attr_mode = NumberMode.BOX
+    _attr_translation_key = "export_alert_duration"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_export_alert_duration"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        return _system_device_info(self._entry)
+
+    @property
+    def native_value(self) -> float | None:
+        return float(self.coordinator.export_alert_s)
+
+    async def async_set_native_value(self, value: float) -> None:
+        seconds = int(value)
+        self.coordinator.export_alert_s = seconds
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, OPT_EXPORT_ALERT_S: seconds},
         )
         self.async_write_ha_state()

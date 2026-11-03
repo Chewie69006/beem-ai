@@ -181,6 +181,16 @@ class WaterHeaterController:
         return self._is_switch_on()
 
     @property
+    def is_starting(self) -> bool:
+        """True while a solar start is being timed: the start rules held
+        on a recent tick and the sustain delay is running."""
+        if self._sustained_since is None or self._last_ok_at is None:
+            return False
+        # Fresh only: the timer isn't cleared outside the idle branch
+        # (Manual, BeemAI disabled), so a stale one must not count.
+        return time.monotonic() - self._last_ok_at < GRACE_SECONDS
+
+    @property
     def fully_heated(self) -> bool:
         """Return True if the WH reached full temperature today."""
         return self._fully_heated

@@ -231,3 +231,24 @@ later…  At 10:44 the car drew those 32 A (7995 W, import 4928 W).
       Red on HEAD with the constant only (3 fail); the lone-tick test
       fails without the grace.  Full suite 514 passed
 - [x] Committed to main 29/10 (3 min); the user deploys to HA
+
+## Feature: grid export alert (03/11)
+Per user: a notification like the 20:00 one as soon as the house exports,
+to start the dishwasher or some heating instead.  "500 W over 1 minute,
+configurable ideally."
+- [x] `ExportAlert` (pure): ≥ threshold for the duration, 15 s dip grace,
+      one alert per episode, re-armed after 30 min under the threshold
+- [x] System numbers "Export Alert Threshold" (W, 0 = off, default 500)
+      and "Export Alert Duration" (s, 10–900, default 60), in the options
+- [x] Same notify service as the evening suggestion, own tag, fr/en text
+      (export kW, duration, SoC, water heater state)
+- [x] Held while the water heater's solar start is timed (it takes the
+      surplus); not for the EV (start attempts loop with the car away)
+- [x] Tests: detector rules, text, replays through `_on_battery_update`
+      (disabled BeemAI still notifies, no service, options update, WH
+      hold — fails without the hold, hot tank).  Full suite 534 passed
+- [ ] Not deployed to the HA box
+- [ ] Open: 30 min re-arm picked by me — no real log replayed (HA box not
+      reachable from the cloud session); a car BeemAI is starting can
+      trigger an alert during its ~2 min start
+
