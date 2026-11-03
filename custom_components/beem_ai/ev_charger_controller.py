@@ -135,6 +135,10 @@ SCHEDULED_STATUS = "scheduled"
 # switch reads off and the Wallbox resumes the session by itself.
 QUEUED_STATUS_PREFIX = "waiting in queue"
 
+# Wallbox status with no car plugged in (HA Wallbox ``ChargerStatus``
+# READY / DISCONNECTED, lowercased): no Auto solar start.
+NO_CAR_STATUSES = frozenset({"ready", "disconnected"})
+
 
 class EvMode(enum.Enum):
     """User-selected controller mode (from the BeemAI select entity)."""
@@ -623,6 +627,14 @@ class EvChargerController:
         now: float,
     ) -> str:
         """IDLE state: check if we should start charging (Auto mode)."""
+        # 3/11: unplugged all day, a start every ~2.5 min (each given up
+        # after PENDING_START_GRACE_S) — the Wallbox cloud rate-limits.
+        status = self._read_status()
+        if status in NO_CAR_STATUSES:
+            self._export_sustained_since = None
+            self._last_headroom_ok_at = None
+            return f"idle: no car connected ({status!r})"
+
         wh_ok = water_heater_heating is None or water_heater_heating
         conditions_met = (
             wh_ok

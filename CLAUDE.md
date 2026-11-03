@@ -129,6 +129,12 @@
   (heater on, ~9.6 kW); its return was adopted as Manual, trimmed to 6 A,
   stopped, and the car never charged.  Switch unavailable with a known
   status (`Ready`: car unplugged) still ends the session
+- No car, no solar start: status `Ready` / `Disconnected` (`NO_CAR_STATUSES`)
+  skips the Auto start in `_evaluate_idle()` and drops the sustain timer, so
+  the 30 s delay runs from the plug-in.  3/11 from 10:33: unplugged, switch
+  unavailable, a set_value + turn_on every ~2.5 min to a rate-limited cloud.
+  No status entity (or unavailable) → starts as before.  `Locked` (no car)
+  is not in the set
 - A pause via the API takes the Wallbox off its schedule.  When
   `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, every Auto-rule stop
   owes a press (`_hand_back_owed`), made on the first idle tick — once the

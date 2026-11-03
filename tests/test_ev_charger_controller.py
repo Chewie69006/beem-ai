@@ -234,6 +234,38 @@ async def test_no_transition_before_sustain_period():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch,status", [
+    ("unavailable", "Ready"),  # 3/11 from 10:33, car unplugged
+    ("off", "Disconnected"),
+])
+async def test_no_solar_start_without_a_car(switch, status):
+    """3/11: unplugged, solar headroom — a start (set_value + turn_on)
+    every ~2.5 min, each given up 120 s later.  No car, no start; the
+    sustain delay runs from the plug-in."""
+    ctrl, hass = _make_controller(with_status=True)
+    hass.set_switch(switch)
+    hass.set_status("Waiting for car demand")
+    with patch("time.monotonic", return_value=999.0):
+        await _eval(ctrl)  # sustain timer armed, then the car leaves
+    hass.set_status(status)
+    t = 1000.0
+    for dt in (0, SUSTAIN_SECONDS, SUSTAIN_SECONDS + PENDING_START_GRACE_S + 1):
+        with patch("time.monotonic", return_value=t + dt):
+            await _eval(ctrl)
+    hass.services.async_call.assert_not_called()
+
+    t += SUSTAIN_SECONDS + PENDING_START_GRACE_S + 2
+    hass.set_switch("off")
+    hass.set_status("Waiting for car demand")  # plugged in
+    with patch("time.monotonic", return_value=t):
+        await _eval(ctrl)
+    hass.services.async_call.assert_not_called()
+    with patch("time.monotonic", return_value=t + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+    assert ctrl.is_charging is True
+
+
+@pytest.mark.asyncio
 async def test_always_starts_at_min_amps():
     ctrl, hass = _make_controller()
 
