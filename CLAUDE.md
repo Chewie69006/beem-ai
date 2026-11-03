@@ -119,11 +119,24 @@
   It gets 32 A once, then the Force contract: no regulation, no SoC /
   no-demand stop, no 7 kW trim, and `is_hands_off()` suspends the
   coordinator's `_handle_overload()`.  Under Manual it is piloted again
+- Off for now is not over: status `Waiting in queue by …` (the Wallbox's
+  own Power Boost / Power Sharing / Eco-Smart holding the charge back), or
+  switch and status both unavailable (cloud dropout), keeps the running
+  session as it is and skips the idle rules (through a dropout a running
+  session stays `is_hands_off()`: the car may still draw); `_idle_scheduled` is not
+  refreshed either, so a schedule start seen after one is still the
+  schedule's.  2/11 22:32: Power Boost queued the scheduled charge for 90 s
+  (heater on, ~9.6 kW); its return was adopted as Manual, trimmed to 6 A,
+  stopped, and the car never charged.  Switch unavailable with a known
+  status (`Ready`: car unplugged) still ends the session
 - A pause via the API takes the Wallbox off its schedule.  When
-  `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, `_stop_session()` presses
-  it after every Auto-rule stop, and so does selecting Auto while the
-  charger is off.  Never on Disabled / master off / Manual stops.  The button
-  is plain config, assigned on every options update — not in `entity_ids`
+  `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, every Auto-rule stop
+  owes a press (`_hand_back_owed`), made on the first idle tick — once the
+  pause shows, never with it: pressed with the pause, it was lost (2/11
+  22:35, the pause showed 11 s later and stayed all night).  Selecting Auto
+  while the charger is off presses it too.  Never on Disabled / master off /
+  Manual stops.  The button is plain config, assigned on every options
+  update — not in `entity_ids`
 - A stop that doesn't take — switch still on at a tick after
   `_stop_session()` with no idle tick between (25–27/10, car idle: the
   Wallbox API answered 403 to every pause of the loops, unseen here since
