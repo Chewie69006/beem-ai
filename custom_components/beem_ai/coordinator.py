@@ -102,6 +102,11 @@ UPDATE_INTERVAL = timedelta(minutes=2)
 # short grace) so the two diverters don't act on stale views.
 OVERLOAD_THRESHOLD_W = 7000
 OVERLOAD_WH_FORCE_STOP_GRACE_S = 15.0
+# Off-peak, with the Wallbox waiting on its schedule: an overload may be
+# the schedule's 32 A charge, which the cloud shows 45–55 s late (31/10,
+# 2/11, 3/11).  The water heater gets this long for it to be adopted
+# (hands-off) before it is cut.
+OVERLOAD_SCHEDULE_START_GRACE_S = 120.0
 # Energy history: re-read the recorder's statistics every hour; the first
 # read waits a minute so the recorder and our own sensors are up.
 HISTORY_REFRESH_INTERVAL = timedelta(hours=1)
@@ -854,6 +859,12 @@ class BeemAICoordinator(DataUpdateCoordinator):
         those deliberately accept going over the limit, so sacrificing
         the water heater would buy nothing.  The grace timer is reset so
         it starts fresh if that session ends while still overloaded.
+
+        Off-peak, while the Wallbox waits on its schedule, the grace is
+        OVERLOAD_SCHEDULE_START_GRACE_S: the car may already draw before
+        the switch shows it.  2/11: the car alone armed the timer at
+        21:30:33, the heater's top-up started at 21:31:03 and was cut 5 s
+        later; the session was adopted at 21:31:18.
         """
         if self._ev_charger is not None and self._ev_charger.is_hands_off(
             self.ev_charger_mode
@@ -880,19 +891,28 @@ class BeemAICoordinator(DataUpdateCoordinator):
             self._overload_started_at = None
             return
 
+        grace = OVERLOAD_WH_FORCE_STOP_GRACE_S
+        if (
+            self._ev_charger is not None
+            and self._ev_charger.awaits_schedule(self.ev_charger_mode)
+            and self._tariff is not None
+            and self._tariff.is_in_cheapest_period(datetime.now())
+        ):
+            grace = OVERLOAD_SCHEDULE_START_GRACE_S
+
         if self._overload_started_at is None:
             self._overload_started_at = now
             _LOGGER.warning(
                 "Overload detected (cons=%.0fW, import=%.0fW) — "
                 "EV will throttle this tick; WH force-stop in %.0fs "
                 "if not resolved",
-                consumption_w, import_w, OVERLOAD_WH_FORCE_STOP_GRACE_S,
+                consumption_w, import_w, grace,
             )
             return
 
         sustained = now - self._overload_started_at
         if (
-            sustained >= OVERLOAD_WH_FORCE_STOP_GRACE_S
+            sustained >= grace
             and self._water_heater is not None
             and self._water_heater.is_heating
         ):

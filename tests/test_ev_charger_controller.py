@@ -234,6 +234,38 @@ async def test_no_transition_before_sustain_period():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch,status", [
+    ("unavailable", "Ready"),  # 3/11 from 10:33, car unplugged
+    ("off", "Disconnected"),
+])
+async def test_no_solar_start_without_a_car(switch, status):
+    """3/11: unplugged, solar headroom — a start (set_value + turn_on)
+    every ~2.5 min, each given up 120 s later.  No car, no start; the
+    sustain delay runs from the plug-in."""
+    ctrl, hass = _make_controller(with_status=True)
+    hass.set_switch(switch)
+    hass.set_status("Waiting for car demand")
+    with patch("time.monotonic", return_value=999.0):
+        await _eval(ctrl)  # sustain timer armed, then the car leaves
+    hass.set_status(status)
+    t = 1000.0
+    for dt in (0, SUSTAIN_SECONDS, SUSTAIN_SECONDS + PENDING_START_GRACE_S + 1):
+        with patch("time.monotonic", return_value=t + dt):
+            await _eval(ctrl)
+    hass.services.async_call.assert_not_called()
+
+    t += SUSTAIN_SECONDS + PENDING_START_GRACE_S + 2
+    hass.set_switch("off")
+    hass.set_status("Waiting for car demand")  # plugged in
+    with patch("time.monotonic", return_value=t):
+        await _eval(ctrl)
+    hass.services.async_call.assert_not_called()
+    with patch("time.monotonic", return_value=t + SUSTAIN_SECONDS):
+        await _eval(ctrl)
+    assert ctrl.is_charging is True
+
+
+@pytest.mark.asyncio
 async def test_always_starts_at_min_amps():
     ctrl, hass = _make_controller()
 
@@ -1790,6 +1822,77 @@ async def test_schedule_session_ends_with_the_wallbox():
     assert hass.services.async_call.call_args_list == []
 
 
+# The Wallbox off for now: its load management queued the charge, or its
+# cloud dropped out (switch and status unavailable).
+BREAKS = [
+    ("off", "Waiting in queue by Power Boost"),
+    ("unavailable", "unavailable"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch, status", BREAKS)
+async def test_schedule_session_survives_a_break(switch, status):
+    """2/11 22:32: Power Boost queued the scheduled charge for 90 s (the
+    heater on, ~9.6 kW).  Seen as over, its return was taken for a user's
+    resume: trimmed to 6A, stopped, and left paused all night."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+    hass.services.async_call.reset_mock()
+
+    hass.set_switch(switch)
+    hass.set_status(status)
+    for t in (1100.0, 1105.0, 1190.0):
+        with patch("time.monotonic", return_value=t):
+            await _eval(ctrl, **NIGHT)
+    # Unseen, the car may still draw: the heater keeps its place.
+    assert ctrl.is_hands_off("Auto") is (switch == "unavailable")
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=1195.0):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode == StartMode.SCHEDULE
+    assert ctrl.current_amps == 32
+    assert ctrl.is_hands_off("Auto") is True
+    assert hass.services.async_call.call_args_list == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch, status", BREAKS)
+async def test_schedule_start_seen_after_a_break_is_the_schedule(
+    switch, status,
+):
+    ctrl, hass = _schedule_controller()
+    with patch("time.monotonic", return_value=1000.0):
+        await _eval(ctrl, **NIGHT)  # idle in Scheduled
+    hass.set_switch(switch)
+    hass.set_status(status)
+    with patch("time.monotonic", return_value=1005.0):
+        await _eval(ctrl, **NIGHT)
+    hass.set_switch("on")
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=1010.0):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode == StartMode.SCHEDULE
+
+
+@pytest.mark.asyncio
+async def test_unplugged_car_ends_the_session():
+    """3/11 07:39: unplugged, the switch went unavailable but the status
+    read Ready — over, not a break."""
+    ctrl, hass = _schedule_controller()
+    await _schedule_fires(ctrl, hass)
+
+    hass.set_switch("unavailable")
+    hass.set_status("Ready")
+    with patch("time.monotonic", return_value=1100.0):
+        await _eval(ctrl, **NIGHT)
+
+    assert ctrl._start_mode is None
+
+
 @pytest.mark.asyncio
 async def test_resume_after_a_pause_is_still_piloted():
     """A resume from 'Paused' (the user, from the Wallbox app) is not
@@ -1896,18 +1999,49 @@ async def test_auto_stop_hands_back_to_schedule():
     t = await _solar_session_hits_soc_floor(ctrl, hass)
 
     assert ctrl.is_charging is False
-    names = _service_names(hass)
-    # Pause first, then the schedule; the user's amps once the pause shows.
-    assert names.index(("homeassistant", "turn_off")) < names.index(
-        ("button", "press")
-    )
-    assert _press_calls(hass) == [
-        call("button", "press", {"entity_id": RESUME_ID}),
-    ]
+    # Pause first; the user's amps and the schedule once the pause shows.
+    assert _press_calls(hass) == []
     assert hass._amps == MIN_CHARGE_AMPS
     with patch("time.monotonic", return_value=t + 5):
         await _eval(ctrl, **NIGHT)
     assert hass._amps == 32
+    assert _press_calls(hass) == [
+        call("button", "press", {"entity_id": RESUME_ID}),
+    ]
+    with patch("time.monotonic", return_value=t + 10):
+        await _eval(ctrl, **NIGHT)
+    assert len(_press_calls(hass)) == 1  # once per stop
+
+
+@pytest.mark.asyncio
+async def test_hand_back_waits_for_a_late_pause():
+    """2/11 22:35: "Resume schedule" pressed with the pause was lost —
+    the pause showed 11 s later and the Wallbox stayed paused all night,
+    the schedule window open.  Pressed once the pause shows, the
+    schedule takes the charge back, at full power."""
+    ctrl, hass = _schedule_controller(user_amps=32, resume=True)
+    t = await _start_charging(ctrl, hass)
+    hass.set_status("Charging")
+    _wallbox_keeps_it_on(hass)
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, soc=SOC_STOP_THRESHOLD - 1, meter_power_w=0.0)
+    with patch("time.monotonic", return_value=t + 10):  # still reads on
+        await _eval(ctrl, **QUIET_NIGHT)
+    assert _press_calls(hass) == []
+
+    hass.set_switch("off")
+    hass.set_status("Paused")
+    with patch("time.monotonic", return_value=t + 15):
+        await _eval(ctrl, **QUIET_NIGHT)
+    assert len(_press_calls(hass)) == 1
+
+    hass.set_switch("on")  # the open window picks it up at once
+    hass.set_status("Charging")
+    with patch("time.monotonic", return_value=t + 20):
+        await _eval(ctrl, **NIGHT)
+    assert ctrl._start_mode == StartMode.SCHEDULE
+    assert ctrl.current_amps == 32
+    assert ctrl.is_hands_off("Auto") is True
 
 
 @pytest.mark.asyncio
@@ -1932,7 +2066,9 @@ async def test_resume_schedule_failure_is_tolerated():
 
     hass.services.async_call.side_effect = flaky
 
-    await _solar_session_hits_soc_floor(ctrl, hass)
+    t = await _solar_session_hits_soc_floor(ctrl, hass)
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)  # the press, on the first idle tick
 
     assert ctrl.is_charging is False
 
@@ -2105,9 +2241,11 @@ async def test_not_following_schedule_never_presses_resume():
     ctrl, hass = _schedule_controller(user_amps=32, resume=True)
     ctrl.follow_schedule = False
 
-    await _solar_session_hits_soc_floor(ctrl, hass)
+    t = await _solar_session_hits_soc_floor(ctrl, hass)
     assert ctrl.is_charging is False
     hass.set_status("Paused")
+    with patch("time.monotonic", return_value=t + 5):
+        await _eval(ctrl, **NIGHT)
     await ctrl.handle_mode_change("Auto")
     await ctrl.resume_schedule_if_idle()
 
@@ -2151,36 +2289,29 @@ async def test_resume_schedule_if_idle():
 # ---- A stop the Wallbox doesn't take (27/10) --------------------------
 
 
-def _wallbox_keeps_it_on(hass, *, flips=False):
-    """The 27/10 Wallbox: after our pause and "Resume schedule" the switch
-    reads on again at the next tick.  By default HA never sees the pause
-    (the switch doesn't change); ``flips``: the pause showed and the
-    schedule restarted the charge between two ticks."""
+def _wallbox_keeps_it_on(hass):
+    """The 27/10 Wallbox: our pause never shows (the API answered 403);
+    the switch reads on at every tick."""
     real_call = hass._service_call
 
     async def call_(domain, service, data):
-        if (domain, service) == ("homeassistant", "turn_off") and not flips:
+        if (domain, service) == ("homeassistant", "turn_off"):
             return
         await real_call(domain, service, data)
-        if flips and domain == "button":
-            hass.set_switch("on")
 
     hass.services.async_call.side_effect = call_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("flips", [False, True])
-async def test_idle_car_kept_on_by_the_wallbox_is_not_stopped_every_minute(
-    flips,
-):
+async def test_idle_car_kept_on_by_the_wallbox_is_not_stopped_every_minute():
     """27/10 10:24–10:44: a solar start, the car not drawing, the Wallbox
-    back on 5 s after each no-demand stop.  BeemAI stopped it and adopted
+    still on after each no-demand stop.  BeemAI stopped it and adopted
     it again once a minute, at the 32A it had just restored — and at
     10:44 the car drew those 32A into the 7 kW limit."""
     ctrl, hass = _schedule_controller(user_amps=32, resume=True)
     t = await _start_charging(ctrl, hass)
     hass.set_status("Waiting for car demand")
-    _wallbox_keeps_it_on(hass, flips=flips)
+    _wallbox_keeps_it_on(hass)
 
     ticks = 19 * 60 // 5
     for i in range(1, ticks):
@@ -2188,7 +2319,7 @@ async def test_idle_car_kept_on_by_the_wallbox_is_not_stopped_every_minute(
             await _eval(ctrl)
 
     assert _service_names(hass).count(("homeassistant", "turn_off")) == 1
-    assert len(_press_calls(hass)) == 1
+    assert _press_calls(hass) == []  # owed until the pause shows
     assert ctrl.is_charging is True
     assert ctrl.current_amps == MIN_CHARGE_AMPS
 
@@ -2245,7 +2376,7 @@ async def test_held_session_retries_its_auto_stops_late():
     ctrl, hass = _schedule_controller(user_amps=32, resume=True)
     t = await _start_charging(ctrl, hass)
     hass.set_status("Waiting for car demand")
-    _wallbox_keeps_it_on(hass, flips=True)
+    _wallbox_keeps_it_on(hass)
     for dt in (5, 5 + STATUS_NO_DEMAND_SUSTAIN_S, 10 + STATUS_NO_DEMAND_SUSTAIN_S):
         with patch("time.monotonic", return_value=t + dt):
             await _eval(ctrl)

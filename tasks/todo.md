@@ -231,3 +231,20 @@ later…  At 10:44 the car drew those 32 A (7995 W, import 4928 W).
       Red on HEAD with the constant only (3 fail); the lone-tick test
       fails without the grace.  Full suite 514 passed
 - [x] Committed to main 29/10 (3 min); the user deploys to HA
+
+## EV did not charge on the night of 2/11 (3/11)
+- [x] Recorder: 21:31 schedule starts at 32 A → 22:32:52 "Waiting in queue by
+      Power Boost" (heater on, ~9.6 kW) → 22:34:22 Charging, adopted as Manual,
+      trimmed to 6 A, SoC-floor stop (house battery 9 %) → "Resume schedule"
+      pressed with the pause, pause shown 11 s later → Paused until unplug 07:39
+- [x] Fix 1: queued status / cloud dropout = off for now, session kept
+- [x] Fix 2: Auto stop's hand-back owed until the pause shows (idle tick)
+- [x] Replay tests red on HEAD (7), full suite 519 passed
+- [ ] Not committed, not deployed to HA — up to the user
+
+## Heater top-up cut when the Wallbox schedule starts (31/10, 2/11)
+- [x] Logs: car draws from ~21:30:20, switch shown 45–55 s late; the car alone
+      arms the overload timer, the 21:31 top-up is cut on its next tick
+- [x] Fix: off-peak, while `awaits_schedule()`, heater grace 120 s (was 15 s)
+- [x] Replay of 2/11 (+ 31/10 shape) red with 15 s, full suite 526 passed
+- [ ] Not committed, not deployed to HA — up to the user

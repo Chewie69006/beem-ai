@@ -72,6 +72,15 @@
   no restart until the next window
 - `force_stop_overload()` arms the 15 min cooldown, otherwise the rule would
   switch the heater straight back on
+- The top-up starts at 21:31, inside the Wallbox schedule's first minute:
+  the car draws from ~21:30:20, but the cloud shows the switch on 45–55 s
+  later.  31/10 and 2/11 the car alone armed the overload timer and the
+  heater was cut seconds after it started.  So in the cheapest period,
+  while `EvChargerController.awaits_schedule()` (Auto, Follow Schedule,
+  `_idle_scheduled`, no session yet — whatever the switch reads), the
+  force-stop grace is `OVERLOAD_SCHEDULE_START_GRACE_S` (120 s), not 15 s.
+  Adoption then suspends `_handle_overload()`; nothing adopted by then →
+  the overload is something else, cut as before
 - The plug reports a command a moment late, and the coordinator runs
   `_handle_overload()` then `evaluate()` in the same tick: `evaluate()`
   skips the tick while the switch still shows the pre-command state
@@ -119,11 +128,35 @@
   It gets 32 A once, then the Force contract: no regulation, no SoC /
   no-demand stop, no 7 kW trim, and `is_hands_off()` suspends the
   coordinator's `_handle_overload()`.  Under Manual it is piloted again
+- Until it is adopted, `awaits_schedule()` stretches the heater's overload
+  grace to 120 s off-peak (see Water Heater Off-Peak Top-Up): the switch
+  shows a scheduled start 45–55 s late, and on the tick it does, the
+  overload check runs before `evaluate()` adopts.  Piloted sessions, Manual,
+  Follow Schedule off and daytime keep the 15 s rule
+- Off for now is not over: status `Waiting in queue by …` (the Wallbox's
+  own Power Boost / Power Sharing / Eco-Smart holding the charge back), or
+  switch and status both unavailable (cloud dropout), keeps the running
+  session as it is and skips the idle rules (through a dropout a running
+  session stays `is_hands_off()`: the car may still draw); `_idle_scheduled` is not
+  refreshed either, so a schedule start seen after one is still the
+  schedule's.  2/11 22:32: Power Boost queued the scheduled charge for 90 s
+  (heater on, ~9.6 kW); its return was adopted as Manual, trimmed to 6 A,
+  stopped, and the car never charged.  Switch unavailable with a known
+  status (`Ready`: car unplugged) still ends the session
+- No car, no solar start: status `Ready` / `Disconnected` (`NO_CAR_STATUSES`)
+  skips the Auto start in `_evaluate_idle()` and drops the sustain timer, so
+  the 30 s delay runs from the plug-in.  3/11 from 10:33: unplugged, switch
+  unavailable, a set_value + turn_on every ~2.5 min to a rate-limited cloud.
+  No status entity (or unavailable) → starts as before.  `Locked` (no car)
+  is not in the set
 - A pause via the API takes the Wallbox off its schedule.  When
-  `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, `_stop_session()` presses
-  it after every Auto-rule stop, and so does selecting Auto while the
-  charger is off.  Never on Disabled / master off / Manual stops.  The button
-  is plain config, assigned on every options update — not in `entity_ids`
+  `OPT_EV_CHARGER_RESUME_SCHEDULE` (button) is set, every Auto-rule stop
+  owes a press (`_hand_back_owed`), made on the first idle tick — once the
+  pause shows, never with it: pressed with the pause, it was lost (2/11
+  22:35, the pause showed 11 s later and stayed all night).  Selecting Auto
+  while the charger is off presses it too.  Never on Disabled / master off /
+  Manual stops.  The button is plain config, assigned on every options
+  update — not in `entity_ids`
 - A stop that doesn't take — switch still on at a tick after
   `_stop_session()` with no idle tick between (25–27/10, car idle: the
   Wallbox API answered 403 to every pause of the loops, unseen here since

@@ -9,6 +9,7 @@ coordinator force-stops the water heater — bypassing its min-duration
 floor.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,8 +21,10 @@ from custom_components.beem_ai.const import (
 )
 from custom_components.beem_ai.coordinator import (
     BeemAICoordinator,
+    OVERLOAD_SCHEDULE_START_GRACE_S,
     OVERLOAD_WH_FORCE_STOP_GRACE_S,
 )
+from custom_components.beem_ai.tariff_manager import TariffManager
 from custom_components.beem_ai.ev_charger_controller import (
     EvChargerController,
     StartMode,
@@ -339,3 +342,119 @@ async def test_force_stop_on_slow_plug_keeps_offpeak_window_open(coordinator):
     )
     hass.flush()
     assert wh.is_heating
+
+
+# -- The Wallbox schedule starting the car before the switch shows it --
+
+HC = [{"label": "HC", "start": "21:26", "end": "05:26", "price": 0.15}]
+
+
+def _at(when: datetime):
+    return patch(
+        "custom_components.beem_ai.coordinator.datetime",
+        **{"now.return_value": when},
+    )
+
+
+# 2/11 from beem_ai.log: (seconds after 21:30:00, grid W, battery W).
+# The schedule starts the car at ~21:30:20; consumption = grid − battery.
+NIGHT_2_11 = [
+    (13, 119, -782), (18, 294, -823), (23, 2519, -2131),
+    (28, -355, -5600), (33, 1313, -6310), (38, 2319, -6248),
+    (43, 2218, -6000), (48, 1120, -6620), (53, 1176, -6727),
+    (58, 1157, -7950), (63, 1251, -7786), (68, 3346, -6790),
+    (73, 1235, -6708), (78, 1168, -7737), (83, 1120, -7928),
+    (88, 1102, -6700), (93, 1196, -7131),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on_at", [78, 68])
+async def test_schedule_start_keeps_offpeak_heater(coordinator, switch_on_at):
+    """2/11, 21:30–21:31 replayed through the real tick.  The car alone
+    arms the overload timer at 21:30:33, the heater's top-up starts at
+    21:31:03, the switch reads on only at 21:31:16 (tick 78).  It was
+    cut at 21:31:08.  Tick 68: the switch flips on the tick the heater
+    was cut — 31/10, where the cut and the adoption shared a tick."""
+    states = {
+        "switch.wallbox": "off",
+        "number.wallbox_amps": "32",
+        "sensor.wallbox_status": "Scheduled",
+    }
+    coordinator.hass.states.get.side_effect = (
+        lambda e: MagicMock(state=states[e]) if e in states else None
+    )
+    ev = EvChargerController(
+        coordinator.hass, "switch.wallbox", "number.wallbox_amps",
+        status_entity_id="sensor.wallbox_status",
+    )
+    coordinator._ev_charger = ev
+    coordinator.ev_charger_mode = EV_MODE_AUTO
+    wh = WaterHeaterController(FakeHass(), SWITCH_ID)
+    coordinator._water_heater = wh
+    coordinator.water_heater_mode = "Auto"
+    coordinator._tariff = TariffManager(0.25, HC)
+    battery = coordinator.state_store.battery
+
+    for s, grid_w, battery_w in NIGHT_2_11:
+        if s >= switch_on_at:
+            states["switch.wallbox"] = "on"
+            states["sensor.wallbox_status"] = "Charging"
+        battery.meter_power_w = grid_w
+        battery.battery_power_w = battery_w
+        with patch("time.monotonic", return_value=1000.0 + s), _at(
+            datetime(2026, 11, 2, 21, 30 + s // 60, s % 60)
+        ):
+            await coordinator._evaluate_surplus_diverters(
+                soc=11.0, export_w=0.0,
+            )
+        if s == 63:
+            assert wh.is_heating  # the top-up started
+
+    assert wh.is_heating
+    assert ev._start_mode == StartMode.SCHEDULE
+    assert coordinator._overload_started_at is None  # hands-off
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode, start_mode, follow, hour", [
+    (EV_MODE_AUTO, StartMode.AUTO, True, 21),  # Auto session we pilot
+    (EV_MODE_MANUAL, None, True, 21),  # Manual pilots any start
+    (EV_MODE_AUTO, None, False, 21),  # schedule not followed
+    (EV_MODE_AUTO, None, True, 15),  # daytime
+])
+async def test_schedule_grace_only_while_awaiting_it_offpeak(
+    coordinator, mode, start_mode, follow, hour,
+):
+    """Anywhere else the heater still goes after 15 s."""
+    states = _charging_ev(coordinator, mode, start_mode)
+    states["switch.wallbox"] = "on" if start_mode else "off"
+    coordinator._ev_charger._idle_scheduled = start_mode is None
+    coordinator._ev_charger.follow_schedule = follow
+    coordinator._tariff = TariffManager(0.25, HC)
+
+    with _at(datetime(2026, 11, 2, hour, 31)):
+        await _overload_past_grace(coordinator)
+
+    coordinator._water_heater.force_stop_overload.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_that_never_starts_still_cuts(coordinator):
+    """Nothing adopted: the overload is something else — the heater
+    goes after OVERLOAD_SCHEDULE_START_GRACE_S."""
+    states = _charging_ev(coordinator, EV_MODE_AUTO)
+    states["switch.wallbox"] = "off"
+    coordinator._ev_charger._idle_scheduled = True
+    coordinator._tariff = TariffManager(0.25, HC)
+
+    with _at(datetime(2026, 11, 2, 21, 31)):
+        await _overload_past_grace(coordinator)
+        coordinator._water_heater.force_stop_overload.assert_not_called()
+        with patch("time.monotonic",
+                   return_value=500.0 + OVERLOAD_SCHEDULE_START_GRACE_S):
+            await coordinator._handle_overload(
+                consumption_w=9000.0, import_w=2000.0,
+            )
+
+    coordinator._water_heater.force_stop_overload.assert_called_once()
