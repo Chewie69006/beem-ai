@@ -241,3 +241,10 @@ later…  At 10:44 the car drew those 32 A (7995 W, import 4928 W).
 - [x] Fix 2: Auto stop's hand-back owed until the pause shows (idle tick)
 - [x] Replay tests red on HEAD (7), full suite 519 passed
 - [ ] Not committed, not deployed to HA — up to the user
+
+## Heater top-up cut when the Wallbox schedule starts (31/10, 2/11)
+- [x] Logs: car draws from ~21:30:20, switch shown 45–55 s late; the car alone
+      arms the overload timer, the 21:31 top-up is cut on its next tick
+- [x] Fix: off-peak, while `awaits_schedule()`, heater grace 120 s (was 15 s)
+- [x] Replay of 2/11 (+ 31/10 shape) red with 15 s, full suite 526 passed
+- [ ] Not committed, not deployed to HA — up to the user

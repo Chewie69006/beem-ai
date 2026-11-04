@@ -312,6 +312,21 @@ class EvChargerController:
             and self._start_mode == StartMode.SCHEDULE
         )
 
+    def awaits_schedule(self, mode: str) -> bool:
+        """True until a charge the Wallbox schedule starts is adopted:
+        no session yet, and the next one would be the schedule's.
+
+        Whatever the switch reads: the cloud shows it on 45–55 s after
+        the car draws, and the tick it does runs the coordinator's
+        overload check before evaluate() adopts the session.
+        """
+        return (
+            self._start_mode is None
+            and self._idle_scheduled
+            and self.follow_schedule
+            and _mode_from_str(mode) == EvMode.AUTO
+        )
+
     async def resume_schedule_if_idle(self) -> None:
         """Hand an idle charger back to its Wallbox schedule.
 
